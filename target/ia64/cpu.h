@@ -128,6 +128,15 @@
 #define IA64_FW_IDENTITY_SIZE 0x00100000ULL
 #define IA64_FIRMWARE_IVT_BASE 0x10000ULL
 #define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
+/*
+ * IA-64 OS loaders alias physical memory through region 7 with a fixed
+ * 0x8000_0000 virtual base (region-7 VA = PA + 0x8000_0000).  The loader's
+ * own region-7 TRs map e.g. 0xe000_0000_8100_0000 -> PA 0x0100_0000, and its
+ * free-memory descriptors near the top of RAM carry addresses such as
+ * 0xe000_0000_bf7f_ffe0 for PA 0x3f7f_ffe0.  SAL's boot-time TLB-miss handler
+ * fills otherwise-unmapped region-7 pages with the same bias.
+ */
+#define IA64_FW_REGION7_DIRECTMAP_BASE 0x0000000080000000ULL
 #define IA64_LOCAL_SAPIC_PA   0x00000000fee00000ULL
 #define IA64_LOCAL_SAPIC_SIZE 0x00200000ULL
 #define IA64_PAL_IO_BLOCK_PA  0x000080000c000000ULL
@@ -1156,6 +1165,18 @@ static inline bool ia64_sal_boot_identity_pa(const CPUIA64State *env,
     phys = va & IA64_REGION7_PHYS_MASK;
     if (phys >= IA64_FW_BOOT_IDENTITY_LIMIT) {
         return false;
+    }
+
+    /*
+     * Region-7 accesses above the direct-map virtual base resolve to physical
+     * memory biased down by that base (see IA64_FW_REGION7_DIRECTMAP_BASE).
+     * Without the bias a top-of-RAM descriptor page that no explicit TR
+     * covers would alias unbacked physical memory 0x8000_0000 too high; on a
+     * guest whose RAM is smaller than that alias the loader's writes are
+     * dropped and its free list reads back a NULL link.
+     */
+    if (phys >= IA64_FW_REGION7_DIRECTMAP_BASE) {
+        phys -= IA64_FW_REGION7_DIRECTMAP_BASE;
     }
 
     *pa = phys;

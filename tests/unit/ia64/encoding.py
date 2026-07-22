@@ -19447,6 +19447,38 @@ test_sal_boot_identity_handles_nonzero_region7_rid = require_registers(
         "r31": REGION7_DATA,
     }, entry=0x10)
 
+# Region-7 boot accesses above the 0x8000_0000 direct-map base resolve to
+# physical memory biased down by that base: VA 0xe000_0000_8000_1240 (region-7
+# offset 0x8000_1240) must read PA 0x1240, not the unbiased identity alias
+# 0x8000_1240.  The IA-64 loaders rely on this to reach top-of-RAM free-memory
+# descriptors that no explicit TR covers; without the bias those pages alias
+# unbacked physical memory 0x8000_0000 too high (see IA64_FW_REGION7_-
+# DIRECTMAP_BASE) and the loader's free list reads back a NULL link.
+REGION7_DIRECTMAP_DATA = bundle_words(0x00, 0x00c0ffee1234abcd, 0, 0)[0]
+test_sal_boot_identity_region7_directmap_bias = require_registers(
+    "sal_boot_identity_region7_directmap_bias", [
+        (0x10, *movl_mlx(17, 0xe000000080001240)),
+        (0x20, *movl_mlx(18, (1 << 8) | (13 << 2))),
+        (0x30, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
+        (0x40, 0x00, mov_m_gr_cr(2, 2), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_rr_write(18, 17), nop_i(),
+         nop_i()),
+        (0x60, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x70, 0x00, mov_gr_psr_full(19), nop_i(),
+         nop_i()),
+        (0x80, 0x08, ld8(31, 17), nop_i(),
+         nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(),
+         br_cond(0x90, 0x90)),
+        (0x1240, 0x00, 0x00c0ffee1234abcd, 0,
+         0),
+    ], {
+        "ip": 0x90,
+        "exception": IA64_EXCP_NONE,
+        "r31": REGION7_DIRECTMAP_DATA,
+    }, entry=0x10)
+
 test_sal_boot_identity_does_not_override_explicit_rid_miss = \
     require_registers(
         "sal_boot_identity_does_not_override_explicit_rid_miss", [
@@ -24358,6 +24390,8 @@ TEST_NAMES = {
         test_sal_boot_identity_handles_nonzero_region7_rid,
     "sal_boot_identity_does_not_override_explicit_rid_miss":
         test_sal_boot_identity_does_not_override_explicit_rid_miss,
+    "sal_boot_identity_region7_directmap_bias":
+        test_sal_boot_identity_region7_directmap_bias,
     "region7_untranslated_high_va_faults":
         test_region7_untranslated_high_va_faults,
     "region6_untranslated_data_faults": test_region6_untranslated_data_faults,
