@@ -104,6 +104,7 @@ CASE_NAMES = (
     'speculative_load_defers_psr_ed',
     'speculative_load_handler_psr_ed_defers_retry',
     'speculative_load_no_recovery_tlb_miss_faults',
+    'speculative_load_defers_via_dcr_without_ed',
     'speculative_recovery_unaligned_defers',
     'speculative_unimplemented_physical_unaligned_defers',
     'speculative_unaligned_defers',
