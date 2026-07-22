@@ -12678,12 +12678,15 @@ static void ia64_cpu_realize(DeviceState *dev, Error **errp)
 
     /* Resolve the ia32-exec property: NULL/"stop" => diagnostic stop. */
     if (cpu->ia32_exec == NULL || strcmp(cpu->ia32_exec, "stop") == 0) {
-        cpu->ia32_exec_abort = false;
+        cpu->ia32_exec_mode = IA64_IA32_EXEC_STOP;
     } else if (strcmp(cpu->ia32_exec, "abort") == 0) {
-        cpu->ia32_exec_abort = true;
+        cpu->ia32_exec_mode = IA64_IA32_EXEC_ABORT;
+    } else if (strcmp(cpu->ia32_exec, "ignore") == 0) {
+        cpu->ia32_exec_mode = IA64_IA32_EXEC_IGNORE;
     } else {
-        error_setg(errp, "invalid ia32-exec '%s' (expected 'stop' or 'abort')",
-                   cpu->ia32_exec);
+        error_setg(errp,
+                   "invalid ia32-exec '%s' (expected 'stop', 'abort' or "
+                   "'ignore')", cpu->ia32_exec);
         return;
     }
 

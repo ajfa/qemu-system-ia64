@@ -1277,6 +1277,13 @@ static inline void ia64_itc_write(CPUIA64State *env, uint64_t value)
     env->itm_last_match_valid = false;
 }
 
+/* Handling of an attempted IA-32 instruction execution (see ia32_exec). */
+typedef enum IA64Ia32ExecMode {
+    IA64_IA32_EXEC_STOP,    /* dump state + pause the VM (default) */
+    IA64_IA32_EXEC_ABORT,   /* cpu_abort(): terminate QEMU (historical) */
+    IA64_IA32_EXEC_IGNORE,  /* raise Disabled ISA Transition to the guest */
+} IA64Ia32ExecMode;
+
 struct ArchCPU {
     CPUState parent_obj;
     CPUIA64State env;
@@ -1291,12 +1298,16 @@ struct ArchCPU {
     uint32_t package_cpus;
     /*
      * What to do when the guest attempts to execute an IA-32 instruction,
-     * which this model does not implement.  "stop" (default) dumps state and
-     * pauses the VM for post-mortem inspection; "abort" keeps the historical
-     * cpu_abort() behaviour.  Set via -cpu <model>,ia32-exec=stop|abort.
+     * which this model does not implement.  Set via
+     * -cpu <model>,ia32-exec=stop|abort|ignore (default stop):
+     *   stop   - dump state and pause the VM for post-mortem inspection;
+     *   abort  - keep the historical cpu_abort() (terminates QEMU);
+     *   ignore - deliver the architected Disabled ISA Transition fault to the
+     *            guest so the IA-64 OS services it (typically killing the
+     *            offending IA-32 process) and keeps running.
      */
     char *ia32_exec;
-    bool ia32_exec_abort;
+    IA64Ia32ExecMode ia32_exec_mode;
 };
 
 /*

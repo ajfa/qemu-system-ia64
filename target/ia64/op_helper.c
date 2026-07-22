@@ -1558,16 +1558,28 @@ void helper_raise_exception(CPUIA64State *env, uint32_t exception,
     cpu_loop_exit(cs);
 }
 
+static G_NORETURN void
+ia64_raise_disabled_isa_transition(CPUIA64State *env, uint64_t fault_ip,
+                                   uint32_t fault_slot);
+
 /*
  * The guest tried to *execute* an IA-32 instruction (PSR.is=1), which this
  * model does not implement.  The IA-64->IA-32 transition itself (br.ia, rfi
  * with IPSR.is) has already happened and keeps its architected behaviour; this
- * is the first instruction fetch in IA-32 mode.
+ * is the first instruction fetch in IA-32 mode.  Behaviour is selected by the
+ * ia32-exec property (default "stop"):
  *
- * Default ("stop"): dump full architectural state to the QEMU log and pause
- * the VM via the guest-panicked path (like PPC's checkstop) so the monitor and
- * gdbstub stay usable for post-mortem inspection -- recon boots then yield data
- * instead of a SIGABRT.  "abort" keeps the historical cpu_abort() behaviour.
+ *   "abort"  - historical cpu_abort(): terminate QEMU with a diagnostic.
+ *   "ignore" - deliver the architected Disabled ISA Transition fault to the
+ *              guest, exactly as a processor without a working IA-32 engine
+ *              would.  The IA-64 OS services it (typically terminating the
+ *              offending IA-32 process) and keeps running; the VM is not
+ *              stopped.  This is the "run IA-64 OSes, let IA-32 apps fault"
+ *              mode.
+ *   "stop"   - dump full architectural state to the QEMU log and pause the VM
+ *              via the guest-panicked path (like PPC's checkstop) so the
+ *              monitor and gdbstub stay usable for post-mortem inspection --
+ *              recon boots then yield data instead of a SIGABRT.
  */
 void helper_ia32_unsupported(CPUIA64State *env)
 {
@@ -1575,11 +1587,21 @@ void helper_ia32_unsupported(CPUIA64State *env)
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     FILE *f;
 
-    if (cpu->ia32_exec_abort) {
+    if (cpu->ia32_exec_mode == IA64_IA32_EXEC_ABORT) {
         cpu_abort(cs,
                   "IA-32 instruction set execution is not implemented "
                   "(IP=0x%016" PRIx64 " PSR=0x%016" PRIx64 ")\n",
                   env->ip, env->psr);
+    }
+
+    if (cpu->ia32_exec_mode == IA64_IA32_EXEC_IGNORE) {
+        /*
+         * env->ip is the IA-32 EIP reached after the transition; deliver the
+         * Disabled ISA Transition fault at it (fault_slot 0 -- IA-32 has no
+         * bundle slots).  helper_raise_exception() is G_NORETURN, so the guest
+         * OS's handler runs and the machine keeps running.
+         */
+        ia64_raise_disabled_isa_transition(env, env->ip, 0);
     }
 
     f = qemu_log_trylock();
