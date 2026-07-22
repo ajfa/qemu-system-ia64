@@ -23,6 +23,7 @@
 #include "exec/translation-block.h"
 #include "hw/core/sysemu-cpu-ops.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/boards.h"
 #include "accel/tcg/cpu-ops.h"
 #include "tcg/debug-assert.h"
 #include "tcg/tcg-op.h"
@@ -12623,6 +12624,14 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
         timer_del(cpu->itm_timer);
     }
     memset(&cpu->env, 0, sizeof(cpu->env));
+    /*
+     * Bound of the persistent region-7 KSEG physical alias (see
+     * ia64_sal_boot_identity_pa()): the loader/kernel reach top-of-RAM
+     * structures through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE,
+     * valid only for backed RAM.
+     */
+    cpu->env.region7_directmap_limit = IA64_FW_REGION7_DIRECTMAP_BASE +
+        (current_machine ? current_machine->ram_size : 0);
     cpu->env.alat_full = cpu->alat_full;
     cpu->env.fr[1] = IA64_FR_ONE;
     cpu->env.pr[0] = 1;

@@ -736,6 +736,13 @@ typedef struct CPUArchState {
     uint16_t      pending_purge_data_count;
     uint16_t      pending_purge_inst_count;
 
+    /*
+     * Upper bound (region-7 offset) of the persistent KSEG physical alias:
+     * IA64_FW_REGION7_DIRECTMAP_BASE + guest RAM size.  Set at realize from the
+     * machine RAM size; see ia64_sal_boot_identity_pa().
+     */
+    uint64_t      region7_directmap_limit;
+
     /* pending external interrupt */
     uint8_t pending_extint;
     bool pal_halt_wake;
@@ -1139,21 +1146,10 @@ static inline bool ia64_sal_boot_identity_pa(const CPUIA64State *env,
     uint64_t phys;
 
     /*
-     * SAL owns the IVT until ExitBootServices() completes.  In that
-     * environment its TLB miss handlers may install identity TC entries for
-     * OS-loader misses, using the current region's RID.  This is a miss
-     * fallback only; caller-installed TR/TC entries must take precedence.
-     */
-    if (!ia64_sal_boot_environment_active(env)) {
-        return false;
-    }
-
-    /*
-     * This fallback models SAL's boot-time miss handler for otherwise
-     * unmapped identity accesses.  If firmware or the OS loader has already
-     * installed an explicit TR/TC for the same virtual range, a RID mismatch
-     * must remain an architectural TLB miss instead of silently falling back
-     * to a different identity physical address.
+     * An explicit TR/TC for the same virtual range always wins: a RID
+     * mismatch there must remain an architectural TLB miss rather than
+     * silently falling back to a different identity physical address.  (This
+     * is only reached after the cached TLB/TR lookup has already missed.)
      */
     if (ia64_tlb_has_explicit_va_mapping(env->tlb_data, env->tlb_data_count,
                                          va) ||
@@ -1163,18 +1159,37 @@ static inline bool ia64_sal_boot_identity_pa(const CPUIA64State *env,
     }
 
     phys = va & IA64_REGION7_PHYS_MASK;
+
+    /*
+     * Persistent region-7 physical alias (the "KSEG" direct map): the IA-64
+     * OS loaders and the early kernel reach loader-built structures near the
+     * top of RAM through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE
+     * before the kernel's self-mapped page tables are active (e.g. KdInitSystem
+     * walks a loader debug-block list this way).  Model it as a last-resort
+     * translation that survives the loader -> kernel handoff, bounded to backed
+     * RAM (region7_directmap_limit = base + guest RAM size) so that paged
+     * system space and the recursive page-table self-map window -- both above
+     * the alias -- still take ordinary TLB-miss faults.
+     */
+    if (ia64_rr_index(va) == 7 &&
+        phys >= IA64_FW_REGION7_DIRECTMAP_BASE &&
+        phys < env->region7_directmap_limit) {
+        *pa = phys - IA64_FW_REGION7_DIRECTMAP_BASE;
+        return true;
+    }
+
+    /*
+     * The remaining identity behaviour models SAL's boot-time TLB miss handler
+     * and only applies while SAL still owns the IVT.
+     */
+    if (!ia64_sal_boot_environment_active(env)) {
+        return false;
+    }
+
     if (phys >= IA64_FW_BOOT_IDENTITY_LIMIT) {
         return false;
     }
 
-    /*
-     * Region-7 accesses above the direct-map virtual base resolve to physical
-     * memory biased down by that base (see IA64_FW_REGION7_DIRECTMAP_BASE).
-     * Without the bias a top-of-RAM descriptor page that no explicit TR
-     * covers would alias unbacked physical memory 0x8000_0000 too high; on a
-     * guest whose RAM is smaller than that alias the loader's writes are
-     * dropped and its free list reads back a NULL link.
-     */
     if (phys >= IA64_FW_REGION7_DIRECTMAP_BASE) {
         phys -= IA64_FW_REGION7_DIRECTMAP_BASE;
     }

@@ -19508,6 +19508,37 @@ test_sal_boot_identity_region7_directmap_bias = require_registers(
         "r31": REGION7_DIRECTMAP_DATA,
     }, entry=0x10)
 
+# The region-7 KSEG physical alias (VA = PA + 0x8000_0000) must persist after
+# the SAL boot environment ends (cr.iva != the firmware IVT): the early kernel
+# reaches loader-built structures near the top of RAM through it before its
+# self-mapped page tables are active.  Here cr.iva is a non-firmware (kernel)
+# IVT, so ia64_sal_boot_environment_active() is false, yet the region-7 offset
+# 0x8000_1240 must still resolve to PA 0x1240.  Bounded to backed RAM
+# (region7_directmap_limit), so it is a no-op outside physical memory.
+test_region7_kseg_alias_persists_without_sal = require_registers(
+    "region7_kseg_alias_persists_without_sal", [
+        (0x10, *movl_mlx(17, 0xe000000080001240)),
+        (0x20, *movl_mlx(18, (1 << 8) | (13 << 2))),
+        (0x30, *movl_mlx(2, 0x100000)),
+        (0x40, 0x00, mov_m_gr_cr(2, 2), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_rr_write(18, 17), nop_i(),
+         nop_i()),
+        (0x60, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x70, 0x00, mov_gr_psr_full(19), nop_i(),
+         nop_i()),
+        (0x80, 0x08, ld8(31, 17), nop_i(),
+         nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(),
+         br_cond(0x90, 0x90)),
+        (0x1240, 0x00, 0x00c0ffee1234abcd, 0,
+         0),
+    ], {
+        "ip": 0x90,
+        "exception": IA64_EXCP_NONE,
+        "r31": REGION7_DIRECTMAP_DATA,
+    }, entry=0x10)
+
 test_sal_boot_identity_does_not_override_explicit_rid_miss = \
     require_registers(
         "sal_boot_identity_does_not_override_explicit_rid_miss", [
@@ -24423,6 +24454,8 @@ TEST_NAMES = {
         test_sal_boot_identity_does_not_override_explicit_rid_miss,
     "sal_boot_identity_region7_directmap_bias":
         test_sal_boot_identity_region7_directmap_bias,
+    "region7_kseg_alias_persists_without_sal":
+        test_region7_kseg_alias_persists_without_sal,
     "region7_untranslated_high_va_faults":
         test_region7_untranslated_high_va_faults,
     "region6_untranslated_data_faults": test_region6_untranslated_data_faults,

@@ -168,6 +168,7 @@ CASE_NAMES = (
     'sal_boot_identity_does_not_override_explicit_rid_miss',
     'sal_boot_identity_handles_nonzero_region7_rid',
     'sal_boot_identity_region7_directmap_bias',
+    'region7_kseg_alias_persists_without_sal',
     'short_vhpt_entry_not_present_aborts_to_dtlb_miss',
     'short_vhpt_ifetch_read_only_raises_inst_access',
     'short_vhpt_not_present_entry_is_cached',
