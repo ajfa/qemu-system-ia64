@@ -59,6 +59,7 @@ CASE_NAMES = (
     'pal_cache_shared_info_merced_unimplemented',
     'pal_brand_info_merced_unimplemented',
     'pal_logical_to_physical_merced_unimplemented',
+    'pal_call_clears_return_reg_nat',
     'pal_freq_ratios_reserved_arg',
     'pal_halt_info',
     'pal_halt_info_bad_buffer',

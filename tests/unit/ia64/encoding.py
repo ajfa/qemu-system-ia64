@@ -20960,6 +20960,30 @@ test_pal_logical_to_physical_merced_unimplemented = require_registers(
      "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="merced")
 
+# Regression: a PAL procedure returns its status in GR8; on hardware that
+# register write clears the NaT bit.  r8-r11 are PAL *output* registers, so a
+# caller may leave one NaT before the call -- the result must not come back NaT.
+# (XP's SETUPLDR wedged on exactly this: a `st8 [r30]=r8` of the still-NaT PAL
+# status raised NaT Consumption.)  Here r8 is forced NaT with an ld8.fill under
+# ar.unat, then PAL_VERSION is called; r8 must be non-NaT afterwards.
+test_pal_call_clears_return_reg_nat = require_registers(
+    "pal_call_clears_return_reg_nat", [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0), nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(8, 6, 0), nop_i(), nop_i()),
+        (0x30, 0x00, nop_m(), addl(28, PAL_VERSION, 0), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, PAL_PROC_ENTRY)),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+        (0x200, 0x00, 0, 0, 0),
+    ], {
+        "ip": 0x50,
+        "r8": 0,
+        "r8_nat": 0,
+        "r9": PAL_VERSION_VALUE,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 # CPUID identity on merced: CPUID[3] = family 0x07, model 0, rev 8 (C2 stepping)
 # = 0x0000000007000804 (249720-009); CPUID[4] = 0, i.e. brl NOT implemented
 # (245319-002 brl page) -- the bit Windows keys KF_BRL off.
@@ -24615,6 +24639,7 @@ TEST_NAMES = {
         test_pal_brand_info_merced_unimplemented,
     "pal_logical_to_physical_merced_unimplemented":
         test_pal_logical_to_physical_merced_unimplemented,
+    "pal_call_clears_return_reg_nat": test_pal_call_clears_return_reg_nat,
     "cpuid_merced": test_cpuid_merced,
     "pal_vm_page_size": test_pal_vm_page_size,
     "pal_vm_page_size_reserved_arg": test_pal_vm_page_size_reserved_arg,

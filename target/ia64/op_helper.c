@@ -3990,6 +3990,21 @@ uint32_t helper_pal_dispatch(CPUIA64State *env)
     }
 
     /*
+     * Every PAL procedure returns its status/values in GR8-GR11.  On hardware
+     * PAL writes these as ordinary register writes, which clear the NaT bit;
+     * the PAL calling convention (SDM Vol.2 sec 11.10) lists r8-r11 as return
+     * registers, so a NaT left in one of them before the call must not survive
+     * the return.  helper_*() above set env->gr[8..11] but not env->nat, so
+     * clear the NaT bits here -- otherwise a caller that leaves an output
+     * register NaT before the call (legal: r8-r11 are outputs) consumes a
+     * bogus NaT on the result.  (Observed: XP SETUPLDR wedges on such a store.)
+     */
+    ia64_gr_nat_set(env, 8, false);
+    ia64_gr_nat_set(env, 9, false);
+    ia64_gr_nat_set(env, 10, false);
+    ia64_gr_nat_set(env, 11, false);
+
+    /*
      * PAL_PROC is a firmware portal, not a normal C function.  Static
      * calls arrive with a plain branch, stacked calls with br.call; the
      * PAL trampoline returns with a plain branch to b0 in both cases.
