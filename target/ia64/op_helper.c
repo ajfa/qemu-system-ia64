@@ -18,6 +18,8 @@
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/probe.h"
 #include "system/memory.h"
+#include "system/runstate.h"
+#include "qapi/qapi-events-run-state.h"
 #include "fpu/softfloat.h"
 #include "qemu/timer.h"
 
@@ -1556,12 +1558,64 @@ void helper_raise_exception(CPUIA64State *env, uint32_t exception,
     cpu_loop_exit(cs);
 }
 
+/*
+ * The guest tried to *execute* an IA-32 instruction (PSR.is=1), which this
+ * model does not implement.  The IA-64->IA-32 transition itself (br.ia, rfi
+ * with IPSR.is) has already happened and keeps its architected behaviour; this
+ * is the first instruction fetch in IA-32 mode.
+ *
+ * Default ("stop"): dump full architectural state to the QEMU log and pause
+ * the VM via the guest-panicked path (like PPC's checkstop) so the monitor and
+ * gdbstub stay usable for post-mortem inspection -- recon boots then yield data
+ * instead of a SIGABRT.  "abort" keeps the historical cpu_abort() behaviour.
+ */
 void helper_ia32_unsupported(CPUIA64State *env)
 {
-    cpu_abort(env_cpu(env),
-              "IA-32 instruction set execution is not implemented "
-              "(IP=0x%016" PRIx64 " PSR=0x%016" PRIx64 ")\n",
-              env->ip, env->psr);
+    CPUState *cs = env_cpu(env);
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+    FILE *f;
+
+    if (cpu->ia32_exec_abort) {
+        cpu_abort(cs,
+                  "IA-32 instruction set execution is not implemented "
+                  "(IP=0x%016" PRIx64 " PSR=0x%016" PRIx64 ")\n",
+                  env->ip, env->psr);
+    }
+
+    f = qemu_log_trylock();
+    if (f) {
+        /*
+         * env->ip is the IA-32 EIP (32-bit) reached after the transition;
+         * PSR.is is set.  GR8..GR31 hold the architected IA-32 register block.
+         * cpu_dump_state() follows with the full GR/predicate/CFM/RSE state.
+         */
+        fprintf(f, "IA-32 execution attempt (unimplemented iVE): "
+                "IA-32 EIP=0x%08" PRIx64 " PSR=0x%016" PRIx64
+                " (PSR.is=%d)\n",
+                (uint64_t)(env->ip & 0xffffffff), env->psr,
+                (env->psr & IA64_PSR_IS) ? 1 : 0);
+        fprintf(f, "Architected IA-32 GR block (GR8..GR31):\n");
+        for (int i = 8; i <= 31; i++) {
+            fprintf(f, " r%-2d=0x%016" PRIx64 "%s",
+                    i, env->gr[i], ((i - 7) % 4 == 0) ? "\n" : "");
+        }
+        cpu_dump_state(cs, f, 0);
+        qemu_log_unlock(f);
+    }
+
+    /*
+     * Emit a GUEST_PANICKED QMP event and force the VM into the paused
+     * guest-panicked run state.  This mirrors the "pause" branch of
+     * qemu_system_guest_panicked() directly rather than going through it, so
+     * the behaviour does not depend on the -action panic= setting (whose
+     * default would poweroff/continue).  vm_stop() is vCPU-thread safe: it
+     * schedules the stop and parks this CPU, so the guest cannot resume and
+     * re-enter the unimplemented IA-32 fetch.  Monitor and gdbstub stay usable.
+     */
+    cs->crash_occurred = true;
+    qapi_event_send_guest_panicked(GUEST_PANIC_ACTION_PAUSE, NULL);
+    vm_stop(RUN_STATE_GUEST_PANICKED);
+    cpu_loop_exit_noexc(cs);
 }
 
 static G_NORETURN void

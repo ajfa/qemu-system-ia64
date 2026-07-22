@@ -20,6 +20,7 @@ CASE_NAMES = (
     'br_ctop_self_loop_budgeted',
     'br_ctop_strcpy_pipeline_stops_on_first_zero_word',
     'br_ia_ia32_unsupported_aborts_after_state_transition',
+    'br_ia_ia32_stop_pauses_vm',
     'br_ia_montecito_native_ia32_disabled_fault',
     'br_ia_nonzero_qp_illegal',
     'br_ia_psr_di_disabled_transition_fault',

@@ -1289,6 +1289,14 @@ struct ArchCPU {
     uint32_t threads_per_core;
     uint32_t package_base;
     uint32_t package_cpus;
+    /*
+     * What to do when the guest attempts to execute an IA-32 instruction,
+     * which this model does not implement.  "stop" (default) dumps state and
+     * pauses the VM for post-mortem inspection; "abort" keeps the historical
+     * cpu_abort() behaviour.  Set via -cpu <model>,ia32-exec=stop|abort.
+     */
+    char *ia32_exec;
+    bool ia32_exec_abort;
 };
 
 /*

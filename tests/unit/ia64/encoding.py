@@ -6,7 +6,7 @@
 import re
 
 from .runner import (Completion, ExpectedExit, MicroProgram, encode_bundles,
-                     run_expected_exit, run_microprogram)
+                     run_expected_exit, run_guest_panic_stop, run_microprogram)
 from .fpmodel import (BINARY32_EDGE_VECTORS, BINARY64_EDGE_VECTORS,
                       binary32_to_spill, binary64_to_spill,
                       deterministic_words, fnorm_setf_sig,
@@ -3414,6 +3414,25 @@ def run_program_expect_failure(qemu, bundles, entry=0x10, timeout=3,
         expected_exit=ExpectedExit(),
     )
     return run_expected_exit(qemu, program)
+
+
+def run_program_expect_ia32_stop(qemu, bundles, entry=0x10, timeout=6,
+                                 cpu=None):
+    program = MicroProgram(
+        name="ia64-expected-ia32-stop",
+        bundles=encode_bundles(normalized_bundles(bundles), bundle_words),
+        entry=entry,
+        expected=StateExpectation(),
+        completion=Completion(terminal_ip=None, timeout_s=timeout),
+        cpu=cpu,
+    )
+    return run_guest_panic_stop(qemu, program)
+
+
+def require_ia32_stop(name, bundles, entry=0x10, cpu=None):
+    def tc(qemu):
+        run_program_expect_ia32_stop(qemu, bundles, entry=entry, cpu=cpu)
+    return tc
 
 
 def require_qemu_failure(name, bundles, expected_substrings, entry=0x10,
@@ -22975,6 +22994,7 @@ test_br_ia_montecito_native_ia32_disabled_fault = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+# ia32-exec=abort keeps the historical cpu_abort() path (opt-in).
 test_br_ia_ia32_unsupported_aborts_after_state_transition = \
     require_qemu_failure(
         "br_ia_ia32_unsupported_aborts_after_state_transition", [
@@ -22988,7 +23008,7 @@ test_br_ia_ia32_unsupported_aborts_after_state_transition = \
             "IA-32 instruction set execution is not implemented",
             "IP=0x0000000000000043",
             f"PSR=0x{IA64_PSR_IS:016x}",
-        ], entry=0x10, cpu="madison")
+        ], entry=0x10, cpu="madison,ia32-exec=abort")
 
 test_rfi_to_ia32_unsupported_aborts_with_byte_ip = require_qemu_failure(
     "rfi_to_ia32_unsupported_aborts_with_byte_ip",
@@ -23000,7 +23020,18 @@ test_rfi_to_ia32_unsupported_aborts_with_byte_ip = require_qemu_failure(
         "IA-32 instruction set execution is not implemented",
         "IP=0x0000000000000045",
         f"PSR=0x{IA64_PSR_IS:016x}",
-    ], entry=0x10, cpu="madison")
+    ], entry=0x10, cpu="madison,ia32-exec=abort")
+
+# Default (ia32-exec=stop): the IA-32 execution attempt dumps state and pauses
+# the VM (guest-panicked run state) instead of aborting QEMU, so recon boots
+# yield inspectable state.  Same br.ia transition program as the abort test.
+test_br_ia_ia32_stop_pauses_vm = require_ia32_stop(
+    "br_ia_ia32_stop_pauses_vm", [
+        (0x10, *movl_mlx(8, 0x1234567800000043)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], entry=0x10, cpu="merced")
 
 test_rfi_montecito_native_ia32_disabled_fault = require_registers(
     "rfi_montecito_native_ia32_disabled_fault", [
@@ -24753,6 +24784,7 @@ TEST_NAMES = {
         test_br_ia_montecito_native_ia32_disabled_fault,
     "br_ia_ia32_unsupported_aborts_after_state_transition":
         test_br_ia_ia32_unsupported_aborts_after_state_transition,
+    "br_ia_ia32_stop_pauses_vm": test_br_ia_ia32_stop_pauses_vm,
     "rfi_to_ia32_unsupported_aborts_with_byte_ip":
         test_rfi_to_ia32_unsupported_aborts_with_byte_ip,
     "rfi_montecito_native_ia32_disabled_fault":

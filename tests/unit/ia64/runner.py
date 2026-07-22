@@ -305,3 +305,48 @@ def run_expected_exit(qemu: str, program: MicroProgram) -> str:
         raise RuntimeError(f"{program.name}: missing diagnostics {missing!r}\n"
                            f"{combined}")
     return combined
+
+
+def run_guest_panic_stop(qemu: str, program: MicroProgram) -> None:
+    """Assert the IA-32 diagnostic stop: the guest is paused in the
+    guest-panicked run state and QEMU stays alive (no cpu_abort/SIGABRT), so
+    the monitor and gdbstub remain usable for post-mortem inspection."""
+    with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stderr:
+        proc = subprocess.Popen(
+            _command(qemu, program),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            text=True,
+            bufsize=1,
+        )
+        if proc.stdin is None or proc.stdout is None:
+            proc.kill()
+            raise RuntimeError("QEMU QMP pipes were not created")
+        qmp: QmpClient | None = None
+        try:
+            qmp = QmpClient(proc.stdout, proc.stdin)
+            qmp.execute("cont")
+            qmp.wait_event("GUEST_PANICKED",
+                           timeout_s=program.completion.timeout_s)
+            if proc.poll() is not None:
+                stderr.seek(0)
+                raise RuntimeError(
+                    f"{program.name}: QEMU exited after the IA-32 attempt; "
+                    f"expected a paused diagnostic stop\n{stderr.read()}")
+            status = qmp.execute("query-status")
+            if status.get("status") != "guest-panicked":
+                raise RuntimeError(
+                    f"{program.name}: run state is {status.get('status')!r}, "
+                    "expected 'guest-panicked'")
+        finally:
+            if qmp is not None:
+                try:
+                    qmp.execute("quit")
+                except (QmpError, BrokenPipeError, OSError):
+                    pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)

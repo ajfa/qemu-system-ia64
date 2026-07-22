@@ -22,6 +22,7 @@
 #include "exec/target_page.h"
 #include "exec/translation-block.h"
 #include "hw/core/sysemu-cpu-ops.h"
+#include "hw/core/qdev-properties.h"
 #include "accel/tcg/cpu-ops.h"
 #include "tcg/debug-assert.h"
 #include "tcg/tcg-op.h"
@@ -12675,6 +12676,17 @@ static void ia64_cpu_realize(DeviceState *dev, Error **errp)
         return;
     }
 
+    /* Resolve the ia32-exec property: NULL/"stop" => diagnostic stop. */
+    if (cpu->ia32_exec == NULL || strcmp(cpu->ia32_exec, "stop") == 0) {
+        cpu->ia32_exec_abort = false;
+    } else if (strcmp(cpu->ia32_exec, "abort") == 0) {
+        cpu->ia32_exec_abort = true;
+    } else {
+        error_setg(errp, "invalid ia32-exec '%s' (expected 'stop' or 'abort')",
+                   cpu->ia32_exec);
+        return;
+    }
+
     cpu->itm_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ia64_itm_timer_cb, cpu);
 
     qemu_init_vcpu(cs);
@@ -12682,6 +12694,10 @@ static void ia64_cpu_realize(DeviceState *dev, Error **errp)
 
     icc->parent_realize(dev, errp);
 }
+
+static const Property ia64_cpu_properties[] = {
+    DEFINE_PROP_STRING("ia32-exec", IA64CPU, ia32_exec),
+};
 
 static void ia64_dump_tlb(FILE *f, const char *name, const IA64TlbEntry *tlb,
                           uint16_t count)
@@ -13578,6 +13594,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
 
     device_class_set_parent_realize(dc, ia64_cpu_realize,
                                     &icc->parent_realize);
+    device_class_set_props(dc, ia64_cpu_properties);
     resettable_class_set_parent_phases(rc, NULL, ia64_cpu_reset_hold, NULL,
                                        &icc->parent_phases);
 
