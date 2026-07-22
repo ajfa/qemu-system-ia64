@@ -199,9 +199,21 @@ PAL_VM_SUMMARY_INFO_1 = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                          ((IA64_TR_COUNT - 1) << 40) | (4 << 48) |
                          (2 << 56))
 PAL_VM_SUMMARY_INFO_2 = IA64_PAL_IMPL_VA_MSB | (24 << 8)
+# Merced reports 8 ITR / 48 DTR (248701-002 sec 2.5.6); only the max_itr/max_dtr
+# fields (bits 32:39 and 40:47) differ from the default summary word.
+IA64_MERCED_ITR_COUNT = 8
+IA64_MERCED_DTR_COUNT = 48
+PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
+                                ((IA64_PKR_COUNT - 1) << 16) |
+                                (8 << 24) |
+                                ((IA64_MERCED_ITR_COUNT - 1) << 32) |
+                                ((IA64_MERCED_DTR_COUNT - 1) << 40) |
+                                (4 << 48) | (2 << 56))
 PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_16_3 = (16 << 32) | 3
 PAL_RATIO_4_1 = (4 << 32) | 1
+PAL_RATIO_4_3 = (4 << 32) | 3
+PAL_RATIO_8_1 = (8 << 32) | 1
 PAL_RATIO_2_1 = (2 << 32) | 1
 PAL_MEM_ATTRIB_WB_UC = (1 << 0) | (1 << 4)
 PAL_CACHE_INFO_L0_I_1 = ((4 << 8) | (6 << 16) |
@@ -20876,6 +20888,75 @@ test_pal_freq_ratios_reserved_arg = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
+# --- Merced (original Itanium) model-differentiated PAL responses (P1.2) ---
+# 800 MHz core / 133.33 MHz bus / 200 MHz ITC (249634-002 datasheet).
+test_pal_freq_ratios_merced = require_registers(
+    "pal_freq_ratios_merced", pal_call_program(PAL_FREQ_RATIOS),
+    {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
+     "r9": PAL_RATIO_8_1, "r10": PAL_RATIO_4_3,
+     "r11": PAL_RATIO_2_1}, entry=0x10, cpu="merced")
+
+# PAL_FREQ_BASE base clock is the same 100 MHz for merced.
+test_pal_freq_base_merced = require_registers(
+    "pal_freq_base_merced", pal_call_program(PAL_FREQ_BASE),
+    {"ip": 0x30, "r28": PAL_FREQ_BASE, "r8": 0,
+     "r9": 100000000, "r10": 0, "r11": 0}, entry=0x10, cpu="merced")
+
+# PAL_VM_SUMMARY reports the asymmetric 8 ITR / 48 DTR file.
+test_pal_vm_summary_merced = require_registers(
+    "pal_vm_summary_merced", pal_call_program(PAL_VM_SUMMARY),
+    {"ip": 0x30, "r28": PAL_VM_SUMMARY, "r8": 0,
+     "r9": PAL_VM_SUMMARY_INFO_1_MERCED, "r10": PAL_VM_SUMMARY_INFO_2},
+    entry=0x10, cpu="merced")
+
+# Procedures that post-date Merced return NOT_IMPLEMENTED on the merced model.
+test_pal_prefetch_vis_merced_unimplemented = require_registers(
+    "pal_prefetch_vis_merced_unimplemented",
+    pal_call_program(PAL_PREFETCH_VIS),
+    {"ip": 0x30, "r28": PAL_PREFETCH_VIS,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_cache_shared_info_merced_unimplemented = require_registers(
+    "pal_cache_shared_info_merced_unimplemented",
+    pal_call_program(PAL_CACHE_SHARED_INFO, [(29, 0), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_SHARED_INFO,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_brand_info_merced_unimplemented = require_registers(
+    "pal_brand_info_merced_unimplemented",
+    pal_stacked_call_program(PAL_BRAND_INFO, [18, 0, 0]),
+    {"ip": 0x80, "r28": PAL_BRAND_INFO,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+# logical_to_physical is already montecito-only; confirm merced too is
+# NOT_IMPLEMENTED (mirrors pal_logical_to_physical_madison_unimplemented).
+test_pal_logical_to_physical_merced_unimplemented = require_registers(
+    "pal_logical_to_physical_merced_unimplemented",
+    pal_call_program(PAL_LOGICAL_TO_PHYSICAL,
+                     [(29, 0xffffffffffffffff), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_LOGICAL_TO_PHYSICAL,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+# CPUID identity on merced: CPUID[3] = family 0x07, model 0, rev 8 (C2 stepping)
+# = 0x0000000007000804 (249720-009); CPUID[4] = 0, i.e. brl NOT implemented
+# (245319-002 brl page) -- the bit Windows keys KF_BRL off.
+test_cpuid_merced = require_registers(
+    "cpuid_merced", [
+        (0x10, 0x00, nop_m(), addl(31, 3, 0), nop_i()),
+        (0x20, 0x00, mov_cpuid(29, 31), nop_i(), nop_i()),
+        (0x30, 0x00, nop_m(), addl(30, 4, 0), nop_i()),
+        (0x40, 0x00, mov_cpuid(28, 30), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "r29": 0x0000000007000804,
+        "r28": 0x0000000000000000,
+    }, entry=0x10, cpu="merced")
+
 test_pal_vm_page_size = require_registers("pal_vm_page_size",
     pal_call_program(PAL_VM_PAGE_SIZE),
     {"ip": 0x30, "r28": PAL_VM_PAGE_SIZE, "r8": 0,
@@ -24468,6 +24549,18 @@ TEST_NAMES = {
     "pal_freq_ratios": test_pal_freq_ratios,
     "pal_freq_ratios_madison": test_pal_freq_ratios_madison,
     "pal_freq_ratios_reserved_arg": test_pal_freq_ratios_reserved_arg,
+    "pal_freq_ratios_merced": test_pal_freq_ratios_merced,
+    "pal_freq_base_merced": test_pal_freq_base_merced,
+    "pal_vm_summary_merced": test_pal_vm_summary_merced,
+    "pal_prefetch_vis_merced_unimplemented":
+        test_pal_prefetch_vis_merced_unimplemented,
+    "pal_cache_shared_info_merced_unimplemented":
+        test_pal_cache_shared_info_merced_unimplemented,
+    "pal_brand_info_merced_unimplemented":
+        test_pal_brand_info_merced_unimplemented,
+    "pal_logical_to_physical_merced_unimplemented":
+        test_pal_logical_to_physical_merced_unimplemented,
+    "cpuid_merced": test_cpuid_merced,
     "pal_vm_page_size": test_pal_vm_page_size,
     "pal_vm_page_size_reserved_arg": test_pal_vm_page_size_reserved_arg,
     "pal_ptce_info": test_pal_ptce_info,

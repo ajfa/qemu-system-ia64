@@ -154,6 +154,7 @@ CASE_NAMES = (
     'tf_same_pred_illegal',
     'tf_unc_same_pred_pred_false_illegal',
     'tf_upper_cpuid_feature_bits',
+    'cpuid_merced',
     'unpack2_l_decode',
     'vmsw0_madison_illegal_operation',
     'vmsw0_montecito_virtualization_fault',
