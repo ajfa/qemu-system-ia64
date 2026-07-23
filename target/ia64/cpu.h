@@ -126,6 +126,14 @@
 #define IA64_PHYS_UC_BIT (1ULL << 63)
 #define IA64_FW_IDENTITY_BASE 0x00100000ULL
 #define IA64_FW_IDENTITY_SIZE 0x00100000ULL
+/*
+ * Fixed entry.S layout within the identity page: PAL_PROC stub at +0x60,
+ * the SAL_PROC runtime entry/return stubs and the dispatch handshake
+ * block (C entry, GP, physical stack top, backing-store base) follow.
+ */
+#define IA64_FW_SAL_RUNTIME_ENTRY_PA  (IA64_FW_IDENTITY_BASE + 0x80)
+#define IA64_FW_SAL_RUNTIME_RETURN_PA (IA64_FW_IDENTITY_BASE + 0xa0)
+#define IA64_FW_SAL_DISPATCH_BLOCK_PA (IA64_FW_IDENTITY_BASE + 0xc0)
 #define IA64_FIRMWARE_IVT_BASE 0x10000ULL
 #define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
 /*
@@ -850,6 +858,19 @@ typedef struct CPUArchState {
     bool fw_debug_context_valid;
     bool fw_debug_handler_active;
     bool fw_debug_rse_valid;
+
+    /*
+     * SAL_PROC physical re-entry bridge (entry.S sal_runtime_entry):
+     * caller context saved while a virtual-mode SAL call runs the
+     * firmware's C dispatcher physically on a firmware-owned stack.
+     */
+    IA64FirmwareDebugRseState sal_saved_rse;
+    uint64_t sal_saved_psr;
+    uint64_t sal_saved_b0;
+    uint64_t sal_saved_sp;
+    uint64_t sal_saved_gp;
+    uint64_t sal_saved_rsc;
+    bool sal_dispatch_active;
 
     /*
      * Result retained across an architecturally mandated FP software-assist

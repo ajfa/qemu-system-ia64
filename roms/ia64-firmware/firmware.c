@@ -142,6 +142,14 @@ typedef __SIZE_TYPE__    size_t;
 #define FW_LOADER_HEAP_SPLIT_SIZE 0x0000000000002000ULL
 #define FW_LOADER_HEAP_SPLIT_BASE \
     (FW_LOW_LEGACY_IMAGE_BASE - FW_LOADER_HEAP_SPLIT_SIZE)
+/*
+ * Firmware-owned physical stack + RSE backing store used while a virtual-
+ * mode SAL_PROC call is re-entered physically (see sal_runtime_entry in
+ * entry.S).  Lives in the firmware-permanent low RAM below the image base;
+ * SAL calls are not re-entrant (SAL spec 3.1, the OS serializes them).
+ */
+#define FW_SAL_PHYS_BSTORE_BASE 0x0000000000040000ULL
+#define FW_SAL_PHYS_STACK_TOP   0x000000000005FFF0ULL
 #define FW_BOOTSTRAP_STACK_TOP 0x0000000008000000ULL
 #define FW_BOOT_STACK_SIZE     0x0000000000400000ULL
 #define IA64_EFI_MEMORY_ALIGN 0x0000000000002000ULL
@@ -1175,6 +1183,35 @@ typedef struct {
     UINT8  Reserved1[16];
 } __attribute__((packed)) IA64_SAL_ENTRYPOINT_DESCRIPTOR;
 
+/*
+ * SAL spec 3.2.3 type-1 memory descriptor.  Windows' HAL requires the SST
+ * to describe the PAL code, SAL code, SAL data and firmware ROM spaces
+ * (REGULAR_MEMORY usages 1/4/5 and FIRMWARE_CODE usage 0): it maps each
+ * region and derives its virtual SAL/PAL entry points from them; a missing
+ * region fails HalpInitSalPal and with it HalInitSystem phase 1 (0x61).
+ */
+typedef struct {
+    UINT8  Type;
+    UINT8  NeedVaReg;
+    UINT8  CurrentAttribute;
+    UINT8  PageAccessRights;
+    UINT8  SupportedAttributes;
+    UINT8  Reserved0;
+    UINT8  MemoryType;
+    UINT8  MemoryUsage;
+    UINT64 PhysicalAddress;
+    UINT32 Length;              /* in 4 KiB pages */
+    UINT8  Reserved1[4];
+    UINT8  OemReserved[8];
+} __attribute__((packed)) IA64_SAL_MEMORY_DESCRIPTOR;
+
+#define SAL_MEM_TYPE_REGULAR        0
+#define SAL_MEM_TYPE_FIRMWARE_CODE  4
+#define SAL_MEM_USAGE_PAL_CODE      1
+#define SAL_MEM_USAGE_SAL_CODE      4
+#define SAL_MEM_USAGE_SAL_DATA      5
+#define SAL_MEM_USAGE_FW_SAL_PAL    0
+
 typedef struct {
     UINT8 Type;
     UINT8 Features;
@@ -1211,6 +1248,7 @@ typedef struct {
     UINT8  ProductId[32];
     UINT8  Reserved1[8];
     IA64_SAL_ENTRYPOINT_DESCRIPTOR Entrypoint;
+    IA64_SAL_MEMORY_DESCRIPTOR MemoryDescriptors[4];
     IA64_SAL_PLATFORM_FEATURES_DESCRIPTOR PlatformFeatures;
     IA64_SAL_TR_DESCRIPTOR TranslationRegister;
     IA64_SAL_AP_WAKE_DESCRIPTOR ApWake;
@@ -1870,12 +1908,14 @@ FW_STATIC_ASSERT(sizeof(IA64_SAL_TR_DESCRIPTOR) == 32,
                  sal_tr_descriptor_size);
 FW_STATIC_ASSERT(sizeof(IA64_SAL_AP_WAKE_DESCRIPTOR) == 16,
                  sal_ap_wake_descriptor_size);
-FW_STATIC_ASSERT(sizeof(IA64_SAL_SYSTEM_TABLE) == 208,
+FW_STATIC_ASSERT(sizeof(IA64_SAL_MEMORY_DESCRIPTOR) == 32,
+                 sal_memory_descriptor_size);
+FW_STATIC_ASSERT(sizeof(IA64_SAL_SYSTEM_TABLE) == 336,
                  sal_system_table_size);
 FW_STATIC_ASSERT(__builtin_offsetof(IA64_SAL_SYSTEM_TABLE,
-                                    TranslationRegister) == 160,
+                                    TranslationRegister) == 288,
                  sal_tr_descriptor_offset);
-FW_STATIC_ASSERT(__builtin_offsetof(IA64_SAL_SYSTEM_TABLE, ApWake) == 192,
+FW_STATIC_ASSERT(__builtin_offsetof(IA64_SAL_SYSTEM_TABLE, ApWake) == 320,
                  sal_ap_wake_descriptor_offset);
 FW_STATIC_ASSERT(FW_BOOT_STACK_SIZE >=
                  IA64_EFI_MIN_STACK_BYTES,
@@ -14330,7 +14370,7 @@ static void efi_init_platform_tables(void)
     mSalSystemTable.Signature = EFI_SIGNATURE_32('S', 'S', 'T', '_');
     mSalSystemTable.Length = sizeof(mSalSystemTable);
     mSalSystemTable.Revision = SAL_REVISION;
-    mSalSystemTable.EntryCount = 4;
+    mSalSystemTable.EntryCount = 8;
     mSalSystemTable.Checksum = 0;
     for (i = 0; i < sizeof(mSalSystemTable.Reserved0); i++) {
         mSalSystemTable.Reserved0[i] = 0;
@@ -14360,11 +14400,68 @@ static void efi_init_platform_tables(void)
         mSalSystemTable.Entrypoint.Reserved0[i] = 0;
     }
     mSalSystemTable.Entrypoint.PalProc = (UINTN)pal_proc_entry;
-    mSalSystemTable.Entrypoint.SalProc =
-        fw_function_entry((UINTN)sal_proc_entry);
+    /*
+     * SAL_PROC points at the mode-agnostic runtime stub (entry.S): the
+     * machine re-enters the C dispatcher physically so the OS may call
+     * SAL_PROC in virtual mode (SAL spec 3.1) even though the firmware
+     * itself is linked at fixed physical addresses.  The handshake block
+     * next to the stub carries the C entry, GP and a firmware-owned
+     * physical stack/backing store for that re-entry.
+     */
+    mSalSystemTable.Entrypoint.SalProc = (UINTN)sal_runtime_entry;
     mSalSystemTable.Entrypoint.SalGp = fw_current_gp();
     for (i = 0; i < sizeof(mSalSystemTable.Entrypoint.Reserved1); i++) {
         mSalSystemTable.Entrypoint.Reserved1[i] = 0;
+    }
+    {
+        volatile UINT64 *block = (volatile UINT64 *)(UINTN)sal_dispatch_block;
+
+        block[0] = fw_function_entry((UINTN)sal_proc_entry);
+        block[1] = fw_current_gp();
+        block[2] = FW_SAL_PHYS_STACK_TOP;
+        block[3] = FW_SAL_PHYS_BSTORE_BASE;
+    }
+    {
+        IA64_SAL_MEMORY_DESCRIPTOR *md = mSalSystemTable.MemoryDescriptors;
+        UINTN image_base = (UINTN)pal_proc_entry & ~0xFFFULL;
+        UINTN data_start = (UINTN)&__runtime_data_start;
+        UINTN image_end = ((UINTN)&_end + 0xFFFULL) & ~0xFFFULL;
+        UINTN n;
+
+        for (n = 0; n < 4; n++) {
+            md[n].Type = 1;
+            md[n].NeedVaReg = 0;
+            md[n].CurrentAttribute = 0;
+            md[n].PageAccessRights = 0;
+            md[n].SupportedAttributes = 0;
+            md[n].Reserved0 = 0;
+            for (i = 0; i < sizeof(md[n].Reserved1); i++) {
+                md[n].Reserved1[i] = 0;
+            }
+            for (i = 0; i < sizeof(md[n].OemReserved); i++) {
+                md[n].OemReserved[i] = 0;
+            }
+        }
+        /* PAL code: the boot page holding PAL_PROC (and the SAL stubs). */
+        md[0].MemoryType = SAL_MEM_TYPE_REGULAR;
+        md[0].MemoryUsage = SAL_MEM_USAGE_PAL_CODE;
+        md[0].PhysicalAddress = image_base;
+        md[0].Length = 1;
+        /* SAL code: same page; SAL_PROC lies within the PAL mapping. */
+        md[1].MemoryType = SAL_MEM_TYPE_REGULAR;
+        md[1].MemoryUsage = SAL_MEM_USAGE_SAL_CODE;
+        md[1].PhysicalAddress = image_base;
+        md[1].Length = 1;
+        /* SAL data: the firmware's runtime data (SST, SAL state). */
+        md[2].MemoryType = SAL_MEM_TYPE_REGULAR;
+        md[2].MemoryUsage = SAL_MEM_USAGE_SAL_DATA;
+        md[2].PhysicalAddress = data_start;
+        md[2].Length = (UINT32)((image_end - data_start) >> 12);
+        /* Firmware ROM space (SAL_UPDATE_PAL mapping target). */
+        md[3].MemoryType = SAL_MEM_TYPE_FIRMWARE_CODE;
+        md[3].MemoryUsage = SAL_MEM_USAGE_FW_SAL_PAL;
+        md[3].PhysicalAddress = image_base;
+        md[3].Length = (UINT32)((image_end - image_base) >> 12);
     }
     mSalSystemTable.PlatformFeatures.Type = 2;
     mSalSystemTable.PlatformFeatures.Features = 0;
@@ -14780,8 +14877,24 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
     if (mSalSystemTable.Signature != EFI_SIGNATURE_32('S', 'S', 'T', '_') ||
         mSalSystemTable.Length != sizeof(mSalSystemTable) ||
         mSalSystemTable.Revision != SAL_REVISION ||
-        mSalSystemTable.EntryCount != 4 ||
+        mSalSystemTable.EntryCount != 8 ||
         mSalSystemTable.Entrypoint.Type != 0 ||
+        mSalSystemTable.MemoryDescriptors[0].Type != 1 ||
+        mSalSystemTable.MemoryDescriptors[0].MemoryUsage !=
+            SAL_MEM_USAGE_PAL_CODE ||
+        mSalSystemTable.MemoryDescriptors[1].MemoryUsage !=
+            SAL_MEM_USAGE_SAL_CODE ||
+        mSalSystemTable.MemoryDescriptors[2].MemoryUsage !=
+            SAL_MEM_USAGE_SAL_DATA ||
+        mSalSystemTable.MemoryDescriptors[3].MemoryType !=
+            SAL_MEM_TYPE_FIRMWARE_CODE ||
+        mSalSystemTable.MemoryDescriptors[0].Length == 0 ||
+        mSalSystemTable.MemoryDescriptors[1].Length == 0 ||
+        mSalSystemTable.MemoryDescriptors[2].Length == 0 ||
+        mSalSystemTable.MemoryDescriptors[3].Length == 0 ||
+        mSalSystemTable.Entrypoint.SalProc != (UINT64)(UINTN)sal_runtime_entry ||
+        (UINT64)(UINTN)sal_runtime_entry !=
+            (UINT64)(UINTN)pal_proc_entry + 0x20 ||
         mSalSystemTable.PlatformFeatures.Type != 2 ||
         mSalSystemTable.TranslationRegister.Type != 3 ||
         mSalSystemTable.TranslationRegister.RegisterType != 0 ||

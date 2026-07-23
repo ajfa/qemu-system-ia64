@@ -858,6 +858,16 @@ static bool ia64_is_pal_proc_break(CPUIA64State *env, uint64_t address)
                env, address, env->pal_proc_copy_addr);
 }
 
+static bool ia64_is_sal_runtime_break(CPUIA64State *env, uint64_t address,
+                                      uint64_t imm)
+{
+    uint64_t entry_pa = imm == 0x100005 ? IA64_FW_SAL_RUNTIME_ENTRY_PA
+                                        : IA64_FW_SAL_RUNTIME_RETURN_PA;
+
+    return ia64_instruction_address_matches_physical_entry(env, address,
+                                                           entry_pa);
+}
+
 static bool ia64_is_firmware_debug_break(uint64_t address, uint64_t imm)
 {
     if (imm == 0x100002) {
@@ -8232,6 +8242,25 @@ static bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
             } else {
                 tcg_gen_exit_tb(NULL, 0);
             }
+            gen_set_label(architected_break);
+            ia64_gen_raise_exception(IA64_EXCP_BREAK, insn->address,
+                                      insn->imm, insn->slot);
+            return true;
+        } else if (insn->p1 == 0 &&
+                   (insn->imm == 0x100005 || insn->imm == 0x100006) &&
+                   ia64_is_sal_runtime_break(ctx->env, insn->address,
+                                             insn->imm)) {
+            TCGv_i32 handled = tcg_temp_new_i32();
+            TCGLabel *architected_break = gen_new_label();
+
+            if (insn->imm == 0x100005) {
+                gen_helper_sal_runtime_enter(handled, tcg_env);
+            } else {
+                gen_helper_sal_runtime_exit(handled, tcg_env);
+            }
+            tcg_gen_brcondi_i32(TCG_COND_EQ, handled, 0,
+                                architected_break);
+            tcg_gen_exit_tb(NULL, 0);
             gen_set_label(architected_break);
             ia64_gen_raise_exception(IA64_EXCP_BREAK, insn->address,
                                       insn->imm, insn->slot);

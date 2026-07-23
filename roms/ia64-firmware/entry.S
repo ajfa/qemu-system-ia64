@@ -50,6 +50,47 @@ pal_proc_entry:
     .size pal_proc_entry, . - pal_proc_entry
 
     /*
+     * SAL_PROC runtime entry (SST Entrypoint.SalProc).  Callable in
+     * physical or virtual mode (SAL spec 3.1): the machine recognises the
+     * break by the stub's physical address, re-enters the firmware's C
+     * dispatcher physically on a firmware-owned stack, and resumes the
+     * caller via sal_runtime_return.  Keeping the stub as a leaf preserves
+     * all eight input registers; results return in r8-r11.
+     */
+    .global sal_runtime_entry
+    .type sal_runtime_entry, @function
+    .proc sal_runtime_entry
+sal_runtime_entry:
+    break.m 0x100005
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp sal_runtime_entry
+    .size sal_runtime_entry, . - sal_runtime_entry
+
+    /* Return trampoline the C dispatcher's br.ret lands on. */
+    .global sal_runtime_return
+    .type sal_runtime_return, @function
+    .proc sal_runtime_return
+sal_runtime_return:
+    break.m 0x100006
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp sal_runtime_return
+    .size sal_runtime_return, . - sal_runtime_return
+
+    /*
+     * Dispatch handshake block (4 quads, filled by efi_init_sal_tables):
+     * +0x00 C dispatcher entry (physical), +0x08 firmware GP,
+     * +0x10 physical stack top, +0x18 physical RSE backing store base.
+     */
+    .align 16
+    .global sal_dispatch_block
+sal_dispatch_block:
+    .skip 0x20
+
+    /*
      * The machine implements the arithmetic behind this architected
      * firmware ABI.  Keeping the bridge as a leaf preserves all eight input
      * registers and returns the four-word result directly in r8-r11.
