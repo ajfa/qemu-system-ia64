@@ -1140,8 +1140,9 @@ static inline bool ia64_sal_boot_virtual_pa(const CPUIA64State *env,
     return false;
 }
 
-static inline bool ia64_sal_boot_identity_pa(const CPUIA64State *env,
-                                             uint64_t va, uint64_t *pa)
+static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
+                                                  uint64_t va, uint64_t *pa,
+                                                  bool is_inst)
 {
     uint64_t phys;
 
@@ -1150,12 +1151,25 @@ static inline bool ia64_sal_boot_identity_pa(const CPUIA64State *env,
      * mismatch there must remain an architectural TLB miss rather than
      * silently falling back to a different identity physical address.  (This
      * is only reached after the cached TLB/TR lookup has already missed.)
+     *
+     * ITRs and DTRs are independent translation resources (SDM Vol.2 4.1.1):
+     * a data reference must only defer to data TRs and an instruction fetch
+     * only to instruction TRs.  The XP-era loader installs a 4th ITR for its
+     * [64-80MB] decompression range but no matching DTR; a *data* read there
+     * (e.g. KdInitSystem walking a loader debug block) must therefore still
+     * reach the region-7 direct map below rather than deferring to that ITR
+     * and taking a VHPT fault into the not-yet-installed self-map (0x2B).
      */
-    if (ia64_tlb_has_explicit_va_mapping(env->tlb_data, env->tlb_data_count,
-                                         va) ||
-        ia64_tlb_has_explicit_va_mapping(env->tlb_inst, env->tlb_inst_count,
-                                         va)) {
-        return false;
+    if (is_inst) {
+        if (ia64_tlb_has_explicit_va_mapping(env->tlb_inst,
+                                             env->tlb_inst_count, va)) {
+            return false;
+        }
+    } else {
+        if (ia64_tlb_has_explicit_va_mapping(env->tlb_data,
+                                             env->tlb_data_count, va)) {
+            return false;
+        }
     }
 
     phys = va & IA64_REGION7_PHYS_MASK;
@@ -1196,6 +1210,13 @@ static inline bool ia64_sal_boot_identity_pa(const CPUIA64State *env,
 
     *pa = phys;
     return true;
+}
+
+/* Data-reference default: defers only to data TRs. */
+static inline bool ia64_sal_boot_identity_pa(const CPUIA64State *env,
+                                             uint64_t va, uint64_t *pa)
+{
+    return ia64_sal_boot_identity_pa_type(env, va, pa, false);
 }
 
 static inline bool ia64_vhpt_config_valid(const CPUIA64State *env,

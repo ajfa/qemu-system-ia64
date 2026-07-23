@@ -8189,7 +8189,7 @@ static uint64_t ia64_probe_address(CPUIA64State *env, uint64_t va,
         return excp == IA64_EXCP_NONE ? 1 : 0;
     }
 
-    if (ia64_sal_boot_identity_pa(env, va, &pa)) {
+    if (ia64_sal_boot_identity_pa_type(env, va, &pa, is_ifetch)) {
         return 1;
     }
     return 0;

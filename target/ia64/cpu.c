@@ -837,7 +837,7 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
         return pa == entry_pa;
     }
 
-    if (ia64_sal_boot_identity_pa(env, address, &pa)) {
+    if (ia64_sal_boot_identity_pa_type(env, address, &pa, true)) {
         return pa == entry_pa;
     }
 
@@ -11908,7 +11908,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
             return true;
         }
     }
-    if (ia64_sal_boot_identity_pa(&cpu->env, addr, &pa)) {
+    if (ia64_sal_boot_identity_pa_type(&cpu->env, addr, &pa, is_ifetch)) {
         int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
 
         qemu_log_mask(CPU_LOG_MMU,
