@@ -125,6 +125,23 @@ typedef __SIZE_TYPE__    size_t;
  */
 #define FW_LOADER_STAGING_GUARD_SIZE 0x0000000000002000ULL
 #define FW_LOW_RAM_STAGING_BASE (FW_LOW_IMAGE_END + FW_LOADER_STAGING_GUARD_SIZE)
+/*
+ * SAL-style reserved split page ending exactly at the loader's 48 MB image
+ * base.  The Windows IA-64 setup loader requires that "any descriptor which
+ * starts less than 48MB [must] not extend beyond 48MB" (efi/ia64/memory.c);
+ * its own MempAllocDescriptor(_48MB,_80MB) split is erased when
+ * BlInsertDescriptor re-merges adjacent MemoryFree runs, after which the
+ * heap-extension (confined to selecting [16MB,48MB)-based free blocks but
+ * carving from the block's END) escapes to just below 80MB - outside the
+ * [16-64MB] the kernel's three loader-TRs cover -> NTOSKRNL bugcheck 0x1A.
+ * EfiReservedMemoryType maps to MemoryFirmwarePermanent (EfiToArcType
+ * default), which neither merges nor is reclaimed, so the [16-48MB) free run
+ * stays bounded below 48MB while [48MB,80MB) remains a single free
+ * descriptor for the loader's systemblock split.
+ */
+#define FW_LOADER_HEAP_SPLIT_SIZE 0x0000000000002000ULL
+#define FW_LOADER_HEAP_SPLIT_BASE \
+    (FW_LOW_LEGACY_IMAGE_BASE - FW_LOADER_HEAP_SPLIT_SIZE)
 #define FW_BOOTSTRAP_STACK_TOP 0x0000000008000000ULL
 #define FW_BOOT_STACK_SIZE     0x0000000000400000ULL
 #define IA64_EFI_MEMORY_ALIGN 0x0000000000002000ULL
@@ -12865,6 +12882,10 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
 
     if (!efi_memory_map_has_descriptor(EfiConventionalMemory,
                                        FW_LOW_IMAGE_BASE,
+                                       FW_LOADER_HEAP_SPLIT_BASE,
+                                       EFI_MEMORY_WB) ||
+        !efi_memory_map_has_descriptor(EfiReservedMemoryType,
+                                       FW_LOADER_HEAP_SPLIT_BASE,
                                        FW_LOW_LEGACY_IMAGE_BASE,
                                        EFI_MEMORY_WB) ||
         !efi_memory_map_has_descriptor(EfiConventionalMemory,
@@ -13469,6 +13490,10 @@ static void efi_init_memory_map(void)
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_FREE_BASE,
                          FW_LOW_IMAGE_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_BASE,
+                         FW_LOADER_HEAP_SPLIT_BASE, EFI_MEMORY_WB);
+    /* Non-free split page ending at 48 MB (see FW_LOADER_HEAP_SPLIT_BASE). */
+    efi_add_memory_range(&index, EfiReservedMemoryType,
+                         FW_LOADER_HEAP_SPLIT_BASE,
                          FW_LOW_LEGACY_IMAGE_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory,
                          FW_LOW_LEGACY_IMAGE_BASE,
