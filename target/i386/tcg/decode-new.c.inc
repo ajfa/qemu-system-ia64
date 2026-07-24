@@ -281,6 +281,10 @@
 
 #define X86_MAX_INSN_LENGTH 15
 
+#ifndef X86_TRANSLATOR_ENV
+#define X86_TRANSLATOR_ENV(env) (env)
+#endif
+
 static uint64_t advance_pc(CPUX86State *env, DisasContext *s, int num_bytes)
 {
     uint64_t pc = s->pc;
@@ -291,6 +295,18 @@ static uint64_t advance_pc(CPUX86State *env, DisasContext *s, int num_bytes)
         siglongjmp(s->jmpbuf, 2);
     }
 
+    if (unlikely(!X86_CODE_FETCH_VALID(env, pc, num_bytes))) {
+        if (X86_CODE_FETCH_FAULT_PROBES_SECOND_PAGE(
+                env, s->base.pc_next, pc, num_bytes)) {
+            uint64_t page2 = (pc & TARGET_PAGE_MASK) + TARGET_PAGE_SIZE;
+
+            (void)translator_ldub(X86_TRANSLATOR_ENV(env), &s->base, page2);
+        }
+        /* Leave a non-empty TB for the generated code-fetch #GP. */
+        s->pc += num_bytes;
+        siglongjmp(s->jmpbuf, 1);
+    }
+
     s->pc += num_bytes;
     if (unlikely(cur_insn_len(s) > X86_MAX_INSN_LENGTH)) {
         /* If the instruction's 16th byte is on a different page than the 1st, a
@@ -299,7 +315,7 @@ static uint64_t advance_pc(CPUX86State *env, DisasContext *s, int num_bytes)
          * This can happen even if the operand is only one byte long!
          */
         if (((s->pc - 1) ^ (pc - 1)) & TARGET_PAGE_MASK) {
-            (void)translator_ldub(env, &s->base,
+            (void)translator_ldub(X86_TRANSLATOR_ENV(env), &s->base,
                                   (s->pc - 1) & TARGET_PAGE_MASK);
         }
         siglongjmp(s->jmpbuf, 1);
@@ -310,17 +326,20 @@ static uint64_t advance_pc(CPUX86State *env, DisasContext *s, int num_bytes)
 
 static inline uint8_t x86_ldub_code(CPUX86State *env, DisasContext *s)
 {
-    return translator_ldub(env, &s->base, advance_pc(env, s, 1));
+    return translator_ldub(X86_TRANSLATOR_ENV(env), &s->base,
+                           advance_pc(env, s, 1));
 }
 
 static inline uint16_t x86_lduw_code(CPUX86State *env, DisasContext *s)
 {
-    return translator_lduw_end(env, &s->base, advance_pc(env, s, 2), MO_LE);
+    return translator_lduw_end(X86_TRANSLATOR_ENV(env), &s->base,
+                               advance_pc(env, s, 2), MO_LE);
 }
 
 static inline uint32_t x86_ldl_code(CPUX86State *env, DisasContext *s)
 {
-    return translator_ldl_end(env, &s->base, advance_pc(env, s, 4), MO_LE);
+    return translator_ldl_end(X86_TRANSLATOR_ENV(env), &s->base,
+                              advance_pc(env, s, 4), MO_LE);
 }
 
 #ifdef TARGET_X86_64
@@ -649,11 +668,20 @@ static void decode_0FB8(DisasContext *s, CPUX86State *env, X86OpEntry *entry, ui
 {
     static const X86OpEntry popcnt =
         X86_OP_ENTRYwr(POPCNT,    G,v, E,v,  cpuid(POPCNT) zextT0);
+#if X86_IA32_SYSTEM_ENV
+    static const X86OpEntry jmpe =
+        X86_OP_ENTRYr(JMPE, I_unsigned,z);
+#endif
 
     if (s->prefix & PREFIX_REPZ) {
         *entry = popcnt;
+#if X86_IA32_SYSTEM_ENV
+    } else {
+        *entry = jmpe;
+#else
     } else {
         memset(entry, 0, sizeof(*entry));
+#endif
     }
 }
 
@@ -1397,10 +1425,15 @@ static const X86OpEntry opcodes_0F[256] = {
     [0xf6] = X86_OP_ENTRY3(PSADBW,   V,x, H,x, W,x,         vex4 mmx avx2_256 p_00_66),
     [0xf7] = X86_OP_ENTRY3(MASKMOV,  None,None, V,dq, U,dq, vex4_unal avx2_256 mmx p_00_66),
 
-    [0x08] = X86_OP_ENTRY0(NOP,           svm(INVD)),
-    [0x09] = X86_OP_ENTRY0(NOP,           svm(WBINVD)),
+    [0x08] = X86_OP_ENTRY0(SYSTEM,        svm(INVD)),
+    [0x09] = X86_OP_ENTRY0(SYSTEM,        svm(WBINVD)),
     [0x0b] = X86_OP_ENTRY0(UD),           /* UD2 */
+#if X86_IA32_SYSTEM_ENV
+    /* AMD 3DNow! PREFETCH/PREFETCHW is not part of Madison's IA-32 ISA. */
+    [0x0d] = X86_OP_ENTRY0(SYSTEM),
+#else
     [0x0d] = X86_OP_ENTRY1(NOP,  M,v),    /* 3DNow! prefetch */
+#endif
     [0x0e] = X86_OP_ENTRY0(EMMS,                              cpuid(3DNOW)), /* femms */
     /*
      * 3DNow!'s opcode byte comes *after* modrm and displacements, making it
@@ -2133,6 +2166,7 @@ static bool decode_op_size(DisasContext *s, X86OpEntry *e, X86OpSize size, MemOp
         *ot = MO_32;
         return true;
 
+    case X86_SIZE_a:  /* BOUND element size */
     case X86_SIZE_p:  /* Far pointer, return offset size */
     case X86_SIZE_s:  /* Descriptor, return offset size */
     case X86_SIZE_v:  /* 16/32/64-bit, based on operand size */
@@ -2748,7 +2782,8 @@ static void dump_unknown_opcode(CPUX86State *env, DisasContext *s)
 
             fprintf(logfile, "ILLOPC: " TARGET_FMT_lx ":", pc);
             for (; pc < end; ++pc) {
-                fprintf(logfile, " %02x", translator_ldub(env, &s->base, pc));
+                fprintf(logfile, " %02x",
+                        translator_ldub(X86_TRANSLATOR_ENV(env), &s->base, pc));
             }
             fprintf(logfile, "\n");
             qemu_log_unlock(logfile);
@@ -2770,6 +2805,7 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
 
     s->pc = s->base.pc_next;
     s->override = -1;
+    s->mem_seg = -1;
     s->popl_esp_hack = 0;
 #ifdef TARGET_X86_64
     s->rex_r = 0;
@@ -2782,6 +2818,10 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
     s->vex_w = false;
     s->has_modrm = false;
     s->prefix = 0;
+#if X86_IA32_SYSTEM_ENV
+    s->decode_env = env;
+    s->ia32_opcode_pc = s->pc;
+#endif
 
  next_byte:;
 #ifdef TARGET_X86_64
@@ -2789,6 +2829,9 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
     int rex;
     rex = -1;
  next_byte_rex:
+#endif
+#if X86_IA32_SYSTEM_ENV
+    s->ia32_opcode_pc = s->pc;
 #endif
     b = x86_ldub_code(env, s);
 
@@ -2953,6 +2996,18 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
         goto illegal_op;
     }
 
+#if X86_IA32_SYSTEM_ENV
+    /*
+     * These instructions fault as IA-32 instruction intercepts at every
+     * privilege level.  Test before the ordinary x86 CPL and operand checks
+     * so that the intercepted instruction is nullified without side effects.
+     */
+    if (X86_SYSTEM_INSTRUCTION_INTERCEPT(&decode)) {
+        gen_illegal_opcode(s);
+        return;
+    }
+#endif
+
     /* Checks that result in #UD come first.  */
     if (decode.e.check) {
         if (CODE64(s)) {
@@ -3043,6 +3098,9 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
         return;
     }
 
+    X86_GEN_DISABLED_FP_CHECK(s, &decode);
+    X86_GEN_PENDING_FP_CHECK(s, &decode);
+
     /*
      * Checks that result in #GP or VMEXIT come second.  Intercepts are
      * generally checked after non-memory exceptions (i.e. after all
@@ -3066,10 +3124,23 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
         }
         if ((decode.e.check & X86_CHECK_vm86_iopl) && VM86(s)) {
             if (IOPL(s) < 3) {
+#if X86_IA32_SYSTEM_ENV
+                bool virtualized =
+                    ((decode.e.gen == gen_CLI || decode.e.gen == gen_STI) &&
+                     ia32_cli_sti_virtual(s)) ||
+                    ((decode.e.gen == gen_PUSHF || decode.e.gen == gen_POPF) &&
+                     ia32_vme_flags_virtual(s));
+
+                if (!virtualized)
+#endif
                 goto gp_fault;
             }
         } else if (decode.e.check & X86_CHECK_cpl_iopl) {
             if (IOPL(s) < CPL(s)) {
+#if X86_IA32_SYSTEM_ENV
+                if (!((decode.e.gen == gen_CLI || decode.e.gen == gen_STI) &&
+                      ia32_cli_sti_virtual(s)))
+#endif
                 goto gp_fault;
             }
         }
@@ -3082,7 +3153,34 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
 
     if (decode.e.special != X86_SPECIAL_NoLoadEA &&
         (decode.op[0].has_ea || decode.op[1].has_ea || decode.op[2].has_ea)) {
+        unsigned access = 0;
+        unsigned size = 0;
+        unsigned i;
+
         gen_lea_modrm(s, &decode);
+        for (i = 0; i < 3; i++) {
+            if (decode.op[i].has_ea) {
+                if (i == 0) {
+                    access |= X86_SEG_ACCESS_WRITE;
+                    /* Atomic RMWs contain an architecturally visible load. */
+                    if (s->prefix & PREFIX_LOCK) {
+                        access |= X86_SEG_ACCESS_READ;
+                    }
+                } else {
+                    access |= X86_SEG_ACCESS_READ;
+                }
+                size = MAX(size, 1u << (decode.op[i].ot & MO_SIZE));
+            }
+        }
+        if (decode.e.gen != gen_BOUND &&
+            decode.e.gen != gen_FXSAVE &&
+            decode.e.gen != gen_FXRSTOR) {
+            X86_GEN_SEGMENT_ACCESS_CHECK(s, s->A0, s->mem_seg,
+                                         size, access);
+        }
+        if (s->prefix & PREFIX_LOCK) {
+            X86_GEN_LOCK_INTERCEPT_CHECK(s, s->A0, size);
+        }
     }
     if (s->prefix & PREFIX_LOCK) {
         assert(decode.op[0].has_ea && !decode.op[2].has_ea);
@@ -3096,7 +3194,9 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
         }
         gen_load(s, &decode, 1, s->T0);
         gen_load(s, &decode, 2, s->T1);
+        X86_GEN_SSE_EXCEPTION_BEGIN(s, &decode);
         decode.e.gen(s, &decode);
+        X86_GEN_SSE_EXCEPTION_END(s, &decode);
         gen_writeback(s, &decode, 0, s->T0);
     }
 
@@ -3130,6 +3230,8 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
         assert(!!decode.cc_src == !!(cc_live & USES_CC_SRC));
         assert(!!decode.cc_src2 == !!(cc_live & USES_CC_SRC2));
     }
+
+    X86_AFTER_INSN_WRITEBACK(s, &decode);
 
     return;
  gp_fault:

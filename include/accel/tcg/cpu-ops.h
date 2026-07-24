@@ -33,8 +33,11 @@ struct TCGCPUOps {
      * @precise_smc: Stores which modify code within the current TB force
      *               the TB to exit; the next executed instruction will see
      *               the result of the store.
+     * @precise_smc_enabled: Optional run-time predicate for targets which
+     *                       require precise SMC only in some execution modes.
      */
     bool precise_smc;
+    bool (*precise_smc_enabled)(CPUState *cpu);
 
     /**
      * @guest_default_memory_order: default barrier that is required
@@ -280,6 +283,13 @@ struct TCGCPUOps {
     bool (*need_replay_interrupt)(int interrupt_request);
 #endif /* !CONFIG_USER_ONLY */
 };
+
+static inline bool tcg_cpu_precise_smc_enabled(const TCGCPUOps *ops,
+                                               CPUState *cpu)
+{
+    return ops->precise_smc &&
+           (!ops->precise_smc_enabled || ops->precise_smc_enabled(cpu));
+}
 
 /**
  * cpu_check_watchpoint:

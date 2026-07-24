@@ -24,6 +24,10 @@
 #include "exec/cputlb.h"
 #include "helper-tcg.h"
 
+#ifndef X86_CPU_ARCH_ENV
+#define X86_CPU_ARCH_ENV(env) (env)
+#endif
+
 /*
  * NOTE: the translator must set DisasContext.cc_op to CC_OP_EFLAGS
  * after generating a call to a helper that uses this.
@@ -90,7 +94,7 @@ G_NORETURN void helper_rdpmc(CPUX86State *env)
 
 G_NORETURN void helper_pause(CPUX86State *env)
 {
-    CPUState *cs = env_cpu(env);
+    CPUState *cs = env_cpu(X86_CPU_ARCH_ENV(env));
 
     /* Do gen_eob() tasks before going back to the main loop.  */
     do_end_instruction(env);
@@ -115,7 +119,7 @@ uint64_t helper_rdpkru(CPUX86State *env, uint32_t ecx)
 
 void helper_wrpkru(CPUX86State *env, uint32_t ecx, uint64_t val)
 {
-    CPUState *cs = env_cpu(env);
+    CPUState *cs = env_cpu(X86_CPU_ARCH_ENV(env));
 
     if ((env->cr[4] & CR4_PKE_MASK) == 0) {
         raise_exception_err_ra(env, EXCP06_ILLOP, 0, GETPC());

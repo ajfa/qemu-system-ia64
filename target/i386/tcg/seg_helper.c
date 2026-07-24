@@ -27,6 +27,14 @@
 #include "exec/log.h"
 #include "helper-tcg.h"
 #include "seg_helper.h"
+
+#ifndef X86_IA32_GATE_INTERCEPT
+#define X86_IA32_GATE_INTERCEPT(env, selector, e1, e2, ident, next_eip, ra) \
+    ((void)0)
+#endif
+#ifndef X86_IA32_SYSTEM_DESCRIPTOR_CHECK
+#define X86_IA32_SYSTEM_DESCRIPTOR_CHECK(env, dt, selector, ra) ((void)0)
+#endif
 #include "access.h"
 #include "tcg-cpu.h"
 #include "qemu/plugin.h"
@@ -160,6 +168,7 @@ static inline int load_segment_ra(CPUX86State *env, uint32_t *e1_ptr,
     } else {
         dt = &env->gdt;
     }
+    X86_IA32_SYSTEM_DESCRIPTOR_CHECK(env, dt, selector, retaddr);
     index = selector & ~7;
     if ((index + 7) > dt->limit) {
         return -1;
@@ -1419,6 +1428,7 @@ void helper_load_seg(CPUX86State *env, int seg_reg, int selector)
         } else {
             dt = &env->gdt;
         }
+        X86_IA32_SYSTEM_DESCRIPTOR_CHECK(env, dt, selector, GETPC());
         index = selector & ~7;
         if ((index + 7) > dt->limit) {
             raise_exception_err_ra(env, EXCP0D_GPF, selector & 0xfffc, GETPC());
@@ -1530,6 +1540,12 @@ void helper_ljmp_protected(CPUX86State *env, int new_cs, target_ulong new_eip,
         rpl = new_cs & 3;
         cpl = env->hflags & HF_CPL_MASK;
         type = (e2 >> DESC_TYPE_SHIFT) & 0xf;
+
+        if (type == 1 || type == 4 || type == 5 || type == 9 ||
+            type == 12) {
+            X86_IA32_GATE_INTERCEPT(env, new_cs, e1, e2, 1,
+                                    next_eip, GETPC());
+        }
 
 #ifdef TARGET_X86_64
         if (env->efer & MSR_EFER_LMA) {
@@ -1742,6 +1758,12 @@ void helper_lcall_protected(CPUX86State *env, int new_cs, target_ulong new_eip,
         type = (e2 >> DESC_TYPE_SHIFT) & 0x1f;
         dpl = (e2 >> DESC_DPL_SHIFT) & 3;
         rpl = new_cs & 3;
+
+        if (type == 1 || type == 4 || type == 5 || type == 9 ||
+            type == 12) {
+            X86_IA32_GATE_INTERCEPT(env, new_cs, e1, e2, 0,
+                                    next_eip, GETPC());
+        }
 
 #ifdef TARGET_X86_64
         if (env->efer & MSR_EFER_LMA) {

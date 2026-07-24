@@ -49,7 +49,6 @@ CASE_NAMES = (
     'rfi_target_rse_fill_fault_uses_restored_psr',
     'rfi_montecito_native_ia32_disabled_fault',
     'rfi_montecito_uncollected_transition_preserves_target',
-    'rfi_to_ia32_unsupported_aborts_with_byte_ip',
     'rse_large_frame_timer_rfi_preserves_high_caller_local',
     'repeated_timer_rfi_preserves_word_rmw',
     'timer_cover_rfi_preserves_large_frame_halfword_rmw',

@@ -3,6 +3,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "ia32/ia32.h"
 #include "qemu/log.h"
 #include "qemu/atomic.h"
 #include "qemu/units.h"
@@ -482,7 +483,7 @@ static void ia64_flush_on_pk_change(CPUIA64State *env, uint64_t old_psr);
 static void ia64_invalidate_alat_store(CPUIA64State *env, uint64_t addr,
                                        uint32_t size);
 static bool ia64_gr_nat_get(const CPUIA64State *env, uint32_t reg);
-static void ia64_gr_nat_set(CPUIA64State *env, uint32_t reg, bool nat);
+void ia64_gr_nat_set(CPUIA64State *env, uint32_t reg, bool nat);
 
 static void ia64_alat_invalidate_entry(CPUIA64State *env,
                                        IA64AlatEntry *entry)
@@ -1558,9 +1559,12 @@ void helper_raise_exception(CPUIA64State *env, uint32_t exception,
     cpu_loop_exit(cs);
 }
 
-static G_NORETURN void
+G_NORETURN void
 ia64_raise_disabled_isa_transition(CPUIA64State *env, uint64_t fault_ip,
                                    uint32_t fault_slot);
+G_NORETURN void ia64_raise_exception(CPUIA64State *env, uint32_t exception,
+                                     uint64_t fault_ip, uint64_t fault_imm,
+                                     uint32_t fault_slot);
 
 /*
  * The guest tried to *execute* an IA-32 instruction (PSR.is=1), which this
@@ -1645,7 +1649,14 @@ ia64_raise_unimplemented_data_address(CPUIA64State *env, uint64_t va,
                                       uint64_t access, bool is_non_access,
                                       bool is_speculative, bool itlb_ed);
 
-static G_NORETURN void
+G_NORETURN void ia64_raise_exception(CPUIA64State *env, uint32_t exception,
+                                     uint64_t fault_ip, uint64_t fault_imm,
+                                     uint32_t fault_slot)
+{
+    helper_raise_exception(env, exception, fault_ip, fault_imm, fault_slot);
+}
+
+G_NORETURN void
 ia64_raise_disabled_isa_transition(CPUIA64State *env, uint64_t fault_ip,
                                    uint32_t fault_slot)
 {
@@ -4141,7 +4152,7 @@ static bool ia64_gr_nat_get(const CPUIA64State *env, uint32_t reg)
     return (env->nat[reg / 64] >> (reg % 64)) & 1;
 }
 
-static void ia64_gr_nat_set(CPUIA64State *env, uint32_t reg, bool nat)
+void ia64_gr_nat_set(CPUIA64State *env, uint32_t reg, bool nat)
 {
     if (reg == 0) {
         return;
@@ -4381,7 +4392,32 @@ void helper_br_ia(CPUIA64State *env, uint32_t b_reg,
     env->cfm_rrb_pr = 0;
     ia64_rse_invalidate_non_current(env);
     ia64_invalidate_stacked_alat(env);
-    helper_ia32_unsupported(env);
+    ia64_ia32_enter(env);
+
+    {
+        uint64_t target = env->br[b_reg];
+        uint64_t trap_code =
+            ((env->psr & IA64_PSR_IT) ?
+             !ia64_va_is_implemented(target) :
+             !ia64_pa_is_implemented(target)) ? IA64_ISR_CODE_UI : 0;
+        uint32_t trap;
+
+        trap_code |= (env->psr & IA64_PSR_TB) ? IA64_ISR_CODE_TB : 0;
+        trap_code |= (env->psr & IA64_PSR_SS) ? IA64_ISR_CODE_SS : 0;
+        if (!trap_code) {
+            return;
+        }
+        if (trap_code & IA64_ISR_CODE_UI) {
+            trap = IA64_EXCP_UNIMPL_INST_ADDR;
+        } else if (trap_code & IA64_ISR_CODE_TB) {
+            trap = IA64_EXCP_TAKEN_BRANCH;
+        } else {
+            trap = IA64_EXCP_SINGLE_STEP;
+        }
+        env->cr_isr = trap_code;
+        env->ia32_transition_trap = true;
+        ia64_raise_exception(env, trap, target, fault_ip, fault_slot);
+    }
 }
 
 

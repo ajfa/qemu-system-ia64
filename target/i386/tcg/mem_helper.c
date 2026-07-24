@@ -26,12 +26,16 @@
 #include "tcg/tcg.h"
 #include "helper-tcg.h"
 
+#ifndef X86_CPU_ARCH_ENV
+#define X86_CPU_ARCH_ENV(env) (env)
+#endif
+
 void helper_boundw(CPUX86State *env, target_ulong a0, int v)
 {
     int low, high;
 
-    low = cpu_ldsw_le_data_ra(env, a0, GETPC());
-    high = cpu_ldsw_le_data_ra(env, a0 + 2, GETPC());
+    low = cpu_ldsw_le_data_ra(X86_CPU_ARCH_ENV(env), a0, GETPC());
+    high = cpu_ldsw_le_data_ra(X86_CPU_ARCH_ENV(env), a0 + 2, GETPC());
     v = (int16_t)v;
     if (v < low || v > high) {
         if (env->hflags & HF_MPX_EN_MASK) {
@@ -45,8 +49,8 @@ void helper_boundl(CPUX86State *env, target_ulong a0, int v)
 {
     int low, high;
 
-    low = cpu_ldl_le_data_ra(env, a0, GETPC());
-    high = cpu_ldl_le_data_ra(env, a0 + 4, GETPC());
+    low = cpu_ldl_le_data_ra(X86_CPU_ARCH_ENV(env), a0, GETPC());
+    high = cpu_ldl_le_data_ra(X86_CPU_ARCH_ENV(env), a0 + 4, GETPC());
     if (v < low || v > high) {
         if (env->hflags & HF_MPX_EN_MASK) {
             env->bndcs_regs.sts = 0;

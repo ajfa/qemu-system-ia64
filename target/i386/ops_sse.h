@@ -22,6 +22,10 @@
 #include "crypto/aes-round.h"
 #include "crypto/clmul.h"
 
+#ifndef X86_MASKMOV_ACCESS
+#define X86_MASKMOV_ACCESS(env, addr, ra) ((void)0)
+#endif
+
 #if SHIFT == 0
 #define Reg MMXReg
 #define XMM_ONLY(...)
@@ -377,7 +381,8 @@ void glue(helper_maskmov, SUFFIX)(CPUX86State *env, Reg *d, Reg *s,
 
     for (i = 0; i < (8 << SHIFT); i++) {
         if (s->B(i) & 0x80) {
-            cpu_stb_data_ra(env, a0 + i, d->B(i), GETPC());
+            X86_MASKMOV_ACCESS(env, a0 + i, GETPC());
+            cpu_stb_data_ra(X86_CPU_ARCH_ENV(env), a0 + i, d->B(i), GETPC());
         }
     }
 }
@@ -2326,7 +2331,8 @@ void glue(helper_vpmaskmovd_st, SUFFIX)(CPUX86State *env,
 
     for (i = 0; i < (2 << SHIFT); i++) {
         if (v->L(i) >> 31) {
-            cpu_stl_le_data_ra(env, a0 + i * 4, s->L(i), GETPC());
+            cpu_stl_le_data_ra(X86_CPU_ARCH_ENV(env), a0 + i * 4,
+                               s->L(i), GETPC());
         }
     }
 }
@@ -2338,7 +2344,8 @@ void glue(helper_vpmaskmovq_st, SUFFIX)(CPUX86State *env,
 
     for (i = 0; i < (1 << SHIFT); i++) {
         if (v->Q(i) >> 63) {
-            cpu_stq_le_data_ra(env, a0 + i * 8, s->Q(i), GETPC());
+            cpu_stq_le_data_ra(X86_CPU_ARCH_ENV(env), a0 + i * 8,
+                               s->Q(i), GETPC());
         }
     }
 }
@@ -2369,7 +2376,8 @@ void glue(helper_vpgatherdd, SUFFIX)(CPUX86State *env,
         if (v->L(i) >> 31) {
             target_ulong addr = a0
                 + ((target_ulong)(int32_t)s->L(i) << scale);
-            d->L(i) = cpu_ldl_le_data_ra(env, addr & amask, GETPC());
+            d->L(i) = cpu_ldl_le_data_ra(X86_CPU_ARCH_ENV(env),
+                                         addr & amask, GETPC());
         }
         v->L(i) = 0;
     }
@@ -2383,7 +2391,8 @@ void glue(helper_vpgatherdq, SUFFIX)(CPUX86State *env,
         if (v->Q(i) >> 63) {
             target_ulong addr = a0
                 + ((target_ulong)(int32_t)s->L(i) << scale);
-            d->Q(i) = cpu_ldq_le_data_ra(env, addr & amask, GETPC());
+            d->Q(i) = cpu_ldq_le_data_ra(X86_CPU_ARCH_ENV(env),
+                                         addr & amask, GETPC());
         }
         v->Q(i) = 0;
     }
@@ -2397,7 +2406,8 @@ void glue(helper_vpgatherqd, SUFFIX)(CPUX86State *env,
         if (v->L(i) >> 31) {
             target_ulong addr = a0
                 + ((target_ulong)(int64_t)s->Q(i) << scale);
-            d->L(i) = cpu_ldl_le_data_ra(env, addr & amask, GETPC());
+            d->L(i) = cpu_ldl_le_data_ra(X86_CPU_ARCH_ENV(env),
+                                         addr & amask, GETPC());
         }
         v->L(i) = 0;
     }
@@ -2415,7 +2425,8 @@ void glue(helper_vpgatherqq, SUFFIX)(CPUX86State *env,
         if (v->Q(i) >> 63) {
             target_ulong addr = a0
                 + ((target_ulong)(int64_t)s->Q(i) << scale);
-            d->Q(i) = cpu_ldq_le_data_ra(env, addr & amask, GETPC());
+            d->Q(i) = cpu_ldq_le_data_ra(X86_CPU_ARCH_ENV(env),
+                                         addr & amask, GETPC());
         }
         v->Q(i) = 0;
     }

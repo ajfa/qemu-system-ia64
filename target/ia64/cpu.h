@@ -103,6 +103,14 @@
 #define IA64_PSR_SI      (1ULL << 23)
 #define IA64_PSR_RT      (1ULL << 27)
 #define IA64_PSR_IS      (1ULL << 34)
+#define IA64_PSR_DB      (1ULL << 24)
+#define IA64_PSR_TB      (1ULL << 26)
+#define IA64_PSR_ID      (1ULL << 37)
+#define IA64_PSR_SS      (1ULL << 40)
+/* Concurrent trap conditions reported in ISR.code (SDM Vol. 2, Table 8-3). */
+#define IA64_ISR_CODE_TB       (1ULL << 2)
+#define IA64_ISR_CODE_SS       (1ULL << 3)
+#define IA64_ISR_CODE_UI       (1ULL << 4)
 #define IA64_PSR_MC      (1ULL << 35)
 #define IA64_PSR_IT      (1ULL << 36)
 #define IA64_PSR_CPL_MASK (3ULL << 32)
@@ -491,6 +499,11 @@ typedef enum IA64Exception {
     IA64_EXCP_DISABLED_FP = 31,
     IA64_EXCP_UNSUPPORTED_DATA_REFERENCE = 32,
     IA64_EXCP_VIRTUALIZATION = 33,
+    IA64_EXCP_IA32_EXCEPTION = 34,
+    IA64_EXCP_IA32_INTERCEPT = 35,
+    IA64_EXCP_IA32_INTERRUPT = 36,
+    IA64_EXCP_TAKEN_BRANCH = 37,
+    IA64_EXCP_SINGLE_STEP = 38,
     IA64_EXCP_MAX,
 } IA64Exception;
 
@@ -635,7 +648,29 @@ static inline void ia64_tlb_entry_translate(const IA64TlbEntry *entry,
 }
 
 /* ---- CPU architectural state ---- */
+#include "ia32/compat.h"
+
 typedef struct CPUArchState {
+    /*
+     * Keep the private IA-32 backing state at offset zero.  The x86 TCG
+     * translator addresses CPUX86State fields relative to tcg_env; placing
+     * this view first lets those offsets be reused without a second CPU
+     * object or a fork of the x86 decoder.
+     */
+    CPUX86State ia32;
+
+    uint8_t ia32_data_breakpoints;
+
+    /* Rollback state for precise IA-32 Streaming SIMD exceptions. */
+    bool ia32_sse_instruction_active;
+    uint16_t ia32_sse_old_flags;
+    target_ulong ia32_sse_old_cc_dst;
+    target_ulong ia32_sse_old_cc_src;
+    target_ulong ia32_sse_old_cc_src2;
+    uint32_t ia32_sse_old_cc_op;
+    FPReg ia32_sse_old_fpregs[8];
+    uint64_t ia32_sse_old_xmm[8][2];
+
     /* General / Predicate / Branch registers */
     uint64_t gr[IA64_GR_COUNT];
     uint64_t pr[IA64_PR_COUNT];
@@ -660,6 +695,8 @@ typedef struct CPUArchState {
 
     /* Fault/exception state (for simple HMP reporting) */
     uint64_t fault_ip;
+    bool ia32_trap;
+    bool ia32_transition_trap;
     uint64_t fault_imm;
     uint64_t fault_tmpl;
     /* Pending exception and the last non-NONE exception, respectively. */
@@ -699,7 +736,8 @@ typedef struct CPUArchState {
 
     /* Application Registers */
     uint64_t ar[IA64_AR_COUNT];
-#define ar_kr0    ar[0]
+#define IA64_AR_KR0 0
+#define ar_kr0    ar[IA64_AR_KR0]
 #define ar_kr7    ar[7]
 #define ar_rsc    ar[16]
 #define ar_bsp    ar[17]

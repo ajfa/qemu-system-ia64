@@ -11,6 +11,7 @@
 #include "qemu/bswap.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
+#include "accel/tcg/cpu-ops.h"
 #include "accel/tcg/cpu-ldst-common.h"
 #include "accel/tcg/cpu-mmu-index.h"
 #include "exec/target_page.h"
@@ -282,16 +283,7 @@ static bool translator_ld(CPUArchState *env, DisasContextBase *db,
         len -= len0;
     }
 
-    /*
-     * The read must conclude on the second page and not extend to a third.
-     *
-     * TODO: We could allow the two pages to be virtually discontiguous,
-     * since we already allow the two pages to be physically discontiguous.
-     * The only reasonable use case would be executing an insn at the end
-     * of the address space wrapping around to the beginning.  For that,
-     * we would need to know the current width of the address space.
-     * In the meantime, assert.
-     */
+    /* The read must conclude on the second page and not extend to a third. */
     base = (base & TARGET_PAGE_MASK) + TARGET_PAGE_SIZE;
     assert(((base ^ pc) & TARGET_PAGE_MASK) == 0);
     assert(((base ^ last) & TARGET_PAGE_MASK) == 0);
@@ -299,8 +291,18 @@ static bool translator_ld(CPUArchState *env, DisasContextBase *db,
 
     if (host == NULL) {
         tb_page_addr_t page0, old_page1, new_page1;
+        vaddr lookup_base = base;
 
-        new_page1 = get_page_addr_code_hostp(env, base, &db->host_addr[1]);
+#ifndef CONFIG_USER_ONLY
+        CPUState *cpu = env_cpu(env);
+
+        /* The architectural address may wrap at the end of its width. */
+        lookup_base = cpu->cc->tcg_ops->pointer_wrap(
+            cpu, db->code_mmuidx, lookup_base, db->pc_first);
+#endif
+
+        new_page1 = get_page_addr_code_hostp(env, lookup_base,
+                                             &db->host_addr[1]);
 
         /*
          * If the second page is MMIO, treat as if the first page

@@ -23110,69 +23110,6 @@ test_br_ia_montecito_native_ia32_disabled_fault = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
-# ia32-exec=abort keeps the historical cpu_abort() path (opt-in).
-test_br_ia_ia32_unsupported_aborts_after_state_transition = \
-    require_qemu_failure(
-        "br_ia_ia32_unsupported_aborts_after_state_transition", [
-            (0x10, *movl_mlx(8, 0x1234567800000043)),
-            (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
-            (0x30, 0x10, nop_m(), nop_i(),
-             br_indirect(7, btype=1)),
-            (0x40, 0x10, nop_m(), nop_i(),
-             br_cond(0x40, 0x40)),
-        ], [
-            "IA-32 instruction set execution is not implemented",
-            "IP=0x0000000000000043",
-            f"PSR=0x{IA64_PSR_IS:016x}",
-        ], entry=0x10, cpu="madison,ia32-exec=abort")
-
-test_rfi_to_ia32_unsupported_aborts_with_byte_ip = require_qemu_failure(
-    "rfi_to_ia32_unsupported_aborts_with_byte_ip",
-    [
-        (0x10, *movl_mlx(2, IA64_PSR_IS)),
-        (0x20, *movl_mlx(3, 0x1234567800000045)),
-        *rfi_to_gr(0x30, 2, 3),
-    ], [
-        "IA-32 instruction set execution is not implemented",
-        "IP=0x0000000000000045",
-        f"PSR=0x{IA64_PSR_IS:016x}",
-    ], entry=0x10, cpu="madison,ia32-exec=abort")
-
-# Default (ia32-exec=stop): the IA-32 execution attempt dumps state and pauses
-# the VM (guest-panicked run state) instead of aborting QEMU, so recon boots
-# yield inspectable state.  Same br.ia transition program as the abort test.
-test_br_ia_ia32_stop_pauses_vm = require_ia32_stop(
-    "br_ia_ia32_stop_pauses_vm", [
-        (0x10, *movl_mlx(8, 0x1234567800000043)),
-        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
-        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
-        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
-    ], entry=0x10, cpu="merced")
-
-# ia32-exec=ignore: on a native-IA-32 model the br.ia transition still happens,
-# then the IA-32 execution attempt is delivered to the guest as a Disabled ISA
-# Transition fault (General vector) instead of stopping the VM -- so an IA-64 OS
-# keeps running and only the offending IA-32 code faults.  Reaching the handler
-# with ISR.code=4 / ISR.ei=0 (r9=0x40) is the proof; the montecito
-# transition-time fault (br_ia_montecito_native_ia32_disabled_fault) instead has
-# ISR.ei=2 because it faults before the transition clears PSR.ri.
-test_br_ia_ia32_ignore_raises_disabled_isa = require_registers(
-    "br_ia_ia32_ignore_raises_disabled_isa", [
-        (0x10, *movl_mlx(8, 0x1234567800000043)),
-        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
-        (0x30, *movl_mlx(2, IA64_PSR_IC)),
-        (0x40, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
-        (0x50, 0x00, srlz_d(), nop_i(), nop_i()),
-        (0x60, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
-        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(9, 17), nop_i(), nop_i()),
-        (IA64_GENERAL_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
-         br_cond(IA64_GENERAL_VECTOR + 0x10, IA64_GENERAL_VECTOR + 0x10)),
-    ], {
-        "ip": IA64_GENERAL_VECTOR + 0x10,
-        "r9": 0x40,
-        "exception": IA64_EXCP_NONE,
-    }, entry=0x10, cpu="madison,ia32-exec=ignore")
-
 test_rfi_montecito_native_ia32_disabled_fault = require_registers(
     "rfi_montecito_native_ia32_disabled_fault", [
         (0x10, *movl_mlx(2, IA64_PSR_IS)),
@@ -24929,13 +24866,6 @@ TEST_NAMES = {
         test_br_ia_psr_di_disabled_transition_fault,
     "br_ia_montecito_native_ia32_disabled_fault":
         test_br_ia_montecito_native_ia32_disabled_fault,
-    "br_ia_ia32_unsupported_aborts_after_state_transition":
-        test_br_ia_ia32_unsupported_aborts_after_state_transition,
-    "br_ia_ia32_stop_pauses_vm": test_br_ia_ia32_stop_pauses_vm,
-    "br_ia_ia32_ignore_raises_disabled_isa":
-        test_br_ia_ia32_ignore_raises_disabled_isa,
-    "rfi_to_ia32_unsupported_aborts_with_byte_ip":
-        test_rfi_to_ia32_unsupported_aborts_with_byte_ip,
     "rfi_montecito_native_ia32_disabled_fault":
         test_rfi_montecito_native_ia32_disabled_fault,
     "rfi_montecito_uncollected_transition_preserves_target":

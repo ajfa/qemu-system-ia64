@@ -1066,7 +1066,8 @@ bool tb_invalidate_phys_page_unwind(CPUState *cpu, tb_page_addr_t addr,
      * Without precise smc semantics, or when outside of a TB,
      * we can skip to invalidate.
      */
-    if (!pc || !cpu || !cpu->cc->tcg_ops->precise_smc) {
+    if (!pc || !cpu ||
+        !tcg_cpu_precise_smc_enabled(cpu->cc->tcg_ops, cpu)) {
         tb_invalidate_phys_page(addr);
         return false;
     }
@@ -1123,7 +1124,8 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
     /* Range may not cross a page. */
     tcg_debug_assert(((start ^ last) & TARGET_PAGE_MASK) == 0);
 
-    if (retaddr && cpu && cpu->cc->tcg_ops->precise_smc) {
+    if (retaddr && cpu &&
+        tcg_cpu_precise_smc_enabled(cpu->cc->tcg_ops, cpu)) {
         current_tb = tcg_tb_lookup(retaddr);
     }
 

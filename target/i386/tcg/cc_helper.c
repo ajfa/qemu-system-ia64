@@ -276,8 +276,10 @@ psz_b:
 psz_w:
     shift += 16;
 psz_l:
-#ifdef TARGET_X86_64
+#if TARGET_LONG_BITS == 64
     shift += 32;
+#endif
+#ifdef TARGET_X86_64
 psz_q:
 #endif
 

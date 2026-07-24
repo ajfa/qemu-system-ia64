@@ -8,6 +8,8 @@
  */
 
 #include "qemu/osdep.h"
+#include "ia32/ia32.h"
+#include "ia32/translate.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/atomic.h"
@@ -86,7 +88,9 @@ static TCGv_i64 cpu_rse_gr_dirty[2];
 #define IA64_TB_FLAG_PSR_IC       (1u << 5)
 #define IA64_TB_FLAG_BE           (1u << 6)
 #define IA64_TB_FLAG_GROUP_START  (1u << 7)
-#define IA64_TB_FLAG_PSR_IS       (1u << 8)
+#define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
+#define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
+#define IA64_TB_FLAG_PSR_IS       (1u << 31)
 #define IA64_TB_FLAG_CPL_SHIFT    9
 #define IA64_TB_FLAG_CPL_MASK     (3u << IA64_TB_FLAG_CPL_SHIFT)
 
@@ -137,6 +141,11 @@ const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX] = {
      * fault vector was subsequently defined.
      */
     [IA64_EXCP_VIRTUALIZATION]   = 0x6100,
+    [IA64_EXCP_IA32_EXCEPTION]   = 0x6900,
+    [IA64_EXCP_IA32_INTERCEPT]   = 0x6a00,
+    [IA64_EXCP_IA32_INTERRUPT]   = 0x6b00,
+    [IA64_EXCP_TAKEN_BRANCH]     = 0x5f00,
+    [IA64_EXCP_SINGLE_STEP]      = 0x6000,
 };
 
 typedef enum Ia64SlotUnit {
@@ -11026,13 +11035,18 @@ static void ia64_cpu_set_pc(CPUState *cs, vaddr value)
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
 
     cpu->env.ip = value;
+    if (cpu->env.psr & IA64_PSR_IS) {
+        cpu->env.ia32.eip =
+            (uint32_t)(value - cpu->env.ia32.segs[R_CS].base);
+    }
 }
 
 static vaddr ia64_cpu_get_pc(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
 
-    return cpu->env.ip;
+    return cpu->env.psr & IA64_PSR_IS ?
+           ia64_ia32_virtual_ip(&cpu->env) : cpu->env.ip;
 }
 
 /* ---- Local SAPIC helpers ---- */
@@ -11430,6 +11444,24 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     uint64_t psr = cpu->env.psr;
+    CPUX86State *xenv = &cpu->env.ia32;
+
+    if (psr & IA64_PSR_IS) {
+        uint32_t cs_base = xenv->segs[R_CS].base;
+        uint32_t ia32_flags = xenv->hflags |
+            (xenv->eflags &
+             (IOPL_MASK | TF_MASK | RF_MASK | VM_MASK | AC_MASK)) |
+            ((psr & IA64_PSR_DB) ? IA64_TB_FLAG_IA32_PSR_DB : 0) |
+            ((psr & IA64_PSR_AC) ? IA64_TB_FLAG_IA32_PSR_AC : 0) |
+            ((psr & IA64_PSR_SS) ? TF_MASK : 0);
+
+        return (TCGTBCPUState) {
+            .pc = (uint32_t)(cs_base + xenv->eip),
+            .cs_base = cs_base,
+            .flags = ia32_flags | IA64_TB_FLAG_PSR_IS,
+        };
+    }
+
     uint32_t flags =
         ((psr >> 17) & IA64_TB_FLAG_DT) |
         ((psr >> 35) & IA64_TB_FLAG_IT) |
@@ -11438,7 +11470,6 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
         ((psr >> 8) & IA64_TB_FLAG_PSR_IC) |
         ((psr << 5) & IA64_TB_FLAG_BE) |
         ((uint32_t)cpu->env.instruction_group_start << 7) |
-        ((psr >> 26) & IA64_TB_FLAG_PSR_IS) |
         ((psr >> (IA64_PSR_CPL_SHIFT - IA64_TB_FLAG_CPL_SHIFT)) &
          IA64_TB_FLAG_CPL_MASK);
 
@@ -11505,6 +11536,14 @@ static void ia64_cpu_synchronize_from_tb(CPUState *cs,
                                          const TranslationBlock *tb)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+
+    if (tb->flags & IA64_TB_FLAG_PSR_IS) {
+        tcg_debug_assert(!tcg_cflags_has(cs, CF_PCREL));
+        cpu->env.ia32.eip = (uint32_t)(tb->pc - tb->cs_base);
+        cpu->env.ip = (uint32_t)tb->pc;
+        return;
+    }
+
     uint64_t ri =
         (tb->flags & IA64_TB_FLAG_RI_MASK) >> IA64_TB_FLAG_RI_SHIFT;
 
@@ -11526,6 +11565,23 @@ static void ia64_restore_state_to_opc(CPUState *cs,
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
 
+    if (tb->flags & IA64_TB_FLAG_PSR_IS) {
+        CPUX86State *xenv = &cpu->env.ia32;
+        uint64_t new_pc;
+        if (tb_cflags(tb) & CF_PCREL) {
+            uint64_t pc = xenv->eip + tb->cs_base;
+            new_pc = (pc & TARGET_PAGE_MASK) | data[0];
+        } else {
+            new_pc = data[0];
+        }
+        xenv->eip = (uint32_t)(new_pc - tb->cs_base);
+        cpu->env.ip = (uint32_t)new_pc;
+        if (data[1] != CC_OP_DYNAMIC) {
+            xenv->cc_op = data[1];
+        }
+        return;
+    }
+
     cpu->env.ip = data[0];
 }
 
@@ -11537,6 +11593,20 @@ static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
         return MMU_IDX_VIRT_CPL(ia64_psr_cpl(cpu->env.psr));
     }
     return MMU_PHYS_IDX;
+}
+
+static vaddr ia64_pointer_wrap(CPUState *cs, int mmu_idx,
+                               vaddr result, vaddr base)
+{
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+    return cpu->env.psr & IA64_PSR_IS ? (uint32_t)result : result;
+}
+
+static bool ia64_precise_smc_enabled(CPUState *cs)
+{
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+    /* IA-32 stores, unlike IA-64 stores, participate in hardware SMC. */
+    return cpu->env.psr & IA64_PSR_IS;
 }
 
 #ifndef CONFIG_USER_ONLY
@@ -12103,12 +12173,46 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     uint64_t vector;
     uint64_t isr_status = 0;
+    uint64_t ia32_fault_ip = 0;
+    uint64_t ia32_next_ip = 0;
     bool psr_ic_inflight;
     bool collect;
+    bool ia32;
+    bool ia32_entry_trap;
+    bool ia32_transition_trap;
+    bool ia32_trap = false;
 
     if (excp >= IA64_EXCP_MAX || excp == IA64_EXCP_NONE) {
         return;
     }
+
+    ia32 = cpu->env.psr & IA64_PSR_IS;
+    ia32_transition_trap = cpu->env.ia32_transition_trap;
+    ia32_entry_trap = ia32 && ia32_transition_trap;
+    if (ia32_entry_trap) {
+        ia64_ia32_abort_sse_instruction(&cpu->env);
+        ia64_ia32_sync_to_ia64(&cpu->env);
+    } else if (ia32 || ia32_transition_trap) {
+        if (excp == IA64_EXCP_IA32_EXCEPTION ||
+            excp == IA64_EXCP_IA32_INTERCEPT ||
+            excp == IA64_EXCP_IA32_INTERRUPT) {
+            ia32_fault_ip = (uint32_t)cpu->env.fault_ip;
+            ia32_trap = cpu->env.ia32_trap;
+            ia32_next_ip = ia32_trap ?
+                (uint32_t)cpu->env.fault_imm : ia32_fault_ip;
+        } else if (excp == IA64_EXCP_EXTINT) {
+            ia32_fault_ip = ia64_ia32_virtual_ip(&cpu->env);
+            ia32_next_ip = ia32_fault_ip;
+        } else {
+            ia32_fault_ip = (uint32_t)cpu->env.fault_ip;
+            ia32_next_ip = ia32_fault_ip;
+        }
+        if (ia32) {
+            ia64_ia32_abort_sse_instruction(&cpu->env);
+            ia64_ia32_sync_to_ia64(&cpu->env);
+        }
+    }
+    (void)ia32_trap;
 
     vector = ia64_ivt_vectors[excp];
     switch (excp) {
@@ -12139,6 +12243,11 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     case IA64_EXCP_FP_TRAP:
     case IA64_EXCP_DISABLED_ISA_TRANSITION:
     case IA64_EXCP_DISABLED_FP:
+    case IA64_EXCP_IA32_EXCEPTION:
+    case IA64_EXCP_IA32_INTERCEPT:
+    case IA64_EXCP_IA32_INTERRUPT:
+    case IA64_EXCP_TAKEN_BRANCH:
+    case IA64_EXCP_SINGLE_STEP:
         isr_status = cpu->env.cr_isr;
         break;
     default:
@@ -12163,15 +12272,23 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     helper_tlb_serialize(&cpu->env, 1, 1);
 
     if (collect) {
-        cpu->env.cr_ipsr = (cpu->env.psr & ~IA64_PSR_RI_MASK) |
-                           (((uint64_t)slot & 3) << IA64_PSR_RI_SHIFT);
-        cpu->env.cr_iip = ia64_ip_bundle_addr(cpu->env.ip);
+        cpu->env.cr_ipsr = cpu->env.psr & ~IA64_PSR_RI_MASK;
+        if (ia32_entry_trap) {
+            cpu->env.cr_iip = cpu->env.fault_ip;
+            cpu->env.cr_iipa = cpu->env.fault_imm;
+        } else if (ia32 || ia32_transition_trap) {
+            cpu->env.cr_iip = ia32_next_ip;
+            cpu->env.cr_iipa = ia32_fault_ip;
+        } else {
+            cpu->env.cr_ipsr |= ((uint64_t)slot & 3) << IA64_PSR_RI_SHIFT;
+            cpu->env.cr_iip = ia64_ip_bundle_addr(cpu->env.ip);
+            cpu->env.cr_iipa = excp == IA64_EXCP_FP_TRAP ?
+                               cpu->env.fault_imm :
+                               cpu->env.last_successful_bundle;
+        }
         if (ia64_exception_writes_ifa(excp)) {
             cpu->env.cr_ifa = fault_addr;
         }
-        cpu->env.cr_iipa = excp == IA64_EXCP_FP_TRAP ?
-                           cpu->env.fault_imm :
-                           cpu->env.last_successful_bundle;
         /*
          * A collected interruption records the interrupted IP/PSR and clears
          * IFS.v.  The interrupted frame remains current until the handler
@@ -12186,7 +12303,7 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
 
     if (excp != IA64_EXCP_DATA_NESTED_TLB) {
         cpu->env.cr_isr = isr_status;
-        if (slot > 0) {
+        if ((!ia32 || ia32_entry_trap) && slot > 0) {
             cpu->env.cr_isr |= ((uint64_t)slot & 3) << IA64_ISR_EI_SHIFT;
         }
         if (!collect || psr_ic_inflight) {
@@ -12211,6 +12328,8 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     }
 
     cpu->env.exception = 0;
+    cpu->env.ia32_trap = false;
+    cpu->env.ia32_transition_trap = false;
     cpu->env.pending_extint = 0;
 }
 
@@ -13116,6 +13235,8 @@ static const struct SysemuCPUOps ia64_sysemu_ops = {
 
 static void ia64_cpu_tcg_init(void)
 {
+    ia64_ia32_translate_init();
+
     static const char * const gr_names[IA64_GR_COUNT] = {
         "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
         "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
@@ -13305,13 +13426,6 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
     bool record_iipa;
     bool psr_ic_modified;
     int slot;
-
-    if (ctx->base.tb->flags & IA64_TB_FLAG_PSR_IS) {
-        db->pc_next = bundle_ip + 1;
-        gen_helper_ia32_unsupported(tcg_env);
-        db->is_jmp = DISAS_NORETURN;
-        return;
-    }
 
     low = translator_ldq_end(ctx->env, db, bundle_ip, MO_LE);
     high = translator_ldq_end(ctx->env, db, bundle_ip + 8, MO_LE);
@@ -13565,13 +13679,19 @@ static void ia64_cpu_translate_code(CPUState *cs, TranslationBlock *tb,
         .disas_log = ia64_tr_disas_log,
     };
 
-    translator_loop(cs, tb, max_insns, pc, host_pc, &ia64_tr_ops, &ctx.base,
-                    TCG_TYPE_VA);
+    if (tb->flags & IA64_TB_FLAG_PSR_IS) {
+        ia64_ia32_translate_code(cs, tb, max_insns, pc, host_pc);
+    } else {
+        translator_loop(cs, tb, max_insns, pc, host_pc, &ia64_tr_ops,
+                        &ctx.base, TCG_TYPE_VA);
+    }
 }
 
 static const TCGCPUOps ia64_tcg_ops = {
     .guest_default_memory_order = TCG_MO_ALL,
     .mttcg_supported = true,
+    .precise_smc = true,
+    .precise_smc_enabled = ia64_precise_smc_enabled,
     .initialize = ia64_cpu_tcg_init,
     .translate_code = ia64_cpu_translate_code,
     .get_tb_cpu_state = ia64_get_tb_cpu_state,
@@ -13579,7 +13699,7 @@ static const TCGCPUOps ia64_tcg_ops = {
     .restore_state_to_opc = ia64_restore_state_to_opc,
     .mmu_index = ia64_cpu_mmu_index,
     .tlb_fill = ia64_cpu_tlb_fill,
-    .pointer_wrap = cpu_pointer_wrap_notreached,
+    .pointer_wrap = ia64_pointer_wrap,
 #ifndef CONFIG_USER_ONLY
     .do_unaligned_access = ia64_cpu_do_unaligned_access,
 #endif

@@ -688,7 +688,7 @@ int page_unprotect(CPUState *cpu, tb_page_addr_t address, uintptr_t pc)
          * this thread raced with another one which got here first and
          * set the page to PAGE_WRITE and did the TB invalidate for us.
          */
-        if (pc && cpu->cc->tcg_ops->precise_smc) {
+        if (pc && tcg_cpu_precise_smc_enabled(cpu->cc->tcg_ops, cpu)) {
             TranslationBlock *current_tb = tcg_tb_lookup(pc);
             if (current_tb) {
                 current_tb_invalidated = tb_cflags(current_tb) & CF_INVALID;

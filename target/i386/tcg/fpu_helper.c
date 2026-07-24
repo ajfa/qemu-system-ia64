@@ -29,6 +29,16 @@
 #include "helper-tcg.h"
 #include "access.h"
 
+#ifndef X86_CPU_ARCH_ENV
+#define X86_CPU_ARCH_ENV(env) (env)
+#endif
+#ifndef X86_FPU_ALWAYS_NE
+#define X86_FPU_ALWAYS_NE 0
+#endif
+#ifndef X86_MXCSR_VALID_MASK
+#define X86_MXCSR_VALID_MASK 0x0000ffffU
+#endif
+
 /* float macros */
 #define FT0    (env->ft0)
 #define ST0    (env->fpregs[env->fpstt].d)
@@ -228,7 +238,7 @@ static inline floatx80 helper_fdiv(CPUX86State *env, floatx80 a, floatx80 b)
 
 static void fpu_raise_exception(CPUX86State *env, uintptr_t retaddr)
 {
-    if (env->cr[0] & CR0_NE_MASK) {
+    if (X86_FPU_ALWAYS_NE || (env->cr[0] & CR0_NE_MASK)) {
         raise_exception_ra(env, EXCP10_COPR, retaddr);
     }
 #if !defined(CONFIG_USER_ONLY)
@@ -816,6 +826,7 @@ static void do_fninit(CPUX86State *env)
     env->fpstt = 0;
     env->fpcs = 0;
     env->fpds = 0;
+    env->fpop = 0;
     env->fpip = 0;
     env->fpdp = 0;
     cpu_set_fpuc(env, 0x37f);
@@ -2445,7 +2456,10 @@ static void do_fstenv(X86Access *ac, target_ulong ptr, int data32)
 {
     CPUX86State *env = ac->env;
     int fpus, fptag, exp, i;
+    bool protected_mode = (env->cr[0] & CR0_PE_MASK) &&
+                          !(env->eflags & VM_MASK);
     uint64_t mant;
+    uint32_t fip, fdp;
     CPU_LDoubleU tmp;
 
     fpus = (env->fpus & ~0x3800) | (env->fpstt & 0x7) << 11;
@@ -2473,19 +2487,40 @@ static void do_fstenv(X86Access *ac, target_ulong ptr, int data32)
         access_stl(ac, ptr, env->fpuc);
         access_stl(ac, ptr + 4, fpus);
         access_stl(ac, ptr + 8, fptag);
-        access_stl(ac, ptr + 12, env->fpip); /* fpip */
-        access_stl(ac, ptr + 16, env->fpcs); /* fpcs */
-        access_stl(ac, ptr + 20, env->fpdp); /* fpoo */
-        access_stl(ac, ptr + 24, env->fpds); /* fpos */
+        if (protected_mode) {
+            access_stl(ac, ptr + 12, env->fpip);
+            access_stl(ac, ptr + 16,
+                       env->fpcs | (uint32_t)(env->fpop & 0x7ff) << 16);
+            access_stl(ac, ptr + 20, env->fpdp);
+            access_stl(ac, ptr + 24, env->fpds);
+        } else {
+            fip = (uint32_t)env->fpip + ((uint32_t)env->fpcs << 4);
+            fdp = (uint32_t)env->fpdp + ((uint32_t)env->fpds << 4);
+            access_stl(ac, ptr + 12, fip & 0xffff);
+            access_stl(ac, ptr + 16, (fip & 0xffff0000) |
+                       (env->fpop & 0x7ff));
+            access_stl(ac, ptr + 20, fdp & 0xffff);
+            access_stl(ac, ptr + 24, fdp & 0xffff0000);
+        }
     } else {
         /* 16 bit */
         access_stw(ac, ptr, env->fpuc);
         access_stw(ac, ptr + 2, fpus);
         access_stw(ac, ptr + 4, fptag);
-        access_stw(ac, ptr + 6, env->fpip);
-        access_stw(ac, ptr + 8, env->fpcs);
-        access_stw(ac, ptr + 10, env->fpdp);
-        access_stw(ac, ptr + 12, env->fpds);
+        if (protected_mode) {
+            access_stw(ac, ptr + 6, env->fpip);
+            access_stw(ac, ptr + 8, env->fpcs);
+            access_stw(ac, ptr + 10, env->fpdp);
+            access_stw(ac, ptr + 12, env->fpds);
+        } else {
+            fip = (uint32_t)env->fpip + ((uint32_t)env->fpcs << 4);
+            fdp = (uint32_t)env->fpdp + ((uint32_t)env->fpds << 4);
+            access_stw(ac, ptr + 6, fip);
+            access_stw(ac, ptr + 8, ((fip >> 4) & 0xf000) |
+                       (env->fpop & 0x7ff));
+            access_stw(ac, ptr + 10, fdp);
+            access_stw(ac, ptr + 12, (fdp >> 4) & 0xf000);
+        }
     }
 }
 
@@ -2495,6 +2530,8 @@ void helper_fstenv(CPUX86State *env, target_ulong ptr, int data32)
 
     access_prepare(&ac, env, ptr, 14 << data32, MMU_DATA_STORE, GETPC());
     do_fstenv(&ac, ptr, data32);
+    /* Both waiting and non-waiting forms mask all x87 exceptions. */
+    cpu_set_fpuc(env, env->fpuc | FPUC_EM);
 }
 
 static void cpu_set_fpus(CPUX86State *env, uint16_t fpus)
@@ -2517,6 +2554,9 @@ static void do_fldenv(X86Access *ac, target_ulong ptr, int data32)
 {
     int i, fpus, fptag;
     CPUX86State *env = ac->env;
+    bool protected_mode = (env->cr[0] & CR0_PE_MASK) &&
+                          !(env->eflags & VM_MASK);
+    uint32_t word;
 
     cpu_set_fpuc(env, access_ldw(ac, ptr));
     fpus = access_ldw(ac, ptr + (2 << data32));
@@ -2527,13 +2567,45 @@ static void do_fldenv(X86Access *ac, target_ulong ptr, int data32)
         env->fptags[i] = ((fptag & 3) == 3);
         fptag >>= 2;
     }
+
+    if (data32) {
+        if (protected_mode) {
+            env->fpip = access_ldl(ac, ptr + 12);
+            word = access_ldl(ac, ptr + 16);
+            env->fpcs = word;
+            env->fpop = (word >> 16) & 0x7ff;
+            env->fpdp = access_ldl(ac, ptr + 20);
+            env->fpds = access_ldl(ac, ptr + 24);
+        } else {
+            env->fpip = access_ldw(ac, ptr + 12);
+            word = access_ldl(ac, ptr + 16);
+            env->fpip |= word & 0xffff0000;
+            env->fpop = word & 0x7ff;
+            env->fpdp = access_ldw(ac, ptr + 20);
+            env->fpdp |= access_ldl(ac, ptr + 24) & 0xffff0000;
+            env->fpcs = env->fpds = 0;
+        }
+    } else if (protected_mode) {
+        env->fpip = access_ldw(ac, ptr + 6);
+        env->fpcs = access_ldw(ac, ptr + 8);
+        env->fpdp = access_ldw(ac, ptr + 10);
+        env->fpds = access_ldw(ac, ptr + 12);
+    } else {
+        env->fpip = access_ldw(ac, ptr + 6);
+        word = access_ldw(ac, ptr + 8);
+        env->fpip |= (uint32_t)(word & 0xf000) << 4;
+        env->fpop = word & 0x7ff;
+        env->fpdp = access_ldw(ac, ptr + 10);
+        env->fpdp |= (uint32_t)(access_ldw(ac, ptr + 12) & 0xf000) << 4;
+        env->fpcs = env->fpds = 0;
+    }
 }
 
 void helper_fldenv(CPUX86State *env, target_ulong ptr, int data32)
 {
     X86Access ac;
 
-    access_prepare(&ac, env, ptr, 14 << data32, MMU_DATA_STORE, GETPC());
+    access_prepare(&ac, env, ptr, 14 << data32, MMU_DATA_LOAD, GETPC());
     do_fldenv(&ac, ptr, data32);
 }
 
@@ -2602,12 +2674,24 @@ static void do_xsave_fpu(X86Access *ac, target_ulong ptr)
     access_stw(ac, ptr + XO(legacy.fcw), env->fpuc);
     access_stw(ac, ptr + XO(legacy.fsw), fpus);
     access_stw(ac, ptr + XO(legacy.ftw), fptag ^ 0xff);
+    access_stw(ac, ptr + XO(legacy.fpop), env->fpop & 0x7ff);
 
-    /* In 32-bit mode this is eip, sel, dp, sel.
-       In 64-bit mode this is rip, rdp.
-       But in either case we don't write actual data, just zeros.  */
-    access_stq(ac, ptr + XO(legacy.fpip), 0); /* eip+sel; rip */
-    access_stq(ac, ptr + XO(legacy.fpdp), 0); /* edp+sel; rdp */
+    if (env->hflags & HF_CS64_MASK) {
+        /*
+         * The translator does not currently pass the REX.W distinction
+         * between FXSAVE and FXSAVE64 into this helper.  Keep the previous
+         * conservative behavior in 64-bit code until that distinction is
+         * available; Madison's IA-32 System Environment always uses the
+         * 32-bit layout below.
+         */
+        access_stq(ac, ptr + XO(legacy.fpip), 0);
+        access_stq(ac, ptr + XO(legacy.fpdp), 0);
+    } else {
+        access_stl(ac, ptr + XO(legacy.fip), env->fpip);
+        access_stl(ac, ptr + XO(legacy.fcs), env->fpcs);
+        access_stl(ac, ptr + XO(legacy.foo), env->fpdp);
+        access_stl(ac, ptr + XO(legacy.fos), env->fpds);
+    }
 
     addr = ptr + XO(legacy.fpregs);
 
@@ -2624,7 +2708,7 @@ static void do_xsave_mxcsr(X86Access *ac, target_ulong ptr)
 
     update_mxcsr_from_sse_status(env);
     access_stl(ac, ptr + XO(legacy.mxcsr), env->mxcsr);
-    access_stl(ac, ptr + XO(legacy.mxcsr_mask), 0x0000ffff);
+    access_stl(ac, ptr + XO(legacy.mxcsr_mask), X86_MXCSR_VALID_MASK);
 }
 
 static void do_xsave_sse(X86Access *ac, target_ulong ptr)
@@ -2822,6 +2906,13 @@ static void do_xrstor_fpu(X86Access *ac, target_ulong ptr)
     fptag = access_ldw(ac, ptr + XO(legacy.ftw));
     cpu_set_fpuc(env, fpuc);
     cpu_set_fpus(env, fpus);
+    env->fpop = access_ldw(ac, ptr + XO(legacy.fpop)) & 0x7ff;
+    if (!(env->hflags & HF_CS64_MASK)) {
+        env->fpip = access_ldl(ac, ptr + XO(legacy.fip));
+        env->fpcs = access_ldw(ac, ptr + XO(legacy.fcs));
+        env->fpdp = access_ldl(ac, ptr + XO(legacy.foo));
+        env->fpds = access_ldw(ac, ptr + XO(legacy.fos));
+    }
 
     fptag ^= 0xff;
     for (i = 0; i < 8; i++) {
@@ -2968,6 +3059,11 @@ void helper_fxrstor(CPUX86State *env, target_ulong ptr)
 
     access_prepare(&ac, env, ptr, sizeof(X86LegacyXSaveArea),
                    MMU_DATA_LOAD, ra);
+    if ((env->cr[4] & CR4_OSFXSR_MASK) &&
+        (access_ldl(&ac, ptr + XO(legacy.mxcsr)) &
+         ~X86_MXCSR_VALID_MASK)) {
+        raise_exception_ra(env, EXCP0D_GPF, ra);
+    }
     do_fxrstor(&ac, ptr);
 }
 
@@ -3050,7 +3146,7 @@ static void do_xrstor(X86Access *ac, target_ulong ptr,
             env->pkru = 0;
         }
         if (env->pkru != old_pkru) {
-            CPUState *cs = env_cpu(env);
+            CPUState *cs = env_cpu(X86_CPU_ARCH_ENV(env));
             tlb_flush(cs);
         }
     }
@@ -3288,6 +3384,9 @@ void helper_update_mxcsr(CPUX86State *env)
 
 void helper_ldmxcsr(CPUX86State *env, uint32_t val)
 {
+    if (val & ~X86_MXCSR_VALID_MASK) {
+        raise_exception_ra(env, EXCP0D_GPF, GETPC());
+    }
     cpu_set_mxcsr(env, val);
 }
 
@@ -3306,10 +3405,10 @@ void helper_emms(CPUX86State *env)
 }
 
 #define SHIFT 0
-#include "ops_sse.h"
+#include "target/i386/ops_sse.h"
 
 #define SHIFT 1
-#include "ops_sse.h"
+#include "target/i386/ops_sse.h"
 
 #define SHIFT 2
-#include "ops_sse.h"
+#include "target/i386/ops_sse.h"

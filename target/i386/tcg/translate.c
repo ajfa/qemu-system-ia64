@@ -35,9 +35,128 @@
 
 #include "exec/log.h"
 
+#ifndef X86_GEN_HELPER_RAISE_EXCEPTION
+#define X86_GEN_HELPER_RAISE_EXCEPTION gen_helper_raise_exception
+#endif
+
+#ifndef X86_TB_FLAGS
+#define X86_TB_FLAGS(flags) (flags)
+#endif
+
+#ifndef X86_GEN_INSN_START
+#define X86_GEN_INSN_START(pc) do { } while (0)
+#endif
+
+#ifndef X86_INT3_VECTOR
+#define X86_INT3_VECTOR(vector) (vector)
+#endif
+
+/* IA-64's IA-32 System Environment adds JMPE and system intercepts. */
+#ifndef X86_IA32_SYSTEM_ENV
+#define X86_IA32_SYSTEM_ENV 0
+#endif
+#ifndef X86_AFTER_INSN_WRITEBACK
+#define X86_AFTER_INSN_WRITEBACK(s, decode) ((void)0)
+#endif
+#ifndef X86_GEN_TAKEN_BRANCH
+#define X86_GEN_TAKEN_BRANCH(s) ((void)0)
+#endif
+#ifndef X86_GEN_NOT_TAKEN_BRANCH
+#define X86_GEN_NOT_TAKEN_BRANCH(s) ((void)0)
+#endif
+#ifndef X86_GEN_DISABLED_FP_CHECK
+#define X86_GEN_DISABLED_FP_CHECK(s, decode) ((void)0)
+#endif
+#ifndef X86_GEN_PENDING_FP_CHECK
+#define X86_GEN_PENDING_FP_CHECK(s, decode) ((void)0)
+#endif
+#ifndef X86_GEN_SSE_EXCEPTION_BEGIN
+#define X86_GEN_SSE_EXCEPTION_BEGIN(s, decode) ((void)0)
+#endif
+#ifndef X86_GEN_SSE_EXCEPTION_END
+#define X86_GEN_SSE_EXCEPTION_END(s, decode) ((void)0)
+#endif
+#ifndef X86_REP_CAN_LOOP
+#define X86_REP_CAN_LOOP(s) true
+#endif
+#ifndef X86_REP_FAULT_SETS_RF
+#define X86_REP_FAULT_SETS_RF(s) false
+#endif
+#ifndef X86_REP_FINAL_ITERATION_COMPLETES
+#define X86_REP_FINAL_ITERATION_COMPLETES(s) false
+#endif
+#ifndef X86_GEN_REP_ITERATION
+#define X86_GEN_REP_ITERATION(s) ((void)0)
+#endif
+#ifndef X86_GEN_REP_COMPLETE
+#define X86_GEN_REP_COMPLETE(s) ((void)0)
+#endif
+#ifndef X86_GEN_CODE_FETCH_CHECK
+#define X86_GEN_CODE_FETCH_CHECK(s) ((void)0)
+#endif
+#ifndef X86_GEN_CPUID_SERIALIZE
+#define X86_GEN_CPUID_SERIALIZE(s) ((void)0)
+#endif
+#ifndef X86_GEN_X87_FOP
+#define X86_GEN_X87_FOP(s, fop) ((void)0)
+#endif
+#ifndef X86_SPLIT_NEAR_PAGE_END
+#define X86_SPLIT_NEAR_PAGE_END(s) false
+#endif
+#ifndef X86_CODE_FETCH_VALID
+#define X86_CODE_FETCH_VALID(env, pc, size) true
+#endif
+#ifndef X86_CODE_FETCH_FAULT_PROBES_SECOND_PAGE
+#define X86_CODE_FETCH_FAULT_PROBES_SECOND_PAGE(env, insn, pc, size) false
+#endif
+#ifndef X86_MEMOP_ALIGNMENT
+#define X86_MEMOP_ALIGNMENT(s, memop) MO_UNALN
+#endif
+#ifndef X86_GEN_SEGMENT_ACCESS_CHECK
+#define X86_GEN_SEGMENT_ACCESS_CHECK(s, addr, seg, size, access) do { \
+    (void)(s);                                                       \
+    (void)(addr);                                                    \
+    (void)(seg);                                                     \
+    (void)(size);                                                    \
+    (void)(access);                                                  \
+} while (0)
+#endif
+#ifndef X86_GEN_BOUND_ACCESS_CHECK
+#define X86_GEN_BOUND_ACCESS_CHECK(s, addr, seg, element_size) do { \
+    (void)(s);                                                        \
+    (void)(addr);                                                     \
+    (void)(seg);                                                      \
+    (void)(element_size);                                             \
+} while (0)
+#endif
+#ifndef X86_GEN_FXSTATE_ACCESS_CHECK
+#define X86_GEN_FXSTATE_ACCESS_CHECK(s, addr, seg, access) do { \
+    (void)(s);                                                 \
+    (void)(addr);                                              \
+    (void)(seg);                                               \
+    (void)(access);                                            \
+} while (0)
+#endif
+#ifndef X86_GEN_LOCK_INTERCEPT_CHECK
+#define X86_GEN_LOCK_INTERCEPT_CHECK(s, addr, size) do { \
+    (void)(s);                                             \
+    (void)(addr);                                          \
+    (void)(size);                                          \
+} while (0)
+#endif
+
+#define X86_SEG_ACCESS_READ  1
+#define X86_SEG_ACCESS_WRITE 2
+
+#ifndef X86_SYSTEM_INSTRUCTION_INTERCEPT
+#define X86_SYSTEM_INSTRUCTION_INTERCEPT(decode) false
+#endif
+
+#ifndef X86_SKIP_HELPER_INFO
 #define HELPER_H "helper.h"
 #include "exec/helper-info.c.inc"
 #undef  HELPER_H
+#endif
 
 /* Fixes for Windows namespace pollution.  */
 #undef IN
@@ -51,7 +170,7 @@
 #define PREFIX_VEX    0x20
 #define PREFIX_REX    0x40
 
-#ifdef TARGET_X86_64
+#if TARGET_LONG_BITS == 64
 # define ctztl  ctz64
 # define clztl  clz64
 #else
@@ -93,6 +212,7 @@ typedef struct DisasContext {
     MemOp dflag;
 
     int8_t override; /* -1 if no override, else R_CS, R_DS, etc */
+    int8_t mem_seg;  /* segment used to form the current memory address */
     uint8_t prefix;
 
     bool has_modrm;
@@ -137,6 +257,10 @@ typedef struct DisasContext {
     sigjmp_buf jmpbuf;
     TCGOp *prev_insn_start;
     TCGOp *prev_insn_end;
+#if X86_IA32_SYSTEM_ENV
+    CPUX86State *decode_env;
+    target_ulong ia32_opcode_pc;
+#endif
 } DisasContext;
 
 /*
@@ -194,6 +318,27 @@ typedef struct DisasContext {
 #define SS32(S)   (((S)->flags & HF_SS32_MASK) != 0)
 #define ADDSEG(S) (((S)->flags & HF_ADDSEG_MASK) != 0)
 #endif
+
+#if X86_IA32_SYSTEM_ENV
+static bool ia32_cli_sti_virtual(DisasContext *s)
+{
+    uint32_t cr4 = s->decode_env->cr[4];
+
+    if (!PE(s)) {
+        return false;
+    }
+    if (VM86(s)) {
+        return IOPL(s) < 3 && (cr4 & CR4_VME_MASK);
+    }
+    return CPL(s) == 3 && IOPL(s) < 3 && (cr4 & CR4_PVI_MASK);
+}
+
+static bool ia32_vme_flags_virtual(DisasContext *s)
+{
+    return PE(s) && VM86(s) && IOPL(s) < 3 && s->dflag == MO_16 &&
+           (s->decode_env->cr[4] & CR4_VME_MASK);
+}
+#endif
 #if !defined(TARGET_X86_64)
 #define CODE64(S) false
 #elif defined(CONFIG_USER_ONLY)
@@ -250,8 +395,10 @@ STUB_HELPER(vmsave, TCGv_env env, TCGv_i32 aflag)
 STUB_HELPER(write_crN, TCGv_env env, TCGv_i32 reg, TCGv val)
 #endif
 
-static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num);
-static void gen_jmp_rel_csize(DisasContext *s, int diff, int tb_num);
+static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num,
+                        bool taken_branch);
+static void gen_jmp_rel_csize(DisasContext *s, int diff, int tb_num,
+                              bool taken_branch);
 static void gen_exception_gpf(DisasContext *s);
 
 /* i386 shift ops */
@@ -430,15 +577,19 @@ static TCGv gen_op_deposit_reg_v(DisasContext *s, MemOp ot, int reg, TCGv dest, 
         tcg_gen_deposit_tl(dest, cpu_regs[reg], t0, 0, 16);
         break;
     case MO_32:
-#ifdef TARGET_X86_64
         dest = dest ? dest : cpu_regs[reg];
+#if TARGET_LONG_BITS == 64
         tcg_gen_ext32u_tl(dest, t0);
-        break;
-    case MO_64:
+#else
+        tcg_gen_mov_tl(dest, t0);
 #endif
+        break;
+#ifdef TARGET_X86_64
+    case MO_64:
         dest = dest ? dest : cpu_regs[reg];
         tcg_gen_mov_tl(dest, t0);
         break;
+#endif
     default:
         g_assert_not_reached();
     }
@@ -496,12 +647,24 @@ void gen_op_add_reg_im(DisasContext *s, MemOp size, int reg, int32_t val)
 
 static inline void gen_op_ld_v(DisasContext *s, int idx, TCGv t0, TCGv a0)
 {
-    tcg_gen_qemu_ld_tl(t0, a0, s->mem_index, idx | MO_LE);
+    if (s->mem_seg >= 0) {
+        X86_GEN_SEGMENT_ACCESS_CHECK(s, a0, s->mem_seg,
+                                     1 << (idx & MO_SIZE),
+                                     X86_SEG_ACCESS_READ);
+    }
+    tcg_gen_qemu_ld_tl(t0, a0, s->mem_index,
+                       idx | MO_LE | X86_MEMOP_ALIGNMENT(s, idx));
 }
 
 static inline void gen_op_st_v(DisasContext *s, int idx, TCGv t0, TCGv a0)
 {
-    tcg_gen_qemu_st_tl(t0, a0, s->mem_index, idx | MO_LE);
+    if (s->mem_seg >= 0) {
+        X86_GEN_SEGMENT_ACCESS_CHECK(s, a0, s->mem_seg,
+                                     1 << (idx & MO_SIZE),
+                                     X86_SEG_ACCESS_WRITE);
+    }
+    tcg_gen_qemu_st_tl(t0, a0, s->mem_index,
+                       idx | MO_LE | X86_MEMOP_ALIGNMENT(s, idx));
 }
 
 static void gen_update_eip_next(DisasContext *s)
@@ -604,6 +767,7 @@ static void gen_lea_v_seg_dest(DisasContext *s, MemOp aflag, TCGv dest, TCGv a0,
     if (ovr_seg < 0) {
         ovr_seg = def_seg;
     }
+    s->mem_seg = ovr_seg;
 
     has_base = ovr_seg >= R_FS || (ovr_seg >= 0 && ADDSEG(s));
     easize = CODE64(s) ? MO_64 : MO_32;
@@ -1329,7 +1493,8 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
      */
     bool can_loop =
         (!(tb_cflags(s->base.tb) & (CF_USE_ICOUNT | CF_SINGLE_STEP))
-	 && !(s->flags & (HF_TF_MASK | HF_INHIBIT_IRQ_MASK)));
+	 && !(s->flags & (HF_TF_MASK | HF_INHIBIT_IRQ_MASK))
+         && X86_REP_CAN_LOOP(s));
     bool had_rf = s->flags & HF_RF_MASK;
 
     /*
@@ -1360,12 +1525,17 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
      * extend here if needed and not do any expensive deposit operations later.
      */
     tcg_gen_subi_tl(cx_next, cpu_regs[R_ECX], 1);
-#ifdef TARGET_X86_64
+#if TARGET_LONG_BITS == 64
     if (s->aflag == MO_32) {
         tcg_gen_ext32u_tl(cx_next, cx_next);
         cx_mask = ~0;
     }
 #endif
+
+    /* IA-64 exposes RF directly when an interrupted REP must be restarted. */
+    if (!had_rf && X86_REP_FAULT_SETS_RF(s)) {
+        gen_set_eflags(s, RF_MASK);
+    }
 
     /*
      * The last iteration is handled outside the loop, so that cx_next
@@ -1388,6 +1558,10 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
 	assert(!s->cc_op_dirty);
     }
 
+    if (!can_loop && X86_REP_FINAL_ITERATION_COMPLETES(s)) {
+        tcg_gen_brcondi_tl(TCG_COND_TSTEQ, cx_next, cx_mask, done);
+    }
+
     if (can_loop) {
         tcg_gen_subi_tl(cx_next, cx_next, 1);
         tcg_gen_brcondi_tl(TCG_COND_TSTNE, cx_next, REP_MAX, loop);
@@ -1399,12 +1573,13 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
      * but the last.  Set it here before giving the main loop a chance to
      * execute.  (For faults, seg_helper.c sets the flag as usual).
      */
-    if (!had_rf) {
+    if (!had_rf && !X86_REP_FAULT_SETS_RF(s)) {
         gen_set_eflags(s, RF_MASK);
     }
+    X86_GEN_REP_ITERATION(s);
 
     /* Go to the main loop but reenter the same instruction.  */
-    gen_jmp_rel_csize(s, -cur_insn_len(s), 0);
+    gen_jmp_rel_csize(s, -cur_insn_len(s), 0, false);
 
     if (can_loop) {
         /*
@@ -1421,10 +1596,11 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
     /* CX/ECX/RCX is zero, or REPZ/REPNZ broke the repetition.  */
     gen_set_label(done);
     set_cc_op(s, CC_OP_DYNAMIC);
-    if (had_rf) {
+    if (had_rf || X86_REP_FAULT_SETS_RF(s)) {
         gen_reset_eflags(s, RF_MASK);
     }
-    gen_jmp_rel_csize(s, 0, 1);
+    X86_GEN_REP_COMPLETE(s);
+    gen_jmp_rel_csize(s, 0, 1, false);
 }
 
 static void do_gen_string(DisasContext *s, MemOp ot,
@@ -1515,7 +1691,7 @@ static void gen_exception(DisasContext *s, int trapno)
 {
     gen_update_cc_op(s);
     gen_update_eip_cur(s);
-    gen_helper_raise_exception(tcg_env, tcg_constant_i32(trapno));
+    X86_GEN_HELPER_RAISE_EXCEPTION(tcg_env, tcg_constant_i32(trapno));
     s->base.is_jmp = DISAS_NORETURN;
 }
 
@@ -1523,7 +1699,48 @@ static void gen_exception(DisasContext *s, int trapno)
    the instruction is known, but it isn't allowed in the current cpu mode.  */
 static void gen_illegal_opcode(DisasContext *s)
 {
+#if X86_IA32_SYSTEM_ENV
+    uint64_t iim = 0;
+    uint32_t code = 0;
+    target_ulong opcode_len = s->pc - s->ia32_opcode_pc;
+    target_ulong prefix_len = s->ia32_opcode_pc - s->base.pc_next;
+    unsigned i;
+
+    for (i = 0; i < MIN(opcode_len, 8); i++) {
+        uint8_t byte = translator_ldub(X86_TRANSLATOR_ENV(s->decode_env),
+                                       &s->base,
+                                       s->ia32_opcode_pc + i);
+        iim |= (uint64_t)byte << (i * 8);
+    }
+    if (s->dflag == MO_32) {
+        code |= 1 << 1;
+    }
+    if (s->aflag == MO_32) {
+        code |= 1 << 2;
+    }
+    if (s->prefix & PREFIX_LOCK) {
+        code |= 1 << 3;
+    }
+    if (s->prefix & PREFIX_REPZ) {
+        code |= 1 << 4;
+    }
+    if (s->prefix & PREFIX_REPNZ) {
+        code |= 1 << 5;
+    }
+    if (s->override >= 0) {
+        code |= (1 << 6) | (uint32_t)s->override << 7;
+    }
+    code |= MIN(prefix_len, 15) << 12;
+
+    gen_update_cc_op(s);
+    gen_update_eip_cur(s);
+    gen_helper_ia32_instruction_intercept(tcg_env,
+                                          tcg_constant_i64(iim),
+                                          tcg_constant_i32(code));
+    s->base.is_jmp = DISAS_NORETURN;
+#else
     gen_exception(s, EXCP06_ILLOP);
+#endif
 }
 
 /* Generate #GP for the current instruction. */
@@ -1546,10 +1763,14 @@ static bool check_cpl0(DisasContext *s)
 static TCGv gen_shiftd_rm_T1(DisasContext *s, MemOp ot,
                              bool is_right, TCGv count)
 {
+#if TARGET_LONG_BITS == 32 || defined(TARGET_X86_64)
     target_ulong mask = (ot == MO_64 ? 63 : 31);
+#endif
     TCGv cc_src = tcg_temp_new();
     TCGv tmp = tcg_temp_new();
+#if TARGET_LONG_BITS == 32 || defined(TARGET_X86_64)
     TCGv hishift;
+#endif
 
     switch (ot) {
     case MO_16:
@@ -1563,12 +1784,9 @@ static TCGv gen_shiftd_rm_T1(DisasContext *s, MemOp ot,
         } else {
             tcg_gen_deposit_tl(s->T1, s->T0, s->T1, 16, 16);
         }
-        /*
-         * If TARGET_X86_64 defined then fall through into MO_32 case,
-         * otherwise fall through default case.
-         */
+        /* Fall through into the path matching the TCG target width. */
     case MO_32:
-#ifdef TARGET_X86_64
+#if TARGET_LONG_BITS == 64
         /* Concatenate the two 32-bit values and use a 64-bit shift.  */
         tcg_gen_subi_tl(tmp, count, 1);
         if (is_right) {
@@ -1583,8 +1801,11 @@ static TCGv gen_shiftd_rm_T1(DisasContext *s, MemOp ot,
             tcg_gen_shri_i64(s->T0, s->T0, 32);
         }
         break;
+#endif
+#ifdef TARGET_X86_64
     case MO_64:
 #endif
+#if TARGET_LONG_BITS == 32 || defined(TARGET_X86_64)
         hishift = tcg_temp_new();
         tcg_gen_subi_tl(tmp, count, 1);
         if (is_right) {
@@ -1613,6 +1834,7 @@ static TCGv gen_shiftd_rm_T1(DisasContext *s, MemOp ot,
                            tcg_constant_tl(0), s->T1);
         tcg_gen_or_tl(s->T0, s->T0, s->T1);
         break;
+#endif
 
     default:
 	g_assert_not_reached();
@@ -1711,10 +1933,11 @@ static void gen_conditional_jump_labels(DisasContext *s, target_long diff,
     if (not_taken) {
         gen_set_label(not_taken);
     }
-    gen_jmp_rel_csize(s, 0, 1);
+    X86_GEN_NOT_TAKEN_BRANCH(s);
+    gen_jmp_rel_csize(s, 0, 1, false);
 
     gen_set_label(taken);
-    gen_jmp_rel(s, s->dflag, diff, 0);
+    gen_jmp_rel(s, s->dflag, diff, 0, true);
 }
 
 static void gen_cmovcc(DisasContext *s, int b, TCGv dest, TCGv src)
@@ -1790,6 +2013,7 @@ static void gen_far_call(DisasContext *s)
                               tcg_constant_i32(s->dflag - 1),
                               eip_next_i32(s));
     }
+    X86_GEN_TAKEN_BRANCH(s);
     s->base.is_jmp = DISAS_JUMP;
 }
 
@@ -1804,6 +2028,7 @@ static void gen_far_jmp(DisasContext *s)
         gen_op_movl_seg_real(s, R_CS, s->T1);
         gen_op_jmp_v(s, s->T0);
     }
+    X86_GEN_TAKEN_BRANCH(s);
     s->base.is_jmp = DISAS_JUMP;
 }
 
@@ -1951,7 +2176,7 @@ static void gen_leave(DisasContext *s)
 
 /* an interrupt is different from an exception because of the
    privilege checks */
-static void gen_interrupt(DisasContext *s, uint8_t intno)
+static void gen_interrupt(DisasContext *s, int intno)
 {
     gen_update_cc_op(s);
     gen_update_eip_cur(s);
@@ -2014,7 +2239,8 @@ gen_eob(DisasContext *s, int mode)
 }
 
 /* Jump to eip+diff, truncating the result to OT. */
-static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
+static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num,
+                        bool taken_branch)
 {
     bool use_goto_tb = s->jmp_opt;
     target_ulong mask = -1;
@@ -2053,15 +2279,21 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
 
     if (use_goto_tb && translator_use_goto_tb(&s->base, new_pc)) {
         /* jump to same page: we can use a direct jump */
-        tcg_gen_goto_tb(tb_num);
         if (!(tb_cflags(s->base.tb) & CF_PCREL)) {
             tcg_gen_movi_tl(cpu_eip, new_eip);
         }
+        if (taken_branch) {
+            X86_GEN_TAKEN_BRANCH(s);
+        }
+        tcg_gen_goto_tb(tb_num);
         tcg_gen_exit_tb(s->base.tb, tb_num);
         s->base.is_jmp = DISAS_NORETURN;
     } else {
         if (!(tb_cflags(s->base.tb) & CF_PCREL)) {
             tcg_gen_movi_tl(cpu_eip, new_eip);
+        }
+        if (taken_branch) {
+            X86_GEN_TAKEN_BRANCH(s);
         }
         if (s->jmp_opt) {
             gen_eob(s, DISAS_JUMP);   /* jump to another page */
@@ -2072,17 +2304,20 @@ static void gen_jmp_rel(DisasContext *s, MemOp ot, int diff, int tb_num)
 }
 
 /* Jump to eip+diff, truncating to the current code size. */
-static void gen_jmp_rel_csize(DisasContext *s, int diff, int tb_num)
+static void gen_jmp_rel_csize(DisasContext *s, int diff, int tb_num,
+                              bool taken_branch)
 {
     /* CODE64 ignores the OT argument, so we need not consider it. */
-    gen_jmp_rel(s, CODE32(s) ? MO_32 : MO_16, diff, tb_num);
+    gen_jmp_rel(s, CODE32(s) ? MO_32 : MO_16, diff, tb_num,
+                taken_branch);
 }
 
 static inline void gen_ldq_env_A0(DisasContext *s, int offset)
 {
     TCGv_i64 t = tcg_temp_new_i64();
 
-    tcg_gen_qemu_ld_i64(t, s->A0, s->mem_index, MO_LEUQ);
+    tcg_gen_qemu_ld_i64(t, s->A0, s->mem_index,
+                        MO_LEUQ | X86_MEMOP_ALIGNMENT(s, MO_64));
     tcg_gen_st_i64(t, tcg_env, offset);
 }
 
@@ -2091,14 +2326,16 @@ static inline void gen_stq_env_A0(DisasContext *s, int offset)
     TCGv_i64 t = tcg_temp_new_i64();
 
     tcg_gen_ld_i64(t, tcg_env, offset);
-    tcg_gen_qemu_st_i64(t, s->A0, s->mem_index, MO_LEUQ);
+    tcg_gen_qemu_st_i64(t, s->A0, s->mem_index,
+                        MO_LEUQ | X86_MEMOP_ALIGNMENT(s, MO_64));
 }
 
 static inline void gen_ldo_env_A0(DisasContext *s, int offset, bool align)
 {
     MemOp atom = (s->cpuid_ext_features & CPUID_EXT_AVX
                   ? MO_ATOM_IFALIGN : MO_ATOM_IFALIGN_PAIR);
-    MemOp mop = MO_128 | MO_LE | atom | (align ? MO_ALIGN_16 : 0);
+    MemOp mop = MO_128 | MO_LE | atom | (align ? MO_ALIGN_16 : 0) |
+                X86_MEMOP_ALIGNMENT(s, MO_128);
     int mem_index = s->mem_index;
     TCGv_i128 t = tcg_temp_new_i128();
 
@@ -2110,7 +2347,8 @@ static inline void gen_sto_env_A0(DisasContext *s, int offset, bool align)
 {
     MemOp atom = (s->cpuid_ext_features & CPUID_EXT_AVX
                   ? MO_ATOM_IFALIGN : MO_ATOM_IFALIGN_PAIR);
-    MemOp mop = MO_128 | MO_LE | atom | (align ? MO_ALIGN_16 : 0);
+    MemOp mop = MO_128 | MO_LE | atom | (align ? MO_ALIGN_16 : 0) |
+                X86_MEMOP_ALIGNMENT(s, MO_128);
     int mem_index = s->mem_index;
     TCGv_i128 t = tcg_temp_new_i128();
 
@@ -2120,7 +2358,8 @@ static inline void gen_sto_env_A0(DisasContext *s, int offset, bool align)
 
 static void gen_ldy_env_A0(DisasContext *s, int offset, bool align)
 {
-    MemOp mop = MO_128 | MO_LE | MO_ATOM_IFALIGN_PAIR;
+    MemOp mop = MO_128 | MO_LE | MO_ATOM_IFALIGN_PAIR |
+                X86_MEMOP_ALIGNMENT(s, MO_256);
     int mem_index = s->mem_index;
     TCGv_i128 t0 = tcg_temp_new_i128();
     TCGv_i128 t1 = tcg_temp_new_i128();
@@ -2136,7 +2375,8 @@ static void gen_ldy_env_A0(DisasContext *s, int offset, bool align)
 
 static void gen_sty_env_A0(DisasContext *s, int offset, bool align)
 {
-    MemOp mop = MO_128 | MO_LE | MO_ATOM_IFALIGN_PAIR;
+    MemOp mop = MO_128 | MO_LE | MO_ATOM_IFALIGN_PAIR |
+                X86_MEMOP_ALIGNMENT(s, MO_256);
     int mem_index = s->mem_index;
     TCGv_i128 t = tcg_temp_new_i128();
     TCGv a0_hi = tcg_temp_new();
@@ -2150,27 +2390,98 @@ static void gen_sty_env_A0(DisasContext *s, int offset, bool align)
 
 #include "emit.c.inc"
 
+#if X86_IA32_SYSTEM_ENV
+/*
+ * Madison reports illegal x87 encodings as Instruction Intercepts even when
+ * CR0.EM or CR0.TS would make a legal x87 instruction raise DNA.  Keep this
+ * validation separate from code generation so the intercept remains
+ * side-effect free.
+ */
+static bool x87_opcode_valid(DisasContext *s, int mod, int rm, int op)
+{
+    bool has_cmov = s->cpuid_features & CPUID_CMOV;
+
+    if (mod != 3) {
+        /* FISTTP (DB/DD/DF /1) was introduced after Madison. */
+        return op != 0x09 && op != 0x19 && op != 0x1c &&
+               op != 0x1e && op != 0x29 && op != 0x2d && op != 0x39;
+    }
+
+    switch (op) {
+    case 0x00 ... 0x09:
+    case 0x0b:
+    case 0x0e ... 0x0f:
+    case 0x20 ... 0x2d:
+    case 0x30 ... 0x32:
+    case 0x34 ... 0x3b:
+        return true;
+    case 0x0a:
+        return rm == 0;
+    case 0x0c:
+        return rm == 0 || rm == 1 || rm == 4 || rm == 5;
+    case 0x0d:
+        return rm != 7;
+    case 0x10 ... 0x13:
+    case 0x18 ... 0x1b:
+    case 0x1d ... 0x1e:
+    case 0x3d ... 0x3e:
+        return has_cmov;
+    case 0x15:
+    case 0x33:
+        return rm == 1;
+    case 0x1c:
+        return rm <= 4;
+    case 0x3c:
+        return rm == 0;
+    default:
+        return false;
+    }
+}
+#endif
+
 static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
 {
     bool update_fip = true;
+    bool no_wait;
     int b = decode->b;
     int modrm = s->modrm;
     int mod, rm, op;
 
-    if (s->flags & (HF_EM_MASK | HF_TS_MASK)) {
-        /* if CR0.EM or CR0.TS are set, generate an FPU exception */
-        /* XXX: what to do if illegal op ? */
-        gen_exception(s, EXCP07_PREX);
-        return;
-    }
     mod = (modrm >> 6) & 3;
     rm = modrm & 7;
     op = ((b & 7) << 3) | ((modrm >> 3) & 7);
+#if X86_IA32_SYSTEM_ENV
+    if (!x87_opcode_valid(s, mod, rm, op)) {
+        goto illegal_op;
+    }
+#endif
+    if (s->flags & (HF_EM_MASK | HF_TS_MASK)) {
+        /* if CR0.EM or CR0.TS are set, generate an FPU exception */
+        gen_exception(s, EXCP07_PREX);
+        return;
+    }
+#if X86_IA32_SYSTEM_ENV
+    /* FNSTENV/FNSTCW/FNSAVE/FNSTSW/FNCLEX/FNINIT are non-waiting. */
+    no_wait = (mod != 3 &&
+               (op == 0x0e || op == 0x0f ||
+                op == 0x2e || op == 0x2f)) ||
+              (mod == 3 &&
+               ((op == 0x1c && (rm == 2 || rm == 3)) ||
+                (op == 0x3c && rm == 0)));
+    if (!no_wait) {
+        gen_helper_fwait(tcg_env);
+    }
+#else
+    no_wait = false;
+    (void)no_wait;
+#endif
     if (mod != 3) {
         /* memory op */
         TCGv ea = gen_lea_modrm_1(s, decode->mem, false);
         TCGv last_addr = tcg_temp_new();
         bool update_fdp = true;
+        unsigned mem_size = 0;
+        unsigned mem_access = 0;
         TCGv_i32 t32;
         TCGv_i64 t64;
 
@@ -2178,10 +2489,85 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         gen_lea_v_seg(s, ea, decode->mem.def_seg, s->override);
 
         switch (op) {
+        case 0x00 ... 0x07:
+        case 0x08:
+        case 0x10 ... 0x18:
+            mem_size = 4;
+            mem_access = X86_SEG_ACCESS_READ;
+            break;
+        case 0x20 ... 0x28:
+        case 0x3d:
+            mem_size = 8;
+            mem_access = X86_SEG_ACCESS_READ;
+            break;
+        case 0x30 ... 0x38:
+        case 0x0d:
+            mem_size = 2;
+            mem_access = X86_SEG_ACCESS_READ;
+            break;
+        case 0x19:
+        case 0x0a:
+        case 0x0b:
+        case 0x1a:
+        case 0x1b:
+            mem_size = 4;
+            mem_access = X86_SEG_ACCESS_WRITE;
+            break;
+        case 0x29:
+        case 0x2a:
+        case 0x2b:
+        case 0x3f:
+            mem_size = 8;
+            mem_access = X86_SEG_ACCESS_WRITE;
+            break;
+        case 0x39:
+        case 0x3a:
+        case 0x3b:
+        case 0x0f:
+        case 0x2f:
+            mem_size = 2;
+            mem_access = X86_SEG_ACCESS_WRITE;
+            break;
+        case 0x0c:
+            mem_size = s->dflag == MO_16 ? 14 : 28;
+            mem_access = X86_SEG_ACCESS_READ;
+            break;
+        case 0x0e:
+            mem_size = s->dflag == MO_16 ? 14 : 28;
+            mem_access = X86_SEG_ACCESS_WRITE;
+            break;
+        case 0x1d:
+        case 0x3c:
+            mem_size = 10;
+            mem_access = X86_SEG_ACCESS_READ;
+            break;
+        case 0x1f:
+        case 0x3e:
+            mem_size = 10;
+            mem_access = X86_SEG_ACCESS_WRITE;
+            break;
+        case 0x2c:
+            mem_size = s->dflag == MO_16 ? 94 : 108;
+            mem_access = X86_SEG_ACCESS_READ;
+            break;
+        case 0x2e:
+            mem_size = s->dflag == MO_16 ? 94 : 108;
+            mem_access = X86_SEG_ACCESS_WRITE;
+            break;
+        default:
+            break;
+        }
+        if (mem_size) {
+            X86_GEN_SEGMENT_ACCESS_CHECK(s, s->A0, s->mem_seg,
+                                         mem_size, mem_access);
+        }
+
+        switch (op) {
         case 0x00 ... 0x07: /* fxxxs */
             t32 = tcg_temp_new_i32();
             tcg_gen_qemu_ld_i32(t32, s->A0,
-                                s->mem_index, MO_LEUL);
+                                s->mem_index, MO_LEUL |
+                                X86_MEMOP_ALIGNMENT(s, MO_32));
             gen_helper_flds_FT0(tcg_env, t32);
             gen_helper_fp_arith_ST0_FT0(op & 7);
             break;
@@ -2189,7 +2575,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x10 ... 0x17: /* fixxxl */
             t32 = tcg_temp_new_i32();
             tcg_gen_qemu_ld_i32(t32, s->A0,
-                                s->mem_index, MO_LEUL);
+                                s->mem_index, MO_LEUL |
+                                X86_MEMOP_ALIGNMENT(s, MO_32));
             gen_helper_fildl_FT0(tcg_env, t32);
             gen_helper_fp_arith_ST0_FT0(op & 7);
             break;
@@ -2197,7 +2584,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x20 ... 0x27: /* fxxxl */
             t64 = tcg_temp_new_i64();
             tcg_gen_qemu_ld_i64(t64, s->A0,
-                                s->mem_index, MO_LEUQ);
+                                s->mem_index, MO_LEUQ |
+                                X86_MEMOP_ALIGNMENT(s, MO_64));
             gen_helper_fldl_FT0(tcg_env, t64);
             gen_helper_fp_arith_ST0_FT0(op & 7);
             break;
@@ -2205,7 +2593,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x30 ... 0x37: /* fixxx */
             t32 = tcg_temp_new_i32();
             tcg_gen_qemu_ld_i32(t32, s->A0,
-                                s->mem_index, MO_LESW);
+                                s->mem_index, MO_LESW |
+                                X86_MEMOP_ALIGNMENT(s, MO_16));
             gen_helper_fildl_FT0(tcg_env, t32);
             gen_helper_fp_arith_ST0_FT0(op & 7);
             break;
@@ -2213,25 +2602,29 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x08: /* flds */
             t32 = tcg_temp_new_i32();
             tcg_gen_qemu_ld_i32(t32, s->A0,
-                                s->mem_index, MO_LEUL);
+                                s->mem_index, MO_LEUL |
+                                X86_MEMOP_ALIGNMENT(s, MO_32));
             gen_helper_flds_ST0(tcg_env, t32);
             break;
         case 0x18: /* fildl */
             t32 = tcg_temp_new_i32();
             tcg_gen_qemu_ld_i32(t32, s->A0,
-                                s->mem_index, MO_LEUL);
+                                s->mem_index, MO_LEUL |
+                                X86_MEMOP_ALIGNMENT(s, MO_32));
             gen_helper_fildl_ST0(tcg_env, t32);
             break;
         case 0x28: /* fldl */
             t64 = tcg_temp_new_i64();
             tcg_gen_qemu_ld_i64(t64, s->A0,
-                                s->mem_index, MO_LEUQ);
+                                s->mem_index, MO_LEUQ |
+                                X86_MEMOP_ALIGNMENT(s, MO_64));
             gen_helper_fldl_ST0(tcg_env, t64);
             break;
         case 0x38: /* filds */
             t32 = tcg_temp_new_i32();
             tcg_gen_qemu_ld_i32(t32, s->A0,
-                                s->mem_index, MO_LESW);
+                                s->mem_index, MO_LESW |
+                                X86_MEMOP_ALIGNMENT(s, MO_16));
             gen_helper_fildl_ST0(tcg_env, t32);
             break;
 
@@ -2239,21 +2632,24 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             t32 = tcg_temp_new_i32();
             gen_helper_fisttl_ST0(t32, tcg_env);
             tcg_gen_qemu_st_i32(t32, s->A0,
-                                s->mem_index, MO_LEUL);
+                                s->mem_index, MO_LEUL |
+                                X86_MEMOP_ALIGNMENT(s, MO_32));
             gen_helper_fpop(tcg_env);
             break;
         case 0x29: /* fisttpll */
             t64 = tcg_temp_new_i64();
             gen_helper_fisttll_ST0(t64, tcg_env);
             tcg_gen_qemu_st_i64(t64, s->A0,
-                                s->mem_index, MO_LEUQ);
+                                s->mem_index, MO_LEUQ |
+                                X86_MEMOP_ALIGNMENT(s, MO_64));
             gen_helper_fpop(tcg_env);
             break;
         case 0x39: /* fisttps */
             t32 = tcg_temp_new_i32();
             gen_helper_fistt_ST0(t32, tcg_env);
             tcg_gen_qemu_st_i32(t32, s->A0,
-                                s->mem_index, MO_LEUW);
+                                s->mem_index, MO_LEUW |
+                                X86_MEMOP_ALIGNMENT(s, MO_16));
             gen_helper_fpop(tcg_env);
             break;
 
@@ -2261,7 +2657,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             t32 = tcg_temp_new_i32();
             gen_helper_fsts_ST0(t32, tcg_env);
             tcg_gen_qemu_st_i32(t32, s->A0,
-                                s->mem_index, MO_LEUL);
+                                s->mem_index, MO_LEUL |
+                                X86_MEMOP_ALIGNMENT(s, MO_32));
             if ((op & 7) == 3) {
                 gen_helper_fpop(tcg_env);
             }
@@ -2270,7 +2667,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             t32 = tcg_temp_new_i32();
             gen_helper_fistl_ST0(t32, tcg_env);
             tcg_gen_qemu_st_i32(t32, s->A0,
-                                s->mem_index, MO_LEUL);
+                                s->mem_index, MO_LEUL |
+                                X86_MEMOP_ALIGNMENT(s, MO_32));
             if ((op & 7) == 3) {
                 gen_helper_fpop(tcg_env);
             }
@@ -2279,7 +2677,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             t64 = tcg_temp_new_i64();
             gen_helper_fstl_ST0(t64, tcg_env);
             tcg_gen_qemu_st_i64(t64, s->A0,
-                                s->mem_index, MO_LEUQ);
+                                s->mem_index, MO_LEUQ |
+                                X86_MEMOP_ALIGNMENT(s, MO_64));
             if ((op & 7) == 3) {
                 gen_helper_fpop(tcg_env);
             }
@@ -2289,7 +2688,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             t32 = tcg_temp_new_i32();
             gen_helper_fist_ST0(t32, tcg_env);
             tcg_gen_qemu_st_i32(t32, s->A0,
-                                s->mem_index, MO_LEUW);
+                                s->mem_index, MO_LEUW |
+                                X86_MEMOP_ALIGNMENT(s, MO_16));
             if ((op & 7) == 3) {
                 gen_helper_fpop(tcg_env);
             }
@@ -2302,7 +2702,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x0d: /* fldcw mem */
             t32 = tcg_temp_new_i32();
             tcg_gen_qemu_ld_i32(t32, s->A0,
-                                s->mem_index, MO_LEUW);
+                                s->mem_index, MO_LEUW |
+                                X86_MEMOP_ALIGNMENT(s, MO_16));
             gen_helper_fldcw(tcg_env, t32);
             update_fip = update_fdp = false;
             break;
@@ -2315,7 +2716,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             t32 = tcg_temp_new_i32();
             gen_helper_fnstcw(t32, tcg_env);
             tcg_gen_qemu_st_i32(t32, s->A0,
-                                s->mem_index, MO_LEUW);
+                                s->mem_index, MO_LEUW |
+                                X86_MEMOP_ALIGNMENT(s, MO_16));
             update_fip = update_fdp = false;
             break;
         case 0x1d: /* fldt mem */
@@ -2339,7 +2741,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
             t32 = tcg_temp_new_i32();
             gen_helper_fnstsw(t32, tcg_env);
             tcg_gen_qemu_st_i32(t32, s->A0,
-                                s->mem_index, MO_LEUW);
+                                s->mem_index, MO_LEUW |
+                                X86_MEMOP_ALIGNMENT(s, MO_16));
             update_fip = update_fdp = false;
             break;
         case 0x3c: /* fbld */
@@ -2352,14 +2755,16 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         case 0x3d: /* fildll */
             t64 = tcg_temp_new_i64();
             tcg_gen_qemu_ld_i64(t64, s->A0,
-                                s->mem_index, MO_LEUQ);
+                                s->mem_index, MO_LEUQ |
+                                X86_MEMOP_ALIGNMENT(s, MO_64));
             gen_helper_fildll_ST0(tcg_env, t64);
             break;
         case 0x3f: /* fistpll */
             t64 = tcg_temp_new_i64();
             gen_helper_fistll_ST0(t64, tcg_env);
             tcg_gen_qemu_st_i64(t64, s->A0,
-                                s->mem_index, MO_LEUQ);
+                                s->mem_index, MO_LEUQ |
+                                X86_MEMOP_ALIGNMENT(s, MO_64));
             gen_helper_fpop(tcg_env);
             break;
         default:
@@ -2680,6 +3085,8 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
 
     if (update_fip) {
         TCGv_i32 t32 = tcg_temp_new_i32();
+
+        X86_GEN_X87_FOP(s, ((b & 7) << 8) | modrm);
         tcg_gen_ld_i32(t32, tcg_env,
                        offsetof(CPUX86State, segs[R_CS].selector));
         tcg_gen_st16_i32(t32, tcg_env,
@@ -2751,6 +3158,12 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
     case 0x100:
         mod = (modrm >> 6) & 3;
         op = (modrm >> 3) & 7;
+#if X86_IA32_SYSTEM_ENV
+        if (op <= 3) {
+            gen_illegal_opcode(s);
+            break;
+        }
+#endif
         switch(op) {
         case 0: /* sldt */
             if (!PE(s) || VM86(s))
@@ -2811,12 +3224,35 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
             }
             assume_cc_op(s, CC_OP_EFLAGS);
             break;
+#if X86_IA32_SYSTEM_ENV
+        case 6: /* jmpe r/m16, r/m32 */
+            gen_helper_ia32_jmpe_check(tcg_env);
+            gen_ld_modrm(s, decode, dflag);
+            if (dflag == MO_16) {
+                tcg_gen_ext16u_tl(s->T0, s->T0);
+            } else {
+                tcg_gen_ext32u_tl(s->T0, s->T0);
+            }
+            gen_update_cc_op(s);
+            gen_helper_ia32_jmpe(tcg_env, s->T0,
+                                 tcg_constant_tl((uint32_t)s->pc));
+            s->base.is_jmp = DISAS_NORETURN;
+            break;
+#endif
         default:
             goto illegal_op;
         }
         break;
 
     case 0x101:
+#if X86_IA32_SYSTEM_ENV
+        mod = (modrm >> 6) & 3;
+        op = (modrm >> 3) & 7;
+        if ((mod != 3 && (op <= 3 || op == 7)) || op == 4 || op == 6) {
+            gen_illegal_opcode(s);
+            break;
+        }
+#endif
         switch (modrm) {
         CASE_MODRM_MEM_OP(0): /* sgdt */
             if (s->flags & HF_UMIP_MASK && !check_cpl0(s)) {
@@ -3439,7 +3875,7 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
     CPUX86State *env = cpu_env(cpu);
-    uint32_t flags = dc->base.tb->flags;
+    uint32_t flags = X86_TB_FLAGS(dc->base.tb->flags);
     uint32_t cflags = tb_cflags(dc->base.tb);
     int cpl = (flags >> HF_CPL_SHIFT) & 3;
     int iopl = (flags >> IOPL_SHIFT) & 3;
@@ -3483,6 +3919,7 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->T0 = tcg_temp_new();
     dc->T1 = tcg_temp_new();
     dc->A0 = tcg_temp_new();
+    dc->mem_seg = -1;
 
     dc->cc_srcT = tcg_temp_new();
 }
@@ -3495,6 +3932,8 @@ static void i386_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
     target_ulong pc_arg = dc->base.pc_next;
+
+    X86_GEN_INSN_START(pc_arg);
 
     dc->prev_insn_start = dc->base.insn_start;
     dc->prev_insn_end = tcg_last_op();
@@ -3510,6 +3949,26 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     bool orig_cc_op_dirty = dc->cc_op_dirty;
     CCOp orig_cc_op = dc->cc_op;
     target_ulong orig_pc_save = dc->pc_save;
+
+    /*
+     * An instruction near the end of a page may fault while the decoder
+     * fetches its bytes from the following page.  Targets that need the
+     * architectural instruction pointer at translation-time must start such
+     * an instruction in a fresh TB.
+     */
+    if (X86_SPLIT_NEAR_PAGE_END(dc) && dcbase->num_insns > 1 &&
+        (dcbase->pc_next & ~TARGET_PAGE_MASK) >=
+        TARGET_PAGE_SIZE - X86_MAX_INSN_LENGTH) {
+        dc->pc = dc->base.pc_next;
+        dc->base.num_insns--;
+        tcg_remove_ops_after(dc->prev_insn_end);
+        dc->base.insn_start = dc->prev_insn_start;
+        dc->base.is_jmp = DISAS_TOO_MANY;
+        return;
+    }
+
+    /* Keep the insn_start marker as the final op of ->insn_start(). */
+    X86_GEN_CODE_FETCH_CHECK(dc);
 
 #ifdef TARGET_VSYSCALL_PAGE
     /*
@@ -3585,7 +4044,7 @@ static void i386_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
         break;
     case DISAS_TOO_MANY:
         gen_update_cc_op(dc);
-        gen_jmp_rel_csize(dc, 0, 0);
+        gen_jmp_rel_csize(dc, 0, 0, false);
         break;
     case DISAS_EOB_NEXT:
     case DISAS_EOB_INHIBIT_IRQ:

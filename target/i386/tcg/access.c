@@ -8,6 +8,19 @@
 #include "exec/target_page.h"
 #include "access.h"
 
+#ifndef X86_CPU_ARCH_ENV
+#define X86_CPU_ARCH_ENV(env) (env)
+#endif
+#ifndef X86_ACCESS_CHECK_ALIGNMENT
+#define X86_ACCESS_CHECK_ALIGNMENT(env, addr, size, ra) ((void)0)
+#endif
+#ifndef X86_ACCESS_RECORD
+#define X86_ACCESS_RECORD(env, addr, size, access) ((void)0)
+#endif
+#ifndef X86_ACCESS_ADDRESS
+#define X86_ACCESS_ADDRESS(env, addr) (addr)
+#endif
+
 
 void access_prepare_mmu(X86Access *ret, CPUX86State *env,
                         vaddr vaddr, unsigned size,
@@ -29,11 +42,15 @@ void access_prepare_mmu(X86Access *ret, CPUX86State *env,
     ret->env = env;
     ret->ra = ra;
 
-    haddr1 = probe_access(env, vaddr, size1, type, mmu_idx, ra);
+    haddr1 = probe_access(X86_CPU_ARCH_ENV(env),
+                          X86_ACCESS_ADDRESS(env, vaddr), size1, type,
+                          mmu_idx, ra);
     ret->haddr1 = haddr1;
 
     if (unlikely(size2)) {
-        haddr2 = probe_access(env, vaddr + size1, size2, type, mmu_idx, ra);
+        haddr2 = probe_access(X86_CPU_ARCH_ENV(env),
+                              X86_ACCESS_ADDRESS(env, vaddr + size1), size2,
+                              type, mmu_idx, ra);
         if (haddr2 == haddr1 + size1) {
             ret->size1 = size;
         } else {
@@ -44,12 +61,13 @@ void access_prepare_mmu(X86Access *ret, CPUX86State *env,
 #endif
         }
     }
+    X86_ACCESS_CHECK_ALIGNMENT(env, vaddr, size, ra);
 }
 
 void access_prepare(X86Access *ret, CPUX86State *env, vaddr vaddr,
                     unsigned size, MMUAccessType type, uintptr_t ra)
 {
-    int mmu_idx = cpu_mmu_index(env_cpu(env), false);
+    int mmu_idx = cpu_mmu_index(env_cpu(X86_CPU_ARCH_ENV(env)), false);
     access_prepare_mmu(ret, env, vaddr, size, type, mmu_idx, ra);
 }
 
@@ -88,50 +106,65 @@ uint8_t access_ldb(X86Access *ac, vaddr addr)
 {
     void *p = access_ptr(ac, addr, sizeof(uint8_t));
 
+    X86_ACCESS_RECORD(ac->env, addr, sizeof(uint8_t), MMU_DATA_LOAD);
     if (likely(p)) {
         return ldub_p(p);
     }
-    return cpu_ldub_mmuidx_ra(ac->env, addr, ac->mmu_idx, ac->ra);
+    return cpu_ldub_mmuidx_ra(X86_CPU_ARCH_ENV(ac->env),
+                              X86_ACCESS_ADDRESS(ac->env, addr),
+                              ac->mmu_idx, ac->ra);
 }
 
 uint16_t access_ldw(X86Access *ac, vaddr addr)
 {
     void *p = access_ptr(ac, addr, sizeof(uint16_t));
 
+    X86_ACCESS_RECORD(ac->env, addr, sizeof(uint16_t), MMU_DATA_LOAD);
     if (likely(p)) {
         return lduw_le_p(p);
     }
-    return cpu_lduw_le_mmuidx_ra(ac->env, addr, ac->mmu_idx, ac->ra);
+    return cpu_lduw_le_mmuidx_ra(X86_CPU_ARCH_ENV(ac->env),
+                                 X86_ACCESS_ADDRESS(ac->env, addr),
+                                 ac->mmu_idx, ac->ra);
 }
 
 uint32_t access_ldl(X86Access *ac, vaddr addr)
 {
     void *p = access_ptr(ac, addr, sizeof(uint32_t));
 
+    X86_ACCESS_RECORD(ac->env, addr, sizeof(uint32_t), MMU_DATA_LOAD);
     if (likely(p)) {
         return ldl_le_p(p);
     }
-    return cpu_ldl_le_mmuidx_ra(ac->env, addr, ac->mmu_idx, ac->ra);
+    return cpu_ldl_le_mmuidx_ra(X86_CPU_ARCH_ENV(ac->env),
+                                X86_ACCESS_ADDRESS(ac->env, addr),
+                                ac->mmu_idx, ac->ra);
 }
 
 uint64_t access_ldq(X86Access *ac, vaddr addr)
 {
     void *p = access_ptr(ac, addr, sizeof(uint64_t));
 
+    X86_ACCESS_RECORD(ac->env, addr, sizeof(uint64_t), MMU_DATA_LOAD);
     if (likely(p)) {
         return ldq_le_p(p);
     }
-    return cpu_ldq_le_mmuidx_ra(ac->env, addr, ac->mmu_idx, ac->ra);
+    return cpu_ldq_le_mmuidx_ra(X86_CPU_ARCH_ENV(ac->env),
+                                X86_ACCESS_ADDRESS(ac->env, addr),
+                                ac->mmu_idx, ac->ra);
 }
 
 void access_stb(X86Access *ac, vaddr addr, uint8_t val)
 {
     void *p = access_ptr(ac, addr, sizeof(uint8_t));
 
+    X86_ACCESS_RECORD(ac->env, addr, sizeof(uint8_t), MMU_DATA_STORE);
     if (likely(p)) {
         stb_p(p, val);
     } else {
-        cpu_stb_mmuidx_ra(ac->env, addr, val, ac->mmu_idx, ac->ra);
+        cpu_stb_mmuidx_ra(X86_CPU_ARCH_ENV(ac->env),
+                          X86_ACCESS_ADDRESS(ac->env, addr), val,
+                          ac->mmu_idx, ac->ra);
     }
 }
 
@@ -139,10 +172,13 @@ void access_stw(X86Access *ac, vaddr addr, uint16_t val)
 {
     void *p = access_ptr(ac, addr, sizeof(uint16_t));
 
+    X86_ACCESS_RECORD(ac->env, addr, sizeof(uint16_t), MMU_DATA_STORE);
     if (likely(p)) {
         stw_le_p(p, val);
     } else {
-        cpu_stw_le_mmuidx_ra(ac->env, addr, val, ac->mmu_idx, ac->ra);
+        cpu_stw_le_mmuidx_ra(X86_CPU_ARCH_ENV(ac->env),
+                             X86_ACCESS_ADDRESS(ac->env, addr), val,
+                             ac->mmu_idx, ac->ra);
     }
 }
 
@@ -150,10 +186,13 @@ void access_stl(X86Access *ac, vaddr addr, uint32_t val)
 {
     void *p = access_ptr(ac, addr, sizeof(uint32_t));
 
+    X86_ACCESS_RECORD(ac->env, addr, sizeof(uint32_t), MMU_DATA_STORE);
     if (likely(p)) {
         stl_le_p(p, val);
     } else {
-        cpu_stl_le_mmuidx_ra(ac->env, addr, val, ac->mmu_idx, ac->ra);
+        cpu_stl_le_mmuidx_ra(X86_CPU_ARCH_ENV(ac->env),
+                             X86_ACCESS_ADDRESS(ac->env, addr), val,
+                             ac->mmu_idx, ac->ra);
     }
 }
 
@@ -161,9 +200,12 @@ void access_stq(X86Access *ac, vaddr addr, uint64_t val)
 {
     void *p = access_ptr(ac, addr, sizeof(uint64_t));
 
+    X86_ACCESS_RECORD(ac->env, addr, sizeof(uint64_t), MMU_DATA_STORE);
     if (likely(p)) {
         stq_le_p(p, val);
     } else {
-        cpu_stq_le_mmuidx_ra(ac->env, addr, val, ac->mmu_idx, ac->ra);
+        cpu_stq_le_mmuidx_ra(X86_CPU_ARCH_ENV(ac->env),
+                             X86_ACCESS_ADDRESS(ac->env, addr), val,
+                             ac->mmu_idx, ac->ra);
     }
 }
