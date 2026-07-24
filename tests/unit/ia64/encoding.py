@@ -23644,7 +23644,74 @@ for _width, _vectors, _model in (
             _name, _value, _width, _model)
 
 
+# --- IA-32 execution round-trip helpers (ported from main) ---------------
+IA32_TEST_CSD = 0x09b0ffff00000000
+IA32_TEST_DSD = 0x0930ffff00000000
+IA32_TEST_GDTD = 0x0800ffff00000000
+
+
+def ia32_bundle(address, code):
+    """Place up to 16 IA-32 instruction bytes in an IA-64 test bundle."""
+    code = bytes(code)
+    if address & 0xf:
+        raise ValueError("IA-32 test bundle address must be 16-byte aligned")
+    if len(code) > 16:
+        raise ValueError("IA-32 test bundle cannot exceed 16 bytes")
+    code = code.ljust(16, b'\x90')
+    return raw_bundle(address,
+                      int.from_bytes(code[:8], "little"),
+                      int.from_bytes(code[8:], "little"))
+
+
+def ia32_environment_bundles(address, target, reg=31,
+                             csd=IA32_TEST_CSD,
+                             dsd=IA32_TEST_DSD,
+                             ssd=None):
+    """Install valid flat segment descriptors before an IA-32 transition."""
+    if ssd is None:
+        ssd = dsd
+    return [
+        (address, *movl_mlx(reg, dsd)),
+        (address + 0x10, 0x00, nop_m(),
+         adds(24, 0, reg), adds(27, 0, reg)),
+        (address + 0x20, 0x00, nop_m(),
+         adds(28, 0, reg), adds(29, 0, reg)),
+        (address + 0x30, *movl_mlx(reg, ssd)),
+        (address + 0x40, 0x00, mov_m_gr_ar(reg, 26), nop_i(), nop_i()),
+        (address + 0x50, *movl_mlx(reg, csd)),
+        # CSD is consumed before the I-slot clears stype/s in the scratch GR,
+        # leaving a valid system descriptor in the architected GDTD (GR31).
+        (address + 0x60, 0x10, mov_m_gr_ar(reg, 25),
+         dep(reg, 0, reg, 52, 5),
+         br_cond(address + 0x60, target)),
+    ]
+
+
+# Validates the ported IA-32 execution engine end-to-end on -cpu merced:
+# br.ia enters IA-32, executes a short x86 sequence, and jmpe returns to
+# IA-64 with the architected GR/IP state updated.
+test_br_ia_executes_ia32_and_jmpe_returns_to_ia64 = require_registers(
+    "br_ia_executes_ia32_and_jmpe_returns_to_ia64", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "b8 34 12 "       # mov ax,0x1234
+            "83 c0 02 "       # add ax,2
+            "0f b8 00 02")),  # jmpe 0x200
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+    ], {
+        "ip": 0x200,
+        "r1": 0x10a,
+        "r8": 0x1236,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="merced")
+
+
 TEST_NAMES = {
+    "br_ia_executes_ia32_and_jmpe_returns_to_ia64":
+        test_br_ia_executes_ia32_and_jmpe_returns_to_ia64,
     "pmc_pmd_registers_are_independent": test_pmc_pmd_registers_are_independent,
     "pmc_pmd_indexed_decode": test_pmc_pmd_indexed_decode,
     "gcc_alloc_and_ar_lc": test_gcc_alloc_and_ar_lc,

@@ -10,6 +10,7 @@ CASE_NAMES = (
     'addp4_imm_positive_decode',
     'andcm_imm_negative_mask_round_trip',
     'br_call_indirect_completers_decode',
+    'br_ia_executes_ia32_and_jmpe_returns_to_ia64',
     'br_call_ret_preserves_ec',
     'br_call_ret_strcpy_pipeline_stops_on_first_zero_word',
     'br_cloop_decrements_lc',
