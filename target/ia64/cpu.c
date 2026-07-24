@@ -12391,6 +12391,51 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
                                                       cpu->env.psr),
                      cpu->env.cr_iip, cpu->env.cr_iipa, cpu->env.cr_ifa,
                      cpu->env.cr_iim, cpu->env.cr_isr, cpu->env.cr_ipsr);
+
+            /*
+             * NT's DebugPrint executes break 0x80014 with the message
+             * buffer address in t0/GR2 and its length in t1/GR3 (WSRV03
+             * rtl/ia64/debugstb.s + regia64.h).  Surfacing the text turns
+             * an anonymous crash-and-reboot into a readable error record.
+             */
+            if (excp == IA64_EXCP_BREAK && cpu->env.cr_iim == 0x80014) {
+                uint32_t len = cpu->env.gr[3] & 0xffff;
+                uint64_t va = cpu->env.gr[2];
+                uint8_t buf[512];
+                uint32_t got = 0;
+                bool ok = true;
+
+                len = MIN(len, (uint32_t)sizeof(buf) - 1);
+                /*
+                 * The message buffer is a virtual address that may not be in
+                 * the TLB (the debug page walker is TLB-only), so translate
+                 * it page by page with a full VHPT walk.
+                 */
+                while (ok && got < len) {
+                    uint64_t page_off = (va + got) & (TARGET_PAGE_SIZE - 1);
+                    uint32_t chunk = MIN(len - got,
+                                         TARGET_PAGE_SIZE - (uint32_t)page_off);
+                    uint64_t pa;
+
+                    if (!ia64_translate_data_access(&cpu->env, va + got,
+                                                    false, &pa) ||
+                        address_space_read(&address_space_memory, pa,
+                                           MEMTXATTRS_UNSPECIFIED,
+                                           buf + got, chunk) != MEMTX_OK) {
+                        ok = false;
+                        break;
+                    }
+                    got += chunk;
+                }
+                if (got > 0) {
+                    while (got > 0 &&
+                           (buf[got - 1] == '\n' || buf[got - 1] == '\r')) {
+                        got--;
+                    }
+                    buf[got] = 0;
+                    qemu_log("IA64-DBGPRINT %s\n", buf);
+                }
+            }
         }
     }
 
