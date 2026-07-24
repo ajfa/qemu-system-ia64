@@ -12436,12 +12436,14 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
                      cpu->env.cr_iim, cpu->env.cr_isr, cpu->env.cr_ipsr);
 
             /*
-             * NT's DebugPrint executes break 0x80014 with the message
+             * NT's DebugPrint (break 0x80014) and DebugPrompt (break
+             * 0x80015, used by checked-build asserts) both pass the output
              * buffer address in t0/GR2 and its length in t1/GR3 (WSRV03
              * rtl/ia64/debugstb.s + regia64.h).  Surfacing the text turns
              * an anonymous crash-and-reboot into a readable error record.
              */
-            if (excp == IA64_EXCP_BREAK && cpu->env.cr_iim == 0x80014) {
+            if (excp == IA64_EXCP_BREAK && (cpu->env.cr_iim == 0x80014 ||
+                                            cpu->env.cr_iim == 0x80015)) {
                 uint32_t len = cpu->env.gr[3] & 0xffff;
                 uint64_t va = cpu->env.gr[2];
                 uint8_t buf[512];
@@ -12465,18 +12467,50 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
                         address_space_read(&address_space_memory, pa,
                                            MEMTXATTRS_UNSPECIFIED,
                                            buf + got, chunk) != MEMTX_OK) {
-                        ok = false;
-                        break;
+                        /*
+                         * The VHPT walk and the TLB cover different subsets
+                         * of the guest's mappings; fall back to the TLB-based
+                         * debug read before giving up on this page.
+                         */
+                        if (cpu_memory_rw_debug(cs, va + got, buf + got,
+                                                chunk, false) != 0) {
+                            ok = false;
+                            break;
+                        }
                     }
                     got += chunk;
                 }
                 if (got > 0) {
-                    while (got > 0 &&
-                           (buf[got - 1] == '\n' || buf[got - 1] == '\r')) {
-                        got--;
+                    uint8_t out[sizeof(buf)];
+                    uint32_t n = 0;
+                    uint32_t i;
+
+                    /*
+                     * Assertion text spans several lines and may carry
+                     * embedded NULs, so flatten the whole buffer onto one
+                     * log line instead of printing it as a C string.
+                     */
+                    for (i = 0; i < got; i++) {
+                        uint8_t c = buf[i];
+
+                        if (c == '\n' || c == '\r' || c == '\t' || c == 0) {
+                            c = ' ';
+                        } else if (c < 0x20 || c >= 0x7f) {
+                            c = '.';
+                        }
+                        if (c == ' ' && (n == 0 || out[n - 1] == ' ')) {
+                            continue;
+                        }
+                        out[n++] = c;
                     }
-                    buf[got] = 0;
-                    qemu_log("IA64-DBGPRINT %s\n", buf);
+                    while (n > 0 && out[n - 1] == ' ') {
+                        n--;
+                    }
+                    out[n] = 0;
+                    qemu_log("IA64-%s %s\n",
+                             cpu->env.cr_iim == 0x80015 ? "DBGPROMPT"
+                                                        : "DBGPRINT",
+                             out);
                 }
             }
         }
