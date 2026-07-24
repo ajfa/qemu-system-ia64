@@ -4,6 +4,14 @@ from .encoding import TEST_NAMES
 
 GROUP = 'interrupt'
 CASE_NAMES = (
+    'rfi_to_ia32_clears_fault_suppression_but_preserves_psr_id',
+    'rfi_to_ia32_taken_branch_trap_records_byte_ips',
+    'rfi_to_ia32_unimplemented_target_preserves_64bit_iip',
+    'ia32_unaligned_movaps_raises_gpf',
+    'ia32_eflag_tf_traps_after_one_instruction_and_resumes',
+    'ia32_taken_branch_clears_rf_and_psr_id',
+    'ia32_data_access_wraps_at_4g',
+    'ia32_instruction_fetch_wraps_at_4g',
     'ar_itc_advances_in_guest_loop',
     'async_timer_interrupt_enters_ivt',
     'async_timer_interrupt_never_resumes_mlx_slot2',

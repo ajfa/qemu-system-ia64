@@ -207,7 +207,16 @@ def parse_state(output: str, *, require_fpu: bool = True) -> Ia64State:
         kind, rest = match.groups()
         values = _fields(rest or "")
 
-        if kind == "META":
+        if kind == "SCHEMA":
+            if kind in seen:
+                raise StateParseError(f"duplicate IA64STATE {kind} record")
+            _required(values, ("version",), kind)
+            if values["version"] != 1:
+                raise StateParseError(
+                    f"unsupported IA64STATE schema version "
+                    f"{values['version']}")
+            seen.add(kind)
+        elif kind == "META":
             if kind in seen:
                 raise StateParseError(f"duplicate IA64STATE {kind} record")
             _required(values, ("ip", "psr", "halted"), kind)

@@ -11619,6 +11619,9 @@ static G_NORETURN void ia64_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
     CPUIA64State *env = &cpu->env;
 
     (void)mmu_idx;
+    if (env->psr & IA64_PSR_IS) {
+        ia64_ia32_unaligned_access(&env->ia32, addr, access_type, retaddr);
+    }
     cpu_restore_state(cs, retaddr);
     env->fault_ip = env->ip;
     env->fault_imm = 0;
@@ -11809,6 +11812,16 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     bool is_rse = !is_ifetch && mmu_idx == MMU_IDX_RSE;
     uint8_t access_level;
     bool virt_translation_enabled;
+
+    if (!probe && is_ifetch && (cpu->env.psr & IA64_PSR_IS) &&
+        (uint32_t)addr == ia64_ia32_virtual_ip(&cpu->env)) {
+        /*
+         * The first executable-page lookup happens before x86 decoding.
+         * Preserve the architectural ordering of IA-32 instruction
+         * breakpoint and code-fetch faults ahead of instruction TLB faults.
+         */
+        ia64_ia32_check_fetch_fault_priority(&cpu->env, addr, 0);
+    }
 
     rid = ia64_region_rid(&cpu->env, addr);
     if (mmu_idx == MMU_PHYS_IDX) {
@@ -12049,8 +12062,17 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
         }
     }
 raise_exception:
+    if ((cpu->env.psr & IA64_PSR_IS) && retaddr) {
+        cpu_restore_state(cs, retaddr);
+        retaddr = 0;
+    }
+    if (cpu->env.psr & IA64_PSR_IS) {
+        cpu->env.ip = ia64_ia32_virtual_ip(&cpu->env);
+        cpu->env.fault_ip = cpu->env.ip;
+    }
     if (is_ifetch && excp == IA64_EXCP_PAGE_NOT_PRESENT &&
-        (cpu->env.psr & IA64_PSR_IC)) {
+        (cpu->env.psr & IA64_PSR_IC) &&
+        !(cpu->env.psr & IA64_PSR_IS)) {
         /*
          * IIP receives IP on interruption entry, and for faults it must point
          * at the faulting instruction bundle when interruption collection is
@@ -12069,9 +12091,11 @@ raise_exception:
      * and the handler's rfi would skip slots of the target bundle.
      */
     cpu->env.fault_slot =
+        cpu->env.psr & IA64_PSR_IS ? 0 :
         (cpu->env.psr & IA64_PSR_RI_MASK) >> IA64_PSR_RI_SHIFT;
     if (cpu->env.psr & IA64_PSR_IC) {
-        cpu->env.cr_ifa = addr;
+        cpu->env.cr_ifa = is_ifetch && (cpu->env.psr & IA64_PSR_IS) ?
+                          addr & ~0xfULL : addr;
         if (ia64_exception_initializes_iha(excp)) {
             cpu->env.cr_iha = ia64_vhpt_hash_address(&cpu->env, addr);
         }
@@ -12119,6 +12143,9 @@ raise_exception:
                   (uint64_t)addr, rid, cpu->env.cr_itir,
                   cpu->env.cr_iha, cpu->env.cr_pta, cpu->env.cr_isr);
     cs->exception_index = excp;
+    if (cpu->env.psr & IA64_PSR_IS) {
+        cpu_loop_exit(cs);
+    }
     cpu_loop_exit_restore(cs, retaddr);
 }
 
@@ -12620,11 +12647,14 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
     int excp = cs->exception_index;
     uint64_t fault_addr;
     uint8_t slot;
+    bool ia32_entry_trap;
 
     if (excp == IA64_EXCP_NONE) {
         return;
     }
     cpu->env.fault_exception = excp;
+    ia32_entry_trap = (cpu->env.psr & IA64_PSR_IS) &&
+                      cpu->env.ia32_transition_trap;
 
     if (!(cpu->env.psr & IA64_PSR_IC) &&
         !ia64_exception_is_translation_fault(excp) &&
@@ -12664,13 +12694,22 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
     case IA64_EXCP_FP_TRAP:
     case IA64_EXCP_DISABLED_ISA_TRANSITION:
     case IA64_EXCP_DISABLED_FP:
+    case IA64_EXCP_IA32_EXCEPTION:
+    case IA64_EXCP_IA32_INTERCEPT:
+    case IA64_EXCP_IA32_INTERRUPT:
+    case IA64_EXCP_TAKEN_BRANCH:
+    case IA64_EXCP_SINGLE_STEP:
         fault_addr = cpu->env.fault_ip;
         break;
     case IA64_EXCP_UNIMPL_INST_ADDR:
-        cpu->env.ip = cpu->env.psr & IA64_PSR_IT ?
-                      ia64_va_canonicalize(cpu->env.ip) :
-                      ia64_pa_canonicalize(cpu->env.ip);
-        fault_addr = cpu->env.ip;
+        if (ia32_entry_trap) {
+            fault_addr = cpu->env.fault_ip;
+        } else {
+            cpu->env.ip = cpu->env.psr & IA64_PSR_IT ?
+                          ia64_va_canonicalize(cpu->env.ip) :
+                          ia64_pa_canonicalize(cpu->env.ip);
+            fault_addr = cpu->env.ip;
+        }
         break;
     case IA64_EXCP_EXTINT:
         break;
@@ -12678,7 +12717,11 @@ static void ia64_cpu_do_interrupt(CPUState *cs)
         break;
     }
     slot = cpu->env.fault_slot;
-    if (ia64_exception_uses_psr_ri_slot(excp, cpu->env.cr_isr)) {
+    if (ia32_entry_trap) {
+        /* The excepting instruction is the IA-64 br.ia/rfi source slot. */
+    } else if (cpu->env.psr & IA64_PSR_IS) {
+        slot = 0;
+    } else if (ia64_exception_uses_psr_ri_slot(excp, cpu->env.cr_isr)) {
         slot = (cpu->env.psr & IA64_PSR_RI_MASK) >> IA64_PSR_RI_SHIFT;
     }
     if (ia64_psr_cpl(cpu->env.psr) == 3 &&
@@ -12746,10 +12789,25 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
      */
     bool rse_frame_complete = !cpu->env.rse_cfle &&
         cpu->env.rse_dirty >= 0 && cpu->env.rse_dirty_nat >= 0;
+    bool nmi_pending = cpu->env.sapic_irr[0] & (1ULL << 2);
+    bool interrupt_enabled = (cpu->env.psr & IA64_PSR_I) || nmi_pending;
+
+    if ((cpu->env.psr & IA64_PSR_IS) && !nmi_pending) {
+        /*
+         * IA-32 execution honours the virtual interrupt flag (CFLG.if
+         * selects EFLAGS.if) and the mov-ss/sti one-instruction
+         * interrupt shadow in addition to PSR.i.
+         */
+        uint32_t eflags = cpu_compute_eflags(&cpu->env.ia32);
+        bool virtual_if = !(cpu->env.ar_cflg & (1ULL << 7)) ||
+                          (eflags & IF_MASK);
+
+        interrupt_enabled = (cpu->env.psr & IA64_PSR_I) && virtual_if &&
+                            !(cpu->env.ia32.hflags & HF_INHIBIT_IRQ_MASK);
+    }
 
     if ((interrupt_request & CPU_INTERRUPT_HARD) &&
-        ((cpu->env.psr & IA64_PSR_I) ||
-         (cpu->env.sapic_irr[0] & (1ULL << 2))) &&
+        interrupt_enabled &&
         ia64_sapic_has_pending(&cpu->env) &&
         rse_frame_complete) {
         cs->exception_index = IA64_EXCP_EXTINT;
@@ -12892,6 +12950,8 @@ static void ia64_dump_machine_state(CPUState *cs, FILE *f, int flags)
         pr_mask |= (env->pr[i] != 0) ? 1ULL << i : 0;
     }
 
+    /* Version 1 matches main's dump schema (target/ia64/debug.h there). */
+    qemu_fprintf(f, "IA64STATE SCHEMA version=%016x\n", 1);
     qemu_fprintf(f, "IA64STATE META ip=%016" PRIx64
                  " psr=%016" PRIx64 " halted=%u\n",
                  env->ip, env->psr, cs->halted ? 1 : 0);
