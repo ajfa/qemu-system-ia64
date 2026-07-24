@@ -12345,6 +12345,47 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
      * which is completed by cover or by an rfi resuming the loads.
      */
     cpu->env.rse_cfle = false;
+
+    /*
+     * -d ia64_fault: a low-volume trace of the fault classes that indicate
+     * broken guest code or emulation bugs.  Routine memory-management
+     * traffic (TLB/VHPT/paging/dirty/access/key), external interrupts and
+     * lazy-FP switches are deliberately excluded so the log stays small
+     * over a full OS boot.
+     */
+    {
+        static const uint64_t interesting =
+            (1ULL << IA64_EXCP_BREAK) |
+            (1ULL << IA64_EXCP_ILLEGAL) |
+            (1ULL << IA64_EXCP_RESERVED_TEMPLATE) |
+            (1ULL << IA64_EXCP_GENERAL) |
+            (1ULL << IA64_EXCP_NAT_CONSUMPTION) |
+            (1ULL << IA64_EXCP_UNALIGNED) |
+            (1ULL << IA64_EXCP_UNIMPL_DATA_ADDR) |
+            (1ULL << IA64_EXCP_UNIMPL_INST_ADDR) |
+            (1ULL << IA64_EXCP_PRIVILEGED_OP) |
+            (1ULL << IA64_EXCP_PRIVILEGED_REG) |
+            (1ULL << IA64_EXCP_RESERVED_REG_FIELD) |
+            (1ULL << IA64_EXCP_DISABLED_ISA_TRANSITION) |
+            (1ULL << IA64_EXCP_UNSUPPORTED_DATA_REFERENCE) |
+            (1ULL << IA64_EXCP_IA32_EXCEPTION) |
+            (1ULL << IA64_EXCP_IA32_INTERCEPT) |
+            (1ULL << IA64_EXCP_IA32_INTERRUPT);
+
+        if (((interesting >> excp) & 1) &&
+            qemu_loglevel_mask(CPU_LOG_IA64_FAULT)) {
+            qemu_log("IA64-FAULT excp=%d vector=0x%04" PRIx64
+                     " cpl=%u iip=0x%016" PRIx64 " iipa=0x%016" PRIx64
+                     " ifa=0x%016" PRIx64 " iim=0x%016" PRIx64
+                     " isr=0x%016" PRIx64 " ipsr=0x%016" PRIx64 "\n",
+                     excp, vector,
+                     (unsigned)ia64_psr_cpl(collect ? cpu->env.cr_ipsr :
+                                                      cpu->env.psr),
+                     cpu->env.cr_iip, cpu->env.cr_iipa, cpu->env.cr_ifa,
+                     cpu->env.cr_iim, cpu->env.cr_isr, cpu->env.cr_ipsr);
+        }
+    }
+
     ia64_set_psr(&cpu->env, ia64_interruption_psr(&cpu->env));
     cpu->env.psr_ic_inflight = false;
 

@@ -534,6 +534,9 @@ const QEMULogItem qemu_log_items[] = {
     { CPU_LOG_IA32_FAULT, "ia32_fault",
       "log IA-32 execution-layer faults and instruction intercepts "
       "(EIP, opcode bytes, registers)" },
+    { CPU_LOG_IA64_FAULT, "ia64_fault",
+      "log rare/fatal IA-64 fault classes (illegal op, NaT consumption, "
+      "unaligned, privilege, break); excludes routine TLB/paging/EXTINT" },
     { 0, NULL, NULL },
 };
 
