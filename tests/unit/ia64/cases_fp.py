@@ -46,6 +46,7 @@ CASE_NAMES = (
     'fmpy_s_s1_decode',
     'fms_s3_decode',
     'fnma_d_s1_decode',
+    'fma_s_s0_high_f4_decode',
     'fnmpy_s_s1_decode',
     'fnorm_normalizes_setf_sig_payload',
     'fp_alat_does_not_satisfy_gr_check_load',

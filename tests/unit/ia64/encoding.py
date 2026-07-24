@@ -12148,6 +12148,24 @@ test_fma_d_s0_decode = require_registers("fma_d_s0_decode", [
     "ar_fpsr": DEFAULT_FPSR,
 }, entry=0x10)
 
+test_fma_s_s0_high_f4_decode = require_registers(
+    "fma_s_s0_high_f4_decode", [
+        (0x10, *movl_mlx(2, 0x40000000)),
+        (0x20, *movl_mlx(3, 0x40800000)),
+        (0x30, *movl_mlx(4, 0xc0400000)),
+        (0x40, *movl_mlx(5, 0x3f000000)),
+        (0x50, 0x09, setf_s(8, 2), setf_s(9, 3), nop_i()),
+        (0x60, 0x09, setf_s(33, 4), setf_s(34, 5), nop_i()),
+        (0x70, 0x1c, nop_m(), fma_s_s0(35, 8, 33, 9), nop_b()),
+        (0x80, 0x1c, nop_m(), fma_s_s0(36, 8, 34, 0), nop_b()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "f35": ExpectedFP(*binary32_to_spill(0xc0000000)),
+        "f36": ExpectedFP(*binary32_to_spill(0x3f800000)),
+        "ar_fpsr": DEFAULT_FPSR,
+    }, entry=0x10)
+
 test_fnmpy_s_s1_decode = require_registers("fnmpy_s_s1_decode", [
     (0x10, *movl_mlx(2, 0x4008000000000000)),
     (0x20, *movl_mlx(3, 0x4000000000000000)),
@@ -24332,6 +24350,7 @@ TEST_NAMES = {
     "getf_sig_ignored_bits_decode": test_getf_sig_ignored_bits_decode,
     "w2k_fp_s1_pred_false_decode": test_w2k_fp_s1_pred_false_decode,
     "fma_d_s0_decode": test_fma_d_s0_decode,
+    "fma_s_s0_high_f4_decode": test_fma_s_s0_high_f4_decode,
     "fnmpy_s_s1_decode": test_fnmpy_s_s1_decode,
     "fsub_d_s0_decode": test_fsub_d_s0_decode,
     "fmpy_s0_decode": test_fmpy_s0_decode,

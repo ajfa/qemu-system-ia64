@@ -3956,27 +3956,16 @@ static Ia64Instruction ia64_decode_insn(Ia64SlotUnit unit, uint64_t raw,
         const uint64_t form = ia64_bits(raw, 27, 6);
         Ia64Opcode opcode = IA64_OP_ILLEGAL;
 
+        /*
+         * In the F1 forms selected by major opcodes 8-D, bits 33:27 are
+         * the complete seven-bit f4 operand, not an x6 extension: any
+         * x6-based sub-decode of op 8 wrongly reclassifies an fma whose f4
+         * register happens to alias an x6 value (e.g. fma.s with f4>=32
+         * sets bit 32, making x6 nonzero and mis-decoding as fcmp/fmin).
+         * fmin/fmax/famin/famax are major opcode 0 (form 0x14-0x17) below.
+         */
         if (ia64_b_op(raw) == 4) {
             opcode = IA64_OP_FCMP;
-        } else if (ia64_b_op(raw) == 8 && x == 1 &&
-                   (x6 == 0x00 || x6 == 0x02 || x6 == 0x04 ||
-                    x6 == 0x08 || x6 == 0x0a || x6 == 0x0c ||
-                    x6 == 0x0e)) {
-            if (x6 == 0x00) {
-                opcode = IA64_OP_FMA;
-            } else if (x6 == 0x02) {
-                opcode = IA64_OP_FMPY;
-            } else if (x6 == 0x04) {
-                opcode = IA64_OP_FCMP;
-            } else if (x6 == 0x08) {
-                opcode = IA64_OP_FMIN;
-            } else if (x6 == 0x0a) {
-                opcode = IA64_OP_FMAX;
-            } else if (x6 == 0x0c) {
-                opcode = IA64_OP_FAMIN;
-            } else if (x6 == 0x0e) {
-                opcode = IA64_OP_FAMAX;
-            }
         } else if (x == 0 && ia64_b_op(raw) >= 8 &&
                    ia64_b_op(raw) <= 0xd) {
             opcode = ia64_f1_opcode_from_major(ia64_b_op(raw),
