@@ -23027,6 +23027,20 @@ test_br_call_indirect_completers_decode = require_registers(
          br_ret(6)),
     ], {"ip": 0x50, "r4": 0x5a, "r5": 0x33}, entry=0x10)
 
+# Regression: an indirect br.call whose branch-whether hint has bit 32 = 0
+# (wh=4 here; the MS IA-64 compiler emits this in pidgen.dll's product-key
+# path) must execute, not raise an Illegal Operation.  The decoder used to
+# require bit 32 = 1 and mis-decoded every such call.
+test_br_call_indirect_prefetch_hint_bit_ignored = require_registers(
+    "br_call_indirect_prefetch_hint_bit_ignored", [
+        (0x10, 0x00, addl(8, 0x40, 0), nop_i(), nop_i()),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(),
+         br_call_indirect(1, 7, wh=4, many=True)),
+        (0x40, 0x00, adds(4, 0x5a, 0), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {"ip": 0x50, "r4": 0x5a}, entry=0x10)
+
 test_br_indirect_ignores_low_bits = require_registers(
     "br_indirect_ignores_low_bits", [
         (0x10, *movl_mlx(8, 0x6f)),
@@ -25254,6 +25268,8 @@ TEST_NAMES = {
     "hint_x_mlx_decode": test_hint_x_mlx_decode,
     "br_call_indirect_completers_decode":
         test_br_call_indirect_completers_decode,
+    "br_call_indirect_prefetch_hint_bit_ignored":
+        test_br_call_indirect_prefetch_hint_bit_ignored,
     "br_indirect_ignores_low_bits": test_br_indirect_ignores_low_bits,
     "br_indirect_predicate_false_falls_through":
         test_br_indirect_predicate_false_falls_through,

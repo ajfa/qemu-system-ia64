@@ -4589,9 +4589,17 @@ static Ia64Instruction ia64_decode_insn(Ia64SlotUnit unit, uint64_t raw,
         }
     }
 
-    /* Indirect call: br.call bRet=bTarget, B5. Completers are hints. */
-    if (unit == IA64_UNIT_B && ia64_b_op(raw) == 1 &&
-        ia64_bits(raw, 32, 1) == 1) {
+    /*
+     * Indirect call: br.call bRet=bTarget, B5.  The whole 36:32 completer
+     * area is branch hints (bwh/ph/dh) with no architectural effect, so it
+     * must not gate decode: an indirect call with a branch-whether hint
+     * whose low bit (bit 32) is 0 is as valid as any other, and the MS
+     * IA-64 compiler emits it (e.g. pidgen.dll's product-key path uses
+     * wh=4).  Requiring bit 32 = 1 mis-decoded every such call as an
+     * Illegal Operation.  op == 1 in the B unit is uniquely B5, matching
+     * how the IP-relative br.call (op 5) below ignores its hint bits too.
+     */
+    if (unit == IA64_UNIT_B && ia64_b_op(raw) == 1) {
         Ia64Instruction insn =
             ia64_base_insn(IA64_OP_BR_CALL_INDIRECT, unit, raw, address, slot);
         insn.b2 = ia64_bits(raw, 13, 3);  /* target branch register */
