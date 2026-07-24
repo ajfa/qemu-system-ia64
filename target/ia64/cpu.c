@@ -12380,15 +12380,48 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
             (1ULL << IA64_EXCP_IA32_INTERCEPT) |
             (1ULL << IA64_EXCP_IA32_INTERRUPT);
 
+        /*
+         * User-mode data faults that turn into a c0000005 access violation
+         * (wild/unmapped pointer): DTLB/alt-DTLB/data-access/NaT/key faults
+         * and general exceptions taken at cpl 3.  Demand paging (page not
+         * present) is excluded.  These fire for benign first-touch too, so
+         * dedupe by faulting IP into a small direct-mapped table - a genuine
+         * crash faults at one IP that then does not make progress, so its
+         * line survives near the log tail while first-touch churn is bounded.
+         */
+        static const uint64_t user_data_fault =
+            (1ULL << IA64_EXCP_DTLB_FAULT) |
+            (1ULL << IA64_EXCP_ALT_DTLB) |
+            (1ULL << IA64_EXCP_DATA_ACCESS) |
+            (1ULL << IA64_EXCP_GENERAL) |
+            (1ULL << IA64_EXCP_NAT_CONSUMPTION) |
+            (1ULL << IA64_EXCP_DATA_KEY_MISS) |
+            (1ULL << IA64_EXCP_KEY_PERMISSION);
+        unsigned fault_cpl = ia64_psr_cpl(collect ? cpu->env.cr_ipsr :
+                                                    cpu->env.psr);
+
+        if (fault_cpl == 3 && ((user_data_fault >> excp) & 1) &&
+            qemu_loglevel_mask(CPU_LOG_IA64_FAULT)) {
+            static uint64_t seen[1024];
+            unsigned h = (cpu->env.cr_iip >> 4) & 1023;
+
+            if (seen[h] != cpu->env.cr_iip) {
+                seen[h] = cpu->env.cr_iip;
+                qemu_log("IA64-AV excp=%d vector=0x%04" PRIx64
+                         " iip=0x%016" PRIx64 " ifa=0x%016" PRIx64
+                         " isr=0x%016" PRIx64 "\n",
+                         excp, vector, cpu->env.cr_iip, cpu->env.cr_ifa,
+                         cpu->env.cr_isr);
+            }
+        }
+
         if (((interesting >> excp) & 1) &&
             qemu_loglevel_mask(CPU_LOG_IA64_FAULT)) {
             qemu_log("IA64-FAULT excp=%d vector=0x%04" PRIx64
                      " cpl=%u iip=0x%016" PRIx64 " iipa=0x%016" PRIx64
                      " ifa=0x%016" PRIx64 " iim=0x%016" PRIx64
                      " isr=0x%016" PRIx64 " ipsr=0x%016" PRIx64 "\n",
-                     excp, vector,
-                     (unsigned)ia64_psr_cpl(collect ? cpu->env.cr_ipsr :
-                                                      cpu->env.psr),
+                     excp, vector, fault_cpl,
                      cpu->env.cr_iip, cpu->env.cr_iipa, cpu->env.cr_ifa,
                      cpu->env.cr_iim, cpu->env.cr_isr, cpu->env.cr_ipsr);
 
