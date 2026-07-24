@@ -56,7 +56,15 @@ pal_proc_entry:
      * dispatcher physically on a firmware-owned stack, and resumes the
      * caller via sal_runtime_return.  Keeping the stub as a leaf preserves
      * all eight input registers; results return in r8-r11.
+     *
+     * The stub trio lives in its own section placed first in the runtime
+     * code region (firmware.lds pins it to __runtime_code_start): Windows
+     * Server 2003's HAL derives the virtual SAL entry only from the
+     * EfiRuntimeServicesCode EFI descriptor that contains the SST SalProc
+     * address (HalpEfiInitialization) and fails HAL init - bugcheck 0x61 -
+     * when SalProc lies in the PAL/boot-services region instead.
      */
+    .section .text.sal_runtime, "ax"
     .global sal_runtime_entry
     .type sal_runtime_entry, @function
     .proc sal_runtime_entry

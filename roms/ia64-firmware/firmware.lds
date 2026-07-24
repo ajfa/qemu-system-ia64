@@ -18,6 +18,17 @@ SECTIONS
     . = ALIGN(0x2000);
     __runtime_code_start = .;
 
+    /*
+     * The SAL runtime stub trio leads the runtime code region: Windows
+     * Server 2003's HAL requires the SST SalProc address to fall inside an
+     * EfiRuntimeServicesCode descriptor.  The machine recognises the stubs
+     * by fixed physical address (IA64_FW_SAL_RUNTIME_ENTRY_PA et al.), so
+     * pin the region base.
+     */
+    .text.sal_runtime : {
+        *(.text.sal_runtime)
+    }
+
     .text : {
         *(.text*)
         *(.plt*)
@@ -73,3 +84,11 @@ SECTIONS
 
     _end = .;
 }
+
+/* The machine hardcodes the SAL runtime stub addresses (target/ia64/cpu.h). */
+ASSERT(sal_runtime_entry == 0x102000,
+       "sal_runtime_entry must sit at IA64_FW_SAL_RUNTIME_ENTRY_PA (0x102000)")
+ASSERT(sal_runtime_return == 0x102020,
+       "sal_runtime_return must sit at IA64_FW_SAL_RUNTIME_RETURN_PA (0x102020)")
+ASSERT(sal_dispatch_block == 0x102040,
+       "sal_dispatch_block must sit at IA64_FW_SAL_DISPATCH_BLOCK_PA (0x102040)")

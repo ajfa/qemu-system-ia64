@@ -14447,10 +14447,10 @@ static void efi_init_platform_tables(void)
         md[0].MemoryUsage = SAL_MEM_USAGE_PAL_CODE;
         md[0].PhysicalAddress = image_base;
         md[0].Length = 1;
-        /* SAL code: same page; SAL_PROC lies within the PAL mapping. */
+        /* SAL code: the page holding the SAL_PROC runtime stubs. */
         md[1].MemoryType = SAL_MEM_TYPE_REGULAR;
         md[1].MemoryUsage = SAL_MEM_USAGE_SAL_CODE;
-        md[1].PhysicalAddress = image_base;
+        md[1].PhysicalAddress = (UINTN)sal_runtime_entry & ~0xFFFULL;
         md[1].Length = 1;
         /* SAL data: the firmware's runtime data (SST, SAL state). */
         md[2].MemoryType = SAL_MEM_TYPE_REGULAR;
@@ -14894,7 +14894,7 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mSalSystemTable.MemoryDescriptors[3].Length == 0 ||
         mSalSystemTable.Entrypoint.SalProc != (UINT64)(UINTN)sal_runtime_entry ||
         (UINT64)(UINTN)sal_runtime_entry !=
-            (UINT64)(UINTN)pal_proc_entry + 0x20 ||
+            (UINT64)(UINTN)&__runtime_code_start ||
         mSalSystemTable.PlatformFeatures.Type != 2 ||
         mSalSystemTable.TranslationRegister.Type != 3 ||
         mSalSystemTable.TranslationRegister.RegisterType != 0 ||

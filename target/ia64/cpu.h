@@ -135,13 +135,17 @@
 #define IA64_FW_IDENTITY_BASE 0x00100000ULL
 #define IA64_FW_IDENTITY_SIZE 0x00100000ULL
 /*
- * Fixed entry.S layout within the identity page: PAL_PROC stub at +0x60,
- * the SAL_PROC runtime entry/return stubs and the dispatch handshake
- * block (C entry, GP, physical stack top, backing-store base) follow.
+ * Fixed entry.S layout: PAL_PROC stub at +0x60 in the identity page; the
+ * SAL_PROC runtime entry/return stubs and the dispatch handshake block
+ * (C entry, GP, physical stack top, backing-store base) lead the runtime
+ * code region at +0x2000 (firmware.lds pins and asserts the addresses).
+ * Windows Server 2003's HAL only derives a virtual SAL entry from the
+ * EfiRuntimeServicesCode descriptor containing the SST SalProc address,
+ * so the stubs must live in runtime-services code, not the PAL page.
  */
-#define IA64_FW_SAL_RUNTIME_ENTRY_PA  (IA64_FW_IDENTITY_BASE + 0x80)
-#define IA64_FW_SAL_RUNTIME_RETURN_PA (IA64_FW_IDENTITY_BASE + 0xa0)
-#define IA64_FW_SAL_DISPATCH_BLOCK_PA (IA64_FW_IDENTITY_BASE + 0xc0)
+#define IA64_FW_SAL_RUNTIME_ENTRY_PA  (IA64_FW_IDENTITY_BASE + 0x2000)
+#define IA64_FW_SAL_RUNTIME_RETURN_PA (IA64_FW_IDENTITY_BASE + 0x2020)
+#define IA64_FW_SAL_DISPATCH_BLOCK_PA (IA64_FW_IDENTITY_BASE + 0x2040)
 #define IA64_FIRMWARE_IVT_BASE 0x10000ULL
 #define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
 /*
