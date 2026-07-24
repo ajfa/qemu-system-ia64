@@ -30280,9 +30280,10 @@ static BOOLEAN __attribute__((noinline)) pci_root_bridge_io_selftest(void)
         return 0;
     }
 
+    /* All-ones means the AHCI was removed with ahci=off, not a failure. */
     if (pci_root_cfg_read(&mPciRootBridgeIoProto, EfiPciWidthUint32,
                           1ULL << 16, 1, &ahci_id) != EFI_SUCCESS ||
-        ahci_id != 0x29228086U) {
+        (ahci_id != 0x29228086U && ahci_id != 0xffffffffU)) {
         return 0;
     }
 
@@ -30346,7 +30347,12 @@ static BOOLEAN __attribute__((noinline)) pci_io_protocol_selftest(void)
                             &id) != EFI_SUCCESS) {
             return 0;
         }
-        if (i == 0 && id == 0xffffffffU) {
+        /*
+         * Entry 0 (IDE) and entry 1 (AHCI, removable with the machine's
+         * ahci=off switch) are optional controllers: all-ones means the
+         * device is absent, not a self-test failure.
+         */
+        if (i <= 1 && id == 0xffffffffU) {
             continue;
         }
         if (id != expected_id) {
