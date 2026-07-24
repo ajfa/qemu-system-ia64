@@ -9,6 +9,43 @@
 #include "arch/arch.h"
 #include "ia32/ia32.h"
 #include "target/i386/tcg/helper-tcg.h"
+#include "qemu/log.h"
+
+/*
+ * Diagnostic trace for IA-32 faults/intercepts (opt in with -d ia32_fault).
+ * Setup.exe crashes in IA-32 code surface here as a #GP (vector 13) or an
+ * instruction intercept delivered to CPL 3; the record names the reason and
+ * dumps the faulting x86 EIP with the opcode bytes so the guilty instruction
+ * can be identified against the Intel opcode maps.
+ */
+static void ia64_ia32_log_fault(CPUX86State *xenv, const char *kind,
+                                uint32_t detail, uint32_t code)
+{
+    CPUIA64State *env = (CPUIA64State *)xenv;
+    CPUState *cs = env_cpu(env);
+    uint32_t eip = (uint32_t)xenv->eip;
+    uint32_t linear = ia64_ia32_virtual_ip(env);
+    uint8_t op[8] = {0};
+    unsigned cpl = xenv->hflags & HF_CPL_MASK;
+    char bytes[3 * sizeof(op) + 1];
+    int i;
+
+    if (!qemu_loglevel_mask(CPU_LOG_IA32_FAULT)) {
+        return;
+    }
+
+    cpu_memory_rw_debug(cs, linear, op, sizeof(op), false);
+    for (i = 0; i < (int)sizeof(op); i++) {
+        snprintf(bytes + i * 3, 4, "%02x ", op[i]);
+    }
+    qemu_log("IA32-FAULT %-9s detail=0x%x code=0x%x cpl=%u eip=0x%08x "
+             "cs:eip=0x%08x eax=0x%08x ebx=0x%08x ecx=0x%08x edx=0x%08x "
+             "esp=0x%08x opcode=%s\n",
+             kind, detail, code, cpl, eip, linear,
+             (uint32_t)xenv->regs[R_EAX], (uint32_t)xenv->regs[R_EBX],
+             (uint32_t)xenv->regs[R_ECX], (uint32_t)xenv->regs[R_EDX],
+             (uint32_t)xenv->regs[R_ESP], bytes);
+}
 
 #define IA32_MXCSR_IE (1U << 0)
 #define IA32_MXCSR_DE (1U << 1)
@@ -209,6 +246,7 @@ G_NORETURN void ia64_ia32_raise_intercept(CPUX86State *xenv,
         cpu_restore_state(cs, retaddr);
         retaddr = 0;
     }
+    ia64_ia32_log_fault(xenv, "intercept", intercept, code);
     ip = ia64_ia32_virtual_ip((CPUIA64State *)xenv);
     ia32_leave_for_exception(xenv, IA64_EXCP_IA32_INTERCEPT,
                              intercept, code, false, ip, ip, retaddr);
@@ -268,6 +306,7 @@ static G_NORETURN void ia32_raise_fault(CPUX86State *xenv, int vector,
         cpu_restore_state(cs, retaddr);
         retaddr = 0;
     }
+    ia64_ia32_log_fault(xenv, "exception", vector, error_code);
     ip = ia64_ia32_virtual_ip((CPUIA64State *)xenv);
     ia32_leave_for_exception(xenv, IA64_EXCP_IA32_EXCEPTION,
                              vector, error_code, false, ip, ip, retaddr);
