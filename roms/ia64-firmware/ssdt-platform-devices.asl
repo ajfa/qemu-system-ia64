@@ -2,8 +2,6 @@
 
 DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
 {
-    External (\_SB.PCI0, DeviceObj)
-
     Scope (\_SB)
     {
         Name (C0EN, 0x0F)
@@ -43,10 +41,13 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
                 Return (C3EN)
             }
         }
-    }
 
-    Scope (\_SB.PCI0)
-    {
+        // Motherboard legacy devices live directly under \_SB, not under the
+        // PCI root: the UART sits at a fixed platform address (0x47F0000000)
+        // outside every PCI0 _CRS producer window, and the PS/2 controller is
+        // an LPC/SIO device.  Parenting them under \_SB.PCI0 made Windows'
+        // PCI memory arbiter account COM1's out-of-window resource against the
+        // PCI window, which broke placement of large PCI BARs (ATI Code 12).
         Name (P2EN, 0x0F)
 
         Device (UAR0)
