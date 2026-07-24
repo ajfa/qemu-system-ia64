@@ -12399,16 +12399,29 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
 
         if (fault_cpl == 3 && ((user_data_fault >> excp) & 1) &&
             qemu_loglevel_mask(CPU_LOG_IA64_FAULT)) {
-            static uint64_t seen[1024];
-            unsigned h = (cpu->env.cr_iip >> 4) & 1023;
+            /*
+             * Dedupe per (faulting IP, faulting page) so a hot address that
+             * re-faults on every access (a spurious TLB/VHPT miss) collapses
+             * to one line instead of thousands, while distinct first-touch
+             * faults still each appear.  ps (from ITIR) and the VHPT hash
+             * address distinguish a large-page/walker miss from ordinary
+             * demand paging.  is=1 marks an IA-32-mode access.
+             */
+            static uint64_t seen[2048];
+            uint64_t page = cpu->env.cr_ifa & ~0xfffULL;
+            uint64_t key = cpu->env.cr_iip ^ (page << 1);
+            unsigned h = (key >> 4) & 2047;
 
-            if (seen[h] != cpu->env.cr_iip) {
-                seen[h] = cpu->env.cr_iip;
-                qemu_log("IA64-AV excp=%d vector=0x%04" PRIx64
+            if (seen[h] != key) {
+                seen[h] = key;
+                qemu_log("IA64-AV excp=%d vector=0x%04" PRIx64 " is=%u"
                          " iip=0x%016" PRIx64 " ifa=0x%016" PRIx64
-                         " isr=0x%016" PRIx64 "\n",
-                         excp, vector, cpu->env.cr_iip, cpu->env.cr_ifa,
-                         cpu->env.cr_isr);
+                         " ps=%u iha=0x%016" PRIx64 " isr=0x%016" PRIx64 "\n",
+                         excp, vector,
+                         (cpu->env.psr & IA64_PSR_IS) ? 1u : 0u,
+                         cpu->env.cr_iip, cpu->env.cr_ifa,
+                         (unsigned)((cpu->env.cr_itir >> 2) & 0x3f),
+                         cpu->env.cr_iha, cpu->env.cr_isr);
             }
         }
 
