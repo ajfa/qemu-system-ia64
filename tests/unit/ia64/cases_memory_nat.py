@@ -10,6 +10,7 @@ CASE_NAMES = (
     'bsw_restores_banked_nat',
     'chk_a_clr_removes_entry',
     'chk_a_m_branches_on_miss',
+    'chk_s_i_long_branch_on_stacked_nat',
     'chk_a_nc_m_decode',
     'chk_s_m_branches_on_nat',
     'cloop_zero_st1_clears_cross_page_range',

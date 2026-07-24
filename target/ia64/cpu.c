@@ -2043,8 +2043,16 @@ static Ia64Instruction ia64_decode_insn(Ia64SlotUnit unit, uint64_t raw,
     }
 
     if (unit == IA64_UNIT_I || unit == IA64_UNIT_X) {
+        /*
+         * hint.i is x3 (bits 33:35) == 0; chk.s.i is x3 == 1.  Without the
+         * x3 guard a chk.s.i whose branch displacement drives bits 27:32
+         * and 20:26 into the hint.i pattern (b_op 0, bits(27,6)==1,
+         * bits(20,7)==64) mis-decodes as a hint (nop), so the speculation
+         * check never branches on a NaT.
+         */
         if (unit == IA64_UNIT_I &&
             ia64_b_op(raw) == 0 &&
+            ia64_bits(raw, 33, 3) == 0 &&
             ia64_bits(raw, 27, 6) == 0x01 &&
             ia64_bits(raw, 20, 7) == 64) {
             Ia64Instruction insn =
