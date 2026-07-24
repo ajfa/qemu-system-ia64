@@ -82,6 +82,14 @@
 #define IA64_E1000_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00040000ULL)
 #define IA64_E1000_MMIO_SIZE    0x00020000ULL
 #define IA64_E1000_IO_SIZE      0x00000040U
+/*
+ * Per-adapter slice of the NIC memory / I/O windows.  Sized to hold the
+ * largest BAR set of any supported model: the Intel PRO/100 needs a 1 MiB
+ * flash BAR on top of its CSR/I/O BARs, so reserve 2 MiB of memory (and a
+ * generous I/O slice) per adapter.  Both stay inside the PCI0 _CRS windows.
+ */
+#define IA64_NIC_MMIO_STRIDE    0x00200000ULL
+#define IA64_NIC_IO_STRIDE      0x00000100U
 #define IA64_VGA_FB_PCI_BASE    0x00000000c4000000ULL
 #define IA64_VGA_MMIO_PCI_BASE  0x00000000c8000000ULL
 #define IA64_VGA_LEGACY_BASE   0x000a0000U
@@ -2034,20 +2042,55 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
 
 }
 
+/*
+ * Program a network adapter's BARs from the machine's fixed NIC resource
+ * pools.  Unlike the other platform devices the NIC model is user-selectable
+ * (-nic model=...), so we cannot assume a single fixed BAR layout: the default
+ * e1000 exposes one 128 KiB memory BAR plus a 64-byte I/O BAR, while the Intel
+ * PRO/100 (i82557b, the adapter Windows IA-64 actually ships a driver for)
+ * exposes a 4 KiB CSR memory BAR, a 64-byte I/O BAR, and a 1 MiB flash memory
+ * BAR.  Walk the realised regions instead and hand each BAR a naturally
+ * aligned slice of the per-index memory / I/O window.  The firmware advertises
+ * these same windows through the PCI0 _CRS, so keep every BAR inside them.
+ */
 static void ia64_vpc_configure_nic(PCIDevice *pci_dev, unsigned int index)
 {
-    uint64_t mmio_base;
-    uint32_t io_base;
+    uint64_t mmio_cursor;
+    uint32_t io_cursor;
+    int i;
 
     if (pci_dev == NULL || index >= MAX_NICS) {
         return;
     }
 
-    mmio_base = IA64_E1000_MMIO_PCI_BASE +
-                index * IA64_E1000_MMIO_SIZE;
-    io_base = IA64_E1000_IO_BASE + index * IA64_E1000_IO_SIZE;
-    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0, mmio_base, 4);
-    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1, io_base, 4);
+    mmio_cursor = IA64_E1000_MMIO_PCI_BASE + index * IA64_NIC_MMIO_STRIDE;
+    io_cursor = IA64_E1000_IO_BASE + index * IA64_NIC_IO_STRIDE;
+
+    for (i = 0; i < PCI_NUM_REGIONS - 1; i++) {
+        PCIIORegion *r = &pci_dev->io_regions[i];
+        int offset = PCI_BASE_ADDRESS_0 + i * 4;
+
+        if (r->size == 0) {
+            continue;
+        }
+
+        if (r->type & PCI_BASE_ADDRESS_SPACE_IO) {
+            io_cursor = QEMU_ALIGN_UP(io_cursor, r->size);
+            pci_default_write_config(pci_dev, offset, io_cursor, 4);
+            io_cursor += r->size;
+        } else {
+            mmio_cursor = QEMU_ALIGN_UP(mmio_cursor, r->size);
+            pci_default_write_config(pci_dev, offset,
+                                     (uint32_t)mmio_cursor |
+                                     (r->type & ~PCI_BASE_ADDRESS_MEM_MASK), 4);
+            mmio_cursor += r->size;
+            if (r->type & PCI_BASE_ADDRESS_MEM_TYPE_64) {
+                pci_default_write_config(pci_dev, offset + 4, 0, 4);
+                i++;
+            }
+        }
+    }
+
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
                              PCI_COMMAND_MASTER, 2);
@@ -2083,8 +2126,6 @@ static void ia64_vpc_record_nic(PCIBus *bus, PCIDevice *pci_dev)
 
     class = pci_get_word(pci_dev->config + PCI_CLASS_DEVICE);
     if (class != PCI_CLASS_NETWORK_ETHERNET ||
-        pci_dev->io_regions[0].size != IA64_E1000_MMIO_SIZE ||
-        pci_dev->io_regions[1].size != IA64_E1000_IO_SIZE ||
         pci_get_bus(pci_dev) != bus) {
         return;
     }
@@ -2583,7 +2624,13 @@ static void ia64_vpc_machine_init(MachineClass *mc)
     mc->default_ram_size = 2 * GiB;
     mc->default_ram_id = "ia64-vpc.ram";
     mc->default_display = "ati";
-    mc->default_nic = "e1000";
+    /*
+     * Default to the Intel PRO/100 (i82557b): Windows XP / Server 2003 IA-64
+     * ship an inbox driver for it (NET557.IN_ / DEV_1229), whereas QEMU's
+     * e1000 identifies as the 82540EM (DEV_100E) for which no inbox IA-64
+     * driver exists.  e1000 remains available via -nic model=e1000.
+     */
+    mc->default_nic = "i82557b";
     mc->block_default_type = IF_SCSI;
     mc->no_serial = 0;
     mc->no_parallel = 1;

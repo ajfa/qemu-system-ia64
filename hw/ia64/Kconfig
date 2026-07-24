@@ -16,3 +16,4 @@ config IA64_VPC
     select IDE_PCI
     select LSI_SCSI_PCI
     select E1000_PCI
+    select EEPRO100_PCI
