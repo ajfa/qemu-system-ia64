@@ -458,8 +458,8 @@ static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb,
                                    uint16_t *next_replace, uint64_t va,
                                    uint32_t rid, bool *matched);
 
-static bool ia64_data_address_to_phys(CPUIA64State *env, uint64_t va,
-                                      uint64_t *pa);
+/* Also used by the firmware unaligned assist in cpu.c (see arch/arch.h). */
+bool ia64_data_address_to_phys(CPUIA64State *env, uint64_t va, uint64_t *pa);
 static bool ia64_data_address_to_phys_attr(CPUIA64State *env, uint64_t va,
                                            uint64_t *pa,
                                            IA64MemorySpeculation *spec);
@@ -4136,8 +4136,8 @@ static bool ia64_data_address_to_phys_attr(CPUIA64State *env, uint64_t va,
         env, va, false, ia64_psr_cpl(env->psr), pa, spec);
 }
 
-static bool ia64_data_address_to_phys(CPUIA64State *env, uint64_t va,
-                                      uint64_t *pa)
+bool ia64_data_address_to_phys(CPUIA64State *env, uint64_t va,
+                               uint64_t *pa)
 {
     return ia64_data_address_to_phys_attr(env, va, pa, NULL);
 }

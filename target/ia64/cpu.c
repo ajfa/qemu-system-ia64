@@ -8,6 +8,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "arch/arch.h"
 #include "ia32/ia32.h"
 #include "ia32/translate.h"
 #include "qapi/error.h"
@@ -12627,6 +12628,34 @@ static void ia64_firmware_defer_speculative_load(CPUIA64State *env,
     }
 }
 
+/*
+ * The SAL/firmware unaligned assist emulates a misaligned reference with a
+ * single translated access, so it can only service references that stay within
+ * one translation.  A reference is serviceable when its first and last bytes
+ * map to contiguous physical addresses: this correctly admits large pages,
+ * where an access may cross a 4KB sub-boundary yet remain inside one page,
+ * while a reference whose bytes fall in different (or unmapped) translations
+ * remains an architectural fault.  Using the actual translation instead of a
+ * hardcoded 4KB span is required for OS loaders, which map their working set
+ * with megabyte-sized translation registers.
+ */
+static bool ia64_firmware_unaligned_spans_translation(CPUIA64State *env,
+                                                      uint64_t addr,
+                                                      uint32_t size)
+{
+    uint64_t pa_first;
+    uint64_t pa_last;
+
+    if (size <= 1) {
+        return false;
+    }
+    if (!ia64_data_address_to_phys(env, addr, &pa_first) ||
+        !ia64_data_address_to_phys(env, addr + size - 1, &pa_last)) {
+        return true;
+    }
+    return pa_last != pa_first + (size - 1);
+}
+
 static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
                                                 uint64_t fault_addr,
                                                 uint8_t fault_slot)
@@ -12686,7 +12715,8 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
             (env->psr & IA64_PSR_BE) != 0);
         size = ia64_memop_size(memop);
         addr = env->gr[insn.r3];
-        if (addr != fault_addr || ((addr & 0xfff) + size - 1) > 0xfff) {
+        if (addr != fault_addr ||
+            ia64_firmware_unaligned_spans_translation(env, addr, size)) {
             return false;
         }
 
@@ -12756,7 +12786,7 @@ static bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
         size = ia64_memop_size(memop);
         addr = env->gr[insn.r3];
         if (addr != fault_addr ||
-            ((addr & 0xfff) + size - 1) > 0xfff ||
+            ia64_firmware_unaligned_spans_translation(env, addr, size) ||
             size > sizeof(data)) {
             return false;
         }

@@ -12,6 +12,8 @@
 #include "cpu.h"
 
 void ia64_gr_nat_set(CPUIA64State *env, uint32_t reg, bool nat);
+bool ia64_data_address_to_phys(CPUIA64State *env, uint64_t va,
+                               uint64_t *pa);
 G_NORETURN void ia64_raise_disabled_isa_transition(CPUIA64State *env,
                                                    uint64_t fault_ip,
                                                    uint32_t fault_slot);

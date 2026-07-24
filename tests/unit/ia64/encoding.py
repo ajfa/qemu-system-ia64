@@ -22835,6 +22835,74 @@ test_firmware_unaligned_virtual_load_assist = require_registers(
     },
 )
 
+# The firmware unaligned assist services a reference that crosses a 4 KB
+# sub-boundary as long as it stays inside one translation.  The DTR below maps a
+# single 64 KB page, so the 8-byte load at offset 0xffc spans 0xffc..0x1003 --
+# across the 4 KB line, but wholly within the page and therefore contiguous in
+# physical memory.  OS loaders map their working set with translations this
+# large, so refusing the assist here would turn a serviceable reference into an
+# Unaligned Data Reference fault.
+test_firmware_unaligned_large_page_load_assist = require_registers(
+    "firmware_unaligned_large_page_load_assist",
+    [
+        (0x10, *movl_mlx(20, 0x1122334455667788)),
+        (0x20, *movl_mlx(21, 0x99aabbccddeeff00)),
+        (0x30, 0x00, addl(3, 0xff8, 0), nop_i(), nop_i()),
+        (0x40, 0x0a, st8(3, 20), adds(3, 8, 3), nop_i()),
+        (0x50, 0x00, st8(3, 21), nop_i(), nop_i()),
+        *dtr_setup_bundles(0x60, HIGH_TR_BASE, 0x0),
+        (0xc0, *movl_mlx(5, HIGH_TR_BASE + 0xffc)),
+        (0xd0, 0x00, addl(2, 0x10000, 0), nop_i(), nop_i()),
+        (0xe0, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0xf0, 0x00, ssm((1 << 17) | (1 << 13) | (1 << 3)),
+         nop_i(), nop_i()),
+        (0x100, 0x00, ld8(22, 5), nop_i(), nop_i()),
+        (0x110, 0x00, nop_m(), adds(23, 1, 0), nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+    ],
+    {
+        "ip": 0x120,
+        "exception": IA64_EXCP_NONE,
+        "r22": 0xddeeff0011223344,
+        "r22_nat": 0,
+        "r23": 1,
+    },
+)
+
+# The converse: a reference whose bytes fall in two different translations is
+# still an architectural fault, because the assist emulates it with a single
+# translated access.  Two 64 KB DTRs are installed back to back in virtual space
+# but deliberately discontiguous in physical space, and the load straddles the
+# seam, so the assist must decline and the Unaligned Data Reference fault must
+# reach the guest handler.
+test_firmware_unaligned_split_translation_still_faults = require_registers(
+    "firmware_unaligned_split_translation_still_faults",
+    [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x0, slot=5),
+        *dtr_setup_bundles(0x70, HIGH_TR_BASE + 0x10000, 0x400000, slot=6),
+        (0xd0, *movl_mlx(5, HIGH_TR_BASE + 0xfffc)),
+        (0xe0, 0x00, addl(2, 0x10000, 0), nop_i(), nop_i()),
+        (0xf0, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0x100, 0x00, ssm((1 << 17) | (1 << 13) | (1 << 3)),
+         nop_i(), nop_i()),
+        # Serialize so PSR.ic is architecturally in effect: an interruption
+        # taken while the ssm is still in flight would be reported as nested.
+        (0x110, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x120, 0x00, ld8(22, 5), nop_i(), nop_i()),
+        (0x130, 0x10, nop_m(), nop_i(), br_cond(0x130, 0x130)),
+        (0x10000 + IA64_UNALIGNED_VECTOR, 0x00, mov_m_cr_gr(31, 17),
+         nop_i(), nop_i()),
+        (0x10000 + IA64_UNALIGNED_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(0x10000 + IA64_UNALIGNED_VECTOR + 0x10,
+                 0x10000 + IA64_UNALIGNED_VECTOR + 0x10)),
+    ],
+    {
+        "ip": 0x10000 + IA64_UNALIGNED_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r31": IA64_ISR_R,
+    },
+)
+
 test_speculative_unaligned_defers = require_registers(
     "speculative_unaligned_defers",
     [
@@ -25412,6 +25480,10 @@ TEST_NAMES = {
         test_firmware_unaligned_speculative_load_assist,
     "firmware_unaligned_virtual_load_assist":
         test_firmware_unaligned_virtual_load_assist,
+    "firmware_unaligned_large_page_load_assist":
+        test_firmware_unaligned_large_page_load_assist,
+    "firmware_unaligned_split_translation_still_faults":
+        test_firmware_unaligned_split_translation_still_faults,
     "speculative_unaligned_defers": test_speculative_unaligned_defers,
     "cmp_ge_or_decode": test_cmp_ge_or_decode,
     "cmp_ge_or_issue_raw_decode": test_cmp_ge_or_issue_raw_decode,
