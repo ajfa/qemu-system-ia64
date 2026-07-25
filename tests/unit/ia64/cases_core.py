@@ -563,6 +563,20 @@ test_tf_feature_predicate_updates = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+# Regression: an indirect br.call whose branch-whether hint has bit 32 = 0
+# (wh=4 here; the MS IA-64 compiler emits this in pidgen.dll's product-key
+# path) must execute, not raise an Illegal Operation.  The decoder used to
+# require bit 32 = 1 and mis-decoded every such call.
+test_br_call_indirect_prefetch_hint_bit_ignored = require_registers(
+    "br_call_indirect_prefetch_hint_bit_ignored", [
+        (0x10, 0x00, addl(8, 0x40, 0), nop_i(), nop_i()),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(),
+         br_call_indirect(1, 7, wh=4, many=True)),
+        (0x40, 0x00, adds(4, 0x5a, 0), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {"ip": 0x50, "r4": 0x5a}, entry=0x10)
+
 # CPUID identity on merced: CPUID[3] = family 0x07, model 0, rev 8 (C2 stepping)
 # = 0x0000000007000804 (249720-009); CPUID[4] = 0, i.e. brl NOT implemented
 # (245319-002 brl page) -- the bit Windows keys KF_BRL off.
@@ -2804,6 +2818,7 @@ CASE_NAMES = (
     'tf_same_pred_illegal',
     'tf_unc_same_pred_pred_false_illegal',
     'tf_upper_cpuid_feature_bits',
+    'br_call_indirect_prefetch_hint_bit_ignored',
     'cpuid_merced',
     'unpack2_l_decode',
     'vmsw0_madison_illegal_operation',
