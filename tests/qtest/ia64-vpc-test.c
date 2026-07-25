@@ -841,6 +841,42 @@ static void assert_pci_device(QPCIBus *bus, const ExpectedPCIDevice *expected)
     g_free(dev);
 }
 
+/*
+ * ahci=off removes the AHCI controller at 0:1.0 without renumbering anything
+ * else: an installed guest must not see the remaining devices move BDF.
+ */
+static void test_ahci_off(void)
+{
+    QTestState *qts = ia64_vpc_start("-machine ahci=off");
+    QGenericPCIBus gbus;
+    static const unsigned int kept_slots[] = { 2, 3, 4, 5, 6 };
+    unsigned i;
+
+    ia64_qpci_init(&gbus, qts);
+    g_assert_null(qpci_device_find(&gbus.bus, QPCI_DEVFN(1, 0)));
+    for (i = 0; i < ARRAY_SIZE(kept_slots); i++) {
+        QPCIDevice *dev =
+            qpci_device_find(&gbus.bus, QPCI_DEVFN(kept_slots[i], 0));
+
+        g_assert_nonnull(dev);
+        g_free(dev);
+    }
+    qtest_quit(qts);
+}
+
+static void test_ahci_on_default(void)
+{
+    QTestState *qts = ia64_vpc_start(NULL);
+    QGenericPCIBus gbus;
+    QPCIDevice *ahci;
+
+    ia64_qpci_init(&gbus, qts);
+    ahci = qpci_device_find(&gbus.bus, QPCI_DEVFN(1, 0));
+    g_assert_nonnull(ahci);
+    g_free(ahci);
+    qtest_quit(qts);
+}
+
 static void test_pci_default_layout(void)
 {
     static const ExpectedPCIDevice devices[] = {
@@ -1357,6 +1393,8 @@ int main(int argc, char **argv)
                    test_int10_legacy_std);
     qtest_add_func("/ia64-vpc/firmware-handoff/defaults",
                    test_firmware_handoff_defaults);
+    qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);
+    qtest_add_func("/ia64-vpc/ahci/on-default", test_ahci_on_default);
     qtest_add_func("/ia64-vpc/cpu/merced", test_cpu_merced);
     qtest_add_func("/ia64-vpc/cpu/itanium-alias", test_cpu_itanium_alias);
     qtest_add_func("/ia64-vpc/firmware-handoff/i8042-off",

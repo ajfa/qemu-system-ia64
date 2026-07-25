@@ -351,6 +351,7 @@ struct IA64VpcMachineState {
     MachineState parent_obj;
 
     bool i8042_enabled;
+    bool ahci_enabled;
     bool firmware_ide_dma;
     uint64_t firmware_console;
     char *nvram_path;
@@ -1605,6 +1606,31 @@ static void ia64_vpc_set_i8042(Object *obj, bool value, Error **errp)
     s->i8042_enabled = value;
 }
 
+static bool ia64_vpc_get_ahci(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->ahci_enabled;
+}
+
+static void ia64_vpc_set_ahci(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+#ifndef CONFIG_IA64_VPC_STORAGE
+    if (value) {
+        error_setg(errp, "AHCI support is not present in this build");
+        return;
+    }
+#else
+    (void)errp;
+#endif
+
+    s->ahci_enabled = value;
+}
+
 static bool ia64_vpc_get_firmware_ide_dma(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -2587,15 +2613,23 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 
     /*
      * AHCI remains available for guests that support SATA.  Firmware boot
-     * storage is provided by the LSI SCSI HBA below.
+     * storage is provided by the LSI SCSI HBA below.  ahci=off removes the
+     * controller entirely: guests without a SATA driver (e.g. Windows XP
+     * IA-64) then see neither an unknown PCI device nor its INTx line,
+     * which the INTx swizzle would otherwise share with the VGA slot.
+     * Slot 1 stays reserved so the remaining devices keep their BDFs.
      */
 #ifdef CONFIG_IA64_VPC_STORAGE
-    s->ahci_dev = pci_create_simple(pci_bus, -1, TYPE_ICH9_AHCI);
-    ia64_vpc_configure_ahci(s->ahci_dev);
-    ahci = ICH9_AHCI(s->ahci_dev);
-    g_assert(ahci->ahci.ports <= ARRAY_SIZE(sata_drives));
-    ide_drive_get(sata_drives, ahci->ahci.ports);
-    ahci_ide_create_devs(&ahci->ahci, sata_drives);
+    if (s->ahci_enabled) {
+        s->ahci_dev = pci_create_simple(pci_bus, -1, TYPE_ICH9_AHCI);
+        ia64_vpc_configure_ahci(s->ahci_dev);
+        ahci = ICH9_AHCI(s->ahci_dev);
+        g_assert(ahci->ahci.ports <= ARRAY_SIZE(sata_drives));
+        ide_drive_get(sata_drives, ahci->ahci.ports);
+        ahci_ide_create_devs(&ahci->ahci, sata_drives);
+    } else {
+        pci_bus_set_slot_reserved_mask(pci_bus, 1U << 1);
+    }
 #endif
 
     isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, errp);
@@ -2646,7 +2680,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #ifdef CONFIG_IA64_VPC_NETWORK
     ia64_vpc_init_network(s, pci_bus);
 #endif
-    pci_bus_clear_slot_reserved_mask(pci_bus, 1U << 0);
+    pci_bus_clear_slot_reserved_mask(pci_bus, (1U << 0) | (1U << 1));
 
     s->powerdown_notifier.notify = ia64_vpc_powerdown_req;
     qemu_register_powerdown_notifier(&s->powerdown_notifier);
@@ -2675,6 +2709,7 @@ static void ia64_vpc_machine_instance_init(Object *obj)
     s->i8042_enabled = true;
 #endif
 #ifdef CONFIG_IA64_VPC_STORAGE
+    s->ahci_enabled = true;
     s->firmware_ide_dma = true;
 #endif
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -2729,6 +2764,12 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_set_i8042);
     object_class_property_set_description(oc, "i8042",
         "Set on/off to enable/disable the i8042 PS/2 controller");
+    object_class_property_add_bool(oc, "ahci",
+                                   ia64_vpc_get_ahci,
+                                   ia64_vpc_set_ahci);
+    object_class_property_set_description(oc, "ahci",
+        "Set on/off to enable/disable the AHCI SATA controller "
+        "(off removes the PCI device some guests lack a driver for)");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,
                                    ia64_vpc_set_firmware_ide_dma);
