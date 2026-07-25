@@ -111,8 +111,6 @@ void ia64_flush_on_pk_change(CPUIA64State *env, uint64_t old_psr);
 
 uint64_t ia64_rse_current_cfm(const CPUIA64State *env);
 uint32_t ia64_rse_nat_words_grow(uint64_t addr, uint32_t nregs);
-void ia64_rse_rnat_reloaded(CPUIA64State *env);
-void ia64_rse_rnat_bspstore_moved(CPUIA64State *env, uint64_t old_bspstore);
 void ia64_rse_pop_return_frame(CPUIA64State *env, uint64_t pfs);
 void ia64_rse_check(CPUIA64State *env, const char *site);
 void ia64_rse_br_call(CPUIA64State *env, uint32_t b_reg,

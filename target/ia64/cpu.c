@@ -772,7 +772,6 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
     env->ar_bsp = info->bsp;
     env->ar_bspstore = info->bsp;
     env->ar_rnat = 0;
-    env->rse.rse_rnat_first = 0;
     env->gr[IA64_GR_STACK_POINTER] = info->stack_pointer;
     env->gr[IA64_GR_GLOBAL_POINTER] = info->global_pointer;
     env->interrupt.pal_halt_wake = info->powered_off;

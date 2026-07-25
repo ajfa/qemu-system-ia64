@@ -94,14 +94,6 @@ typedef struct IA64RSEState {
     int32_t rse_clean_nat;
     int32_t rse_invalid;
     bool rse_cfle;
-
-    /*
-     * Derived: the lowest AR.RNAT bit index that the current run of RSE
-     * stores has defined.  Bits below it belong to registers spilled
-     * before AR.RNAT became the collection of AR.BSPSTORE's group and
-     * live only in the backing store.
-     */
-    uint32_t rse_rnat_first;
 } IA64RSEState;
 
 typedef struct IA64AlatState {

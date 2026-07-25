@@ -260,7 +260,6 @@ static void ia64_rse_state_save(CPUIA64State *env,
     state->clean = env->rse.rse_clean;
     state->clean_nat = env->rse.rse_clean_nat;
     state->invalid = env->rse.rse_invalid;
-    state->rnat_first = env->rse.rse_rnat_first;
     state->cfm_sof = env->cfm_sof;
     state->cfm_sol = env->cfm_sol;
     state->cfm_sor = env->cfm_sor;
@@ -285,7 +284,6 @@ static void ia64_rse_state_restore(CPUIA64State *env,
     env->rse.rse_clean = state->clean;
     env->rse.rse_clean_nat = state->clean_nat;
     env->rse.rse_invalid = state->invalid;
-    env->rse.rse_rnat_first = state->rnat_first;
     env->cfm_sof = state->cfm_sof;
     env->cfm_sol = state->cfm_sol;
     env->cfm_sor = state->cfm_sor;
@@ -377,9 +375,7 @@ uint32_t ia64_firmware_debug_restore(CPUIA64State *env)
                                             FW_DEBUG_CTX_AR_BSPSTORE);
     env->ar_bsp += restored_bsp - original_bsp;
     env->ar_bspstore += restored_bspstore - original_bspstore;
-    /* The handler supplies the NaT collection along with the pointers. */
     env->ar_rnat = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_RNAT);
-    ia64_rse_rnat_reloaded(env);
 
     ipsr = ia64_fw_debug_getq(env, FW_DEBUG_CTX_CR_IPSR);
     int_nat = ia64_fw_debug_getq(env, FW_DEBUG_CTX_INT_NAT);

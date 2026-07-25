@@ -725,7 +725,6 @@ typedef struct IA64FirmwareDebugRseState {
     int32_t clean;
     int32_t clean_nat;
     int32_t invalid;
-    uint32_t rnat_first;
     uint8_t cfm_sof;
     uint8_t cfm_sol;
     uint8_t cfm_sor;

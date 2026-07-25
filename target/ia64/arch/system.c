@@ -219,8 +219,6 @@ void ia64_system_validate_ar_access(CPUIA64State *env, uint64_t value,
 
 void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
 {
-    uint64_t old_bspstore;
-
     if (ar_num >= IA64_AR_COUNT) {
         return;
     }
@@ -257,12 +255,7 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
     } else if (ar_num == 66) {
         value &= 0x3f;
     }
-    old_bspstore = env->ar_bspstore;
     env->ar[ar_num] = value;
-    if (ar_num == 19) {
-        /* Software supplies the whole NaT collection of BSPSTORE's group. */
-        ia64_rse_rnat_reloaded(env);
-    }
     if (ar_num == 18) {
         /*
          * mov-to-BSPSTORE (SDM Vol.2 6.5.3): the clean partition
@@ -270,12 +263,10 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
          * AR.BSP to the new address plus the dirty registers and their
          * intervening NaT collections.  No memory traffic occurs.
          * RNAT becomes architecturally undefined; this implementation
-         * keeps its previous contents but stops treating them as the
-         * collection of a group they no longer describe.
+         * keeps its previous contents.
          */
         int32_t dirty = MAX(env->rse.rse_dirty, 0);
 
-        ia64_rse_rnat_bspstore_moved(env, old_bspstore);
         env->rse.rse_dirty_nat = ia64_rse_nat_words_grow(value, dirty);
         env->ar_bsp = value +
             (uint64_t)(env->rse.rse_dirty + env->rse.rse_dirty_nat) * 8;
