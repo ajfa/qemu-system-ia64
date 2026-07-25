@@ -3,6 +3,7 @@ ia64_ss.add(files(
   'decoder.c',
   'dump.c',
   'exec-access.c',
+  'fault-trace.c',
   'gdbstub.c',
   'arch/alat.c',
   'arch/exception.c',

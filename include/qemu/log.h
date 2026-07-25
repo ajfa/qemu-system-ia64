@@ -40,6 +40,8 @@ bool qemu_log_separate(void);
 #define LOG_INVALID_MEM    (1u << 23)
 /* IA-64: trace IA-32 execution-layer faults and instruction intercepts. */
 #define CPU_LOG_IA32_FAULT (1u << 24)
+/* IA-64: trace rare/fatal fault classes (not TLB/paging/EXTINT). */
+#define CPU_LOG_IA64_FAULT (1u << 25)
 
 /* Lock/unlock output. */
 

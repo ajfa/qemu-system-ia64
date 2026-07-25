@@ -7,6 +7,7 @@
 #include "cpu.h"
 #include "exec/cpu-common.h"
 #include "arch/arch.h"
+#include "debug.h"
 #include "ia32/ia32.h"
 #include "trace.h"
 
@@ -407,6 +408,8 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
      * which is completed by cover or by an rfi resuming the loads.
      */
     cpu->env.rse.rse_cfle = false;
+
+    ia64_trace_interruption(&cpu->env, excp, vector, collect);
     ia64_set_psr(&cpu->env, ia64_interruption_psr(&cpu->env));
     cpu->env.exception_state.psr_ic_inflight = false;
 

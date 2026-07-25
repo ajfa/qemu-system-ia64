@@ -386,6 +386,12 @@ static inline uint8_t ia64_pte_ma(uint64_t pte)
 typedef enum IA64GeneralRegisterIndex {
     IA64_GR_ZERO = 0,
     IA64_GR_GLOBAL_POINTER = 1,
+    /*
+     * Scratch t0/t1.  NT's DebugPrint/DebugPrompt breaks pass their
+     * output buffer address and length here (WSRV03 rtl/ia64).
+     */
+    IA64_GR_NT_DEBUG_BUFFER = 2,
+    IA64_GR_NT_DEBUG_LENGTH = 3,
     IA64_GR_RETURN0 = 8,
     IA64_GR_RETURN1 = 9,
     IA64_GR_RETURN2 = 10,
