@@ -59,7 +59,14 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
                     MaxFixed, NonCacheable, ReadWrite,
                     0, 0x00000047F0000000, 0x00000047F0000007,
                     0, 8)
-                IRQNoFlags () {4}
+                // The UART is wired to IOSAPIC GSI 4, not a legacy PIC IRQ.
+                // IRQNoFlags is an ISA-era descriptor that can only express
+                // edge-triggered active-high lines 0..15; the extended
+                // Interrupt descriptor is what actually describes this line.
+                Interrupt (ResourceConsumer, Level, ActiveLow, Shared, ,,)
+                {
+                    4
+                }
             })
         }
 

@@ -199,6 +199,8 @@ typedef struct {
 #define TEST_ECAM_SIZE               0x0000000010000000ULL
 #define TEST_PCI_MMIO_BASE           0x00000000c1000000ULL
 #define TEST_PCI_MMIO_SIZE           0x0000000010000000ULL
+#define TEST_VGA_LEGACY_BASE         0x000a0000U
+#define TEST_VGA_LEGACY_SIZE         0x00020000U
 #define TEST_SPARSE_IO_BASE          0x000000800010000000ULL
 #define TEST_SPARSE_IO_SIZE          0x0000000004000000ULL
 #define TEST_PM_IO_BASE              0x2000U
@@ -1871,6 +1873,7 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
     UINTN offset = 0;
     BOOLEAN bus = 0;
     BOOLEAN io = 0;
+    BOOLEAN vga = 0;
     BOOLEAN memory = 0;
     BOOLEAN end_tag = 0;
 
@@ -1911,6 +1914,15 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                        get_u64(descriptor + 30U) == 0 &&
                        get_u64(descriptor + 38U) == 0x1000000U) {
                 io = 1;
+            } else if (descriptor[0] == 0x87U && length == 23U &&
+                       descriptor[3] == 0U &&
+                       get_u32(descriptor + 6U) == 0 &&
+                       get_u32(descriptor + 10U) == TEST_VGA_LEGACY_BASE &&
+                       get_u32(descriptor + 14U) ==
+                           TEST_VGA_LEGACY_BASE + TEST_VGA_LEGACY_SIZE - 1U &&
+                       get_u32(descriptor + 18U) == 0 &&
+                       get_u32(descriptor + 22U) == TEST_VGA_LEGACY_SIZE) {
+                vga = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 0U &&
                        get_u64(descriptor + 6U) == 0 &&
@@ -1933,19 +1945,25 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
             offset += 1U + length;
         }
     }
-    return bus && io && memory && end_tag;
+    return bus && io && vga && memory && end_tag;
 }
 
 static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
 {
+    static const UINT8 sb_name[4] = { '_', 'S', 'B', '_' };
+    static const UINT8 pci0_name[4] = { 'P', 'C', 'I', '0' };
     static const UINT8 uart_name[4] = { 'U', 'A', 'R', '0' };
     static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
     const UINT8 *aml;
     UINTN aml_length;
     const UINT8 *uart;
     const UINT8 *resources;
+    const UINT8 *scope_content;
+    const UINT8 *scope_end;
     UINTN resource_length;
+    UINTN scope_offset;
     UINTN offset = 0;
+    BOOLEAN under_pci0 = 0;
     BOOLEAN address = 0;
     BOOLEAN irq = 0;
 
@@ -1961,6 +1979,32 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
                           (UINTN)(uart - aml), &resources,
                           &resource_length)) {
         return 0;
+    }
+    /*
+     * UAR0 must stay inside Scope (\_SB.PCI0).  Hoisting IRQ-using ACPI
+     * devices to \_SB bugchecks ACPI.sys in both XP and 2003 (see
+     * plans/status.md); this asserts the topology so that regression cannot
+     * pass the gate silently.
+     */
+    for (scope_offset = 0; scope_offset + 2U < aml_length; scope_offset++) {
+        if (aml[scope_offset] != 0x10U ||
+            !aml_package(aml + scope_offset + 1U, aml + aml_length,
+                         &scope_content, &scope_end)) {
+            continue;
+        }
+        if (scope_content + 10U <= scope_end &&
+            scope_content[0] == 0x5cU &&
+            scope_content[1] == 0x2eU &&
+            ia64_bytes_equal(scope_content + 2U,
+                             sb_name, sizeof(sb_name)) &&
+            ia64_bytes_equal(scope_content + 6U,
+                             pci0_name, sizeof(pci0_name)) &&
+            find_bytes(scope_content + 10U,
+                       (UINTN)(scope_end - scope_content - 10U),
+                       uart_name, sizeof(uart_name), 0) != NULL) {
+            under_pci0 = 1;
+            break;
+        }
     }
     while (offset < resource_length) {
         const UINT8 *descriptor = resources + offset;
@@ -1982,20 +2026,27 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
                 get_u64(descriptor + 38U) == 8U) {
                 address = 1;
             }
+            /*
+             * Extended Interrupt Descriptor: flags 0x0d is
+             * ResourceConsumer | Level | ActiveLow | Shared, one entry,
+             * IOSAPIC GSI 4.  The ISA-era IRQNoFlags descriptor cannot
+             * express a level-triggered active-low shared line.
+             */
+            if (descriptor[0] == 0x89U && length == 6U &&
+                descriptor[3] == 0x0dU && descriptor[4] == 1U &&
+                get_u32(descriptor + 5U) == 4U) {
+                irq = 1;
+            }
             offset += 3U + length;
         } else {
             length = descriptor[0] & 7U;
             if (length > resource_length - offset - 1U) {
                 return 0;
             }
-            if ((descriptor[0] >> 3) == 4U && length == 2U &&
-                get_u16(descriptor + 1U) == (1U << 4)) {
-                irq = 1;
-            }
             offset += 1U + length;
         }
     }
-    return address && irq;
+    return under_pci0 && address && irq;
 }
 
 static BOOLEAN test_dsdt_prt(const TEST_TABLE_CONTEXT *Context)
