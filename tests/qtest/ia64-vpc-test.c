@@ -640,6 +640,51 @@ static void test_firmware_handoff_defaults(void)
     qtest_quit(qts);
 }
 
+static void assert_cpu_model_type(const char *cpu_arg, const char *expect_type)
+{
+    g_autofree char *args = g_strdup_printf("-cpu %s", cpu_arg);
+    QTestState *qts = ia64_vpc_start(args);
+    g_autoptr(QDict) cpus_resp = NULL;
+    QList *cpus;
+    QListEntry *entry;
+    const char *qom_path = NULL;
+
+    /* The model instantiates and the firmware still hands off on ia64-vpc. */
+    assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1);
+
+    cpus_resp = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
+    g_assert(qdict_haskey(cpus_resp, "return"));
+    cpus = qdict_get_qlist(cpus_resp, "return");
+    g_assert_cmpuint(qlist_size(cpus), ==, 1);
+    QLIST_FOREACH_ENTRY(cpus, entry) {
+        qom_path = qdict_get_str(qobject_to(QDict, qlist_entry_obj(entry)),
+                                 "qom-path");
+        break;
+    }
+    g_assert_nonnull(qom_path);
+
+    {
+        g_autoptr(QDict) type_resp = qtest_qmp(qts,
+            "{'execute':'qom-get','arguments':"
+            "{'path':%s,'property':'type'}}", qom_path);
+        g_assert(qdict_haskey(type_resp, "return"));
+        g_assert_cmpstr(qdict_get_str(type_resp, "return"), ==, expect_type);
+    }
+    qtest_quit(qts);
+}
+
+static void test_cpu_merced(void)
+{
+    /* -cpu merced instantiates the original-Itanium model and boots. */
+    assert_cpu_model_type("merced", "merced-ia64-cpu");
+}
+
+static void test_cpu_itanium_alias(void)
+{
+    /* "itanium" is the documented alias for the merced model. */
+    assert_cpu_model_type("itanium", "itanium-ia64-cpu");
+}
+
 static void test_firmware_handoff_i8042_off(void)
 {
     QTestState *qts = qtest_init("-machine ia64-vpc,i8042=off "
@@ -1312,6 +1357,8 @@ int main(int argc, char **argv)
                    test_int10_legacy_std);
     qtest_add_func("/ia64-vpc/firmware-handoff/defaults",
                    test_firmware_handoff_defaults);
+    qtest_add_func("/ia64-vpc/cpu/merced", test_cpu_merced);
+    qtest_add_func("/ia64-vpc/cpu/itanium-alias", test_cpu_itanium_alias);
     qtest_add_func("/ia64-vpc/firmware-handoff/i8042-off",
                    test_firmware_handoff_i8042_off);
     for (cpus = 1; cpus <= 4; cpus++) {
