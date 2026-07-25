@@ -4411,6 +4411,54 @@ test_rse_return_reclaims_clean_keeps_unreached_rnat = require_registers(
         "cfm_sol": 10,
     }, entry=0x10)
 
+"""A br.ret that reclaims clean registers moves AR.BSPSTORE down without
+any RSE traffic.  When it lands in a different NaT collection group the
+bits AR.RNAT accumulated for the group it left describe registers this
+group never held, so the next collection spill must take those bits from
+the backing store instead.  Here r111 is spilled with its NaT set into
+the second collection (bit 16), the return rebases BSPSTORE into the
+first collection at bit 56, and the collection word the following spill
+writes at 0x1001f8 must stay zero."""
+test_rse_return_reclaims_clean_rebases_rnat_collection = require_registers(
+    "rse_return_reclaims_clean_rebases_rnat_collection", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, nop_m(), alloc(1, 96, 88, 0, 0),
+         nop_i()),
+        (0x40, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
+         nop_i()),
+        (0x50, 0x08, ld8_fill_postinc(111, 6, 0), nop_i(),
+         nop_i()),
+        (0x60, 0x18, nop_m(), nop_m(),
+         cover_b()),
+        (0x70, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (0x80, *movl_mlx(4, 40 | (40 << 7))),
+        (0x90, 0x00, mov_m_gr_ar(4, 64), nop_i(),
+         nop_i()),
+        (0xa0, *movl_mlx(5, 0x100)),
+        (0xb0, 0x09, nop_m(), nop_m(),
+         mov_b_gr(0, 5)),
+        (0xc0, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+        (0x100, 0x18, nop_m(), nop_m(),
+         cover_b()),
+        (0x110, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (0x120, *movl_mlx(7, 0x1001f8)),
+        (0x130, 0x00, ld8(10, 7), nop_i(),
+         nop_i()),
+        (0x140, 0x10, nop_m(), nop_i(),
+         br_cond(0x140, 0x140)),
+        (0x200, 0x00, 0, 0,
+         0),
+    ], {
+        "ip": 0x140,
+        "exception": IA64_EXCP_NONE,
+        "r10": 0,
+    }, entry=0x10)
+
 RSE_TRIM_RNAT_DATA = bundle_words(0x00, 0x123456789abcdef0, 0, 0)[0]
 
 test_rse_untracked_return_resyncs_trimmed_rnat = require_registers(
@@ -25080,6 +25128,8 @@ TEST_NAMES = {
         test_rse_untracked_return_uses_each_rnat_collection,
     "rse_return_reclaims_clean_keeps_unreached_rnat":
         test_rse_return_reclaims_clean_keeps_unreached_rnat,
+    "rse_return_reclaims_clean_rebases_rnat_collection":
+        test_rse_return_reclaims_clean_rebases_rnat_collection,
     "rse_untracked_return_resyncs_trimmed_rnat":
         test_rse_untracked_return_resyncs_trimmed_rnat,
     "rse_bspstore_keeps_saved_frame": test_rse_bspstore_keeps_saved_frame,

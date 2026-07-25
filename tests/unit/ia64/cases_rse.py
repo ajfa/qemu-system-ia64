@@ -77,6 +77,7 @@ CASE_NAMES = (
     'rse_postinc_after_flushrs_preserves_register_value',
     'rse_return_growth_keeps_dirty_bsp_distance',
     'rse_return_reclaims_clean_keeps_unreached_rnat',
+    'rse_return_reclaims_clean_rebases_rnat_collection',
     'rse_rfi_advanced_iip_bspstore_switch_loads_external_frame',
     'rse_rfi_advanced_iip_preserves_nested_call_locals',
     'rse_rfi_advanced_iip_uses_covered_current_frame',
