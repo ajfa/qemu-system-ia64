@@ -14,6 +14,7 @@ from .encoding import (
     IA64_ALT_DTLB_VECTOR,
     IA64_EXCP_ILLEGAL,
     IA64_EXCP_NAT_CONSUMPTION,
+    IA64_DCR_DM,
     IA64_EXCP_NONE,
     IA64_EXCP_UNALIGNED,
     IA64_EXCP_UNSUPPORTED_DATA_REFERENCE,
@@ -2499,6 +2500,30 @@ test_br_ctop_long_speculative_load_pipeline = require_registers(
         "r8": 129, "r20": HIGH_TR_BASE + 0x8418}, entry=0x10)
 
 GROUP = 'memory-nat'
+# A control-speculative load whose page has no ED bit and that runs with
+# instruction translation off (PSR.it == 0, as the OS loaders and early kernel
+# do) must still defer a deferrable TLB fault when the matching DCR mask bit is
+# set: DCR-based deferral is independent of PSR.it and of the code page's ED
+# bit.  Without this, XP's SETUPLDR/NTOSKRNL ld.s over a NaTVal pointer faults
+# instead of deferring, cascading into a break loop.  The pre-existing
+# speculative_load_defers_psr_ed case sets PSR.it and ED as well, so it did not
+# exercise the DCR-only path.
+test_speculative_load_defers_via_dcr_without_ed = require_registers(
+    "speculative_load_defers_via_dcr_without_ed", [
+        (0x10, *movl_mlx(20, IA64_DCR_DM)),
+        (0x20, 0x00, mov_m_gr_cr(20, 0), nop_i(), nop_i()),
+        (0x30, *movl_mlx(2, 0xa000000100020000)),
+        (0x40, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x50, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x60, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x70, 0x00, ld8_s(4, 2), nop_i(), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "exception": IA64_EXCP_NONE,
+        "r4_nat": 1,
+    }, entry=0x10)
+
 CASE_NAMES = (
 
     'alat_reloading_register_does_not_leave_duplicate',
@@ -2599,6 +2624,7 @@ CASE_NAMES = (
     'semaphore_ops_invalidate_advanced_loads',
     'simd_helper_nat_propagates',
     'speculative_load_defers_nat_base',
+    'speculative_load_defers_via_dcr_without_ed',
     'speculative_load_defers_psr_ed',
     'speculative_load_handler_psr_ed_defers_retry',
     'speculative_load_no_recovery_tlb_miss_faults',

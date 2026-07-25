@@ -1169,10 +1169,21 @@ static bool ia64_speculative_exception_deferrable(CPUIA64State *env,
         return true;
     }
 
-    return dcr_mask != 0 &&
-           (env->psr & IA64_PSR_IT) &&
-           itlb_ed &&
-           (env->cr_dcr & dcr_mask);
+    /*
+     * A deferrable fault is deferred when the ld.s bundle's page carries the
+     * TLB ED bit, OR when the DCR mask bit for the fault is set.  These are
+     * independent enables (SDM Vol.2, control speculation): in particular the
+     * DCR path does not require instruction translation to be enabled, so an
+     * ld.s issued with PSR.it == 0 (physical code, as in the OS loaders) still
+     * defers a TLB/access fault whenever the corresponding DCR bit is set.
+     * (ia64_current_code_tlb_ed() already returns false when PSR.it == 0, so
+     * the ED path keeps its dependence on instruction translation.)
+     */
+    if (itlb_ed) {
+        return true;
+    }
+
+    return dcr_mask != 0 && (env->cr_dcr & dcr_mask);
 }
 
 static bool ia64_speculative_alignment_fault(CPUIA64State *env,
