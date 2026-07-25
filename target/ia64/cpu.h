@@ -604,7 +604,6 @@ typedef struct IA64FirmwareDebugRseState {
     int32_t clean;
     int32_t clean_nat;
     int32_t invalid;
-    uint32_t rnat_first;
     uint8_t cfm_sof;
     uint8_t cfm_sol;
     uint8_t cfm_sor;
@@ -845,14 +844,6 @@ typedef struct CPUArchState {
     int32_t rse_clean_nat;
     int32_t rse_invalid;
     bool rse_cfle;
-
-    /*
-     * Derived: the lowest AR.RNAT bit index that the current run of RSE
-     * stores has defined.  Bits below it belong to registers spilled
-     * before AR.RNAT became the collection of AR.BSPSTORE's group and
-     * live only in the backing store.
-     */
-    uint32_t rse_rnat_first;
 
     bool instruction_group_start;  /* next instruction starts a new group */
 

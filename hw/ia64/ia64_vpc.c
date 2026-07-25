@@ -2328,7 +2328,6 @@ static void ia64_vpc_reset(void *opaque)
         env->ar_bsp = 0x80000 + cpu_offset * IA64_VPC_RSE_STACK_SIZE;
         env->ar_bspstore = env->ar_bsp;
         env->ar_rnat = 0;
-        env->rse_rnat_first = 0;
         env->cfm_sof = 0;
         env->cfm_sol = 0;
         env->cfm_sor = 0;
