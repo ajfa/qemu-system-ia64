@@ -133,6 +133,15 @@
 #define IA64_FW_IDENTITY_SIZE 0x00100000ULL
 #define IA64_FIRMWARE_IVT_BASE 0x10000ULL
 #define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
+/*
+ * IA-64 OS loaders alias physical memory through region 7 with a fixed
+ * 0x8000_0000 virtual base (region-7 VA = PA + 0x8000_0000).  The loader's
+ * own region-7 TRs map e.g. 0xe000_0000_8100_0000 -> PA 0x0100_0000, and its
+ * free-memory descriptors near the top of RAM carry addresses such as
+ * 0xe000_0000_bf7f_ffe0 for PA 0x3f7f_ffe0.  SAL's boot-time TLB-miss handler
+ * fills otherwise-unmapped region-7 pages with the same bias.
+ */
+#define IA64_FW_REGION7_DIRECTMAP_BASE 0x0000000080000000ULL
 #define IA64_LOCAL_SAPIC_PA   0x00000000fee00000ULL
 #define IA64_LOCAL_SAPIC_SIZE 0x00200000ULL
 #define IA64_PAL_IO_BLOCK_PA  0x000080000c000000ULL
@@ -1162,42 +1171,84 @@ static inline bool ia64_sal_boot_virtual_pa(const CPUIA64State *env,
     return false;
 }
 
-static inline bool ia64_sal_boot_identity_pa(const CPUIA64State *env,
-                                             uint64_t va, uint64_t *pa)
+static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
+                                                  uint64_t va, uint64_t *pa,
+                                                  bool is_inst)
 {
     uint64_t phys;
 
     /*
-     * SAL owns the IVT until ExitBootServices() completes.  In that
-     * environment its TLB miss handlers may install identity TC entries for
-     * OS-loader misses, using the current region's RID.  This is a miss
-     * fallback only; caller-installed TR/TC entries must take precedence.
+     * An explicit TR/TC for the same virtual range always wins: a RID
+     * mismatch there must remain an architectural TLB miss rather than
+     * silently falling back to a different identity physical address.  (This
+     * is only reached after the cached TLB/TR lookup has already missed.)
+     *
+     * ITRs and DTRs are independent translation resources (SDM Vol.2 4.1.1):
+     * a data reference must only defer to data TRs and an instruction fetch
+     * only to instruction TRs.  The XP-era loader installs a 4th ITR for its
+     * [64-80MB] decompression range but no matching DTR; a *data* read there
+     * (e.g. KdInitSystem walking a loader debug block) must therefore still
+     * reach the region-7 direct map below rather than deferring to that ITR
+     * and taking a VHPT fault into the not-yet-installed self-map (0x2B).
+     */
+    if (is_inst) {
+        if (ia64_tlb_has_explicit_va_mapping(
+                env->mmu.tlb_inst, env->mmu.tlb_inst_count, va)) {
+            return false;
+        }
+    } else {
+        if (ia64_tlb_has_explicit_va_mapping(
+                env->mmu.tlb_data, env->mmu.tlb_data_count, va)) {
+            return false;
+        }
+    }
+
+    phys = va & IA64_REGION7_PHYS_MASK;
+
+    /*
+     * Persistent region-7 physical alias (the "KSEG" direct map): the IA-64
+     * OS loaders and the early kernel reach loader-built structures near the
+     * top of RAM through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE
+     * before the kernel's self-mapped page tables are active (e.g.
+     * KdInitSystem walks a loader debug-block list this way).  Model it as a
+     * last-resort translation that survives the loader -> kernel handoff,
+     * bounded to backed RAM (region7_directmap_limit = base + guest RAM size)
+     * so that paged system space and the recursive page-table self-map window
+     * -- both above the alias -- still take ordinary TLB-miss faults.
+     */
+    if (ia64_rr_index(va) == 7 &&
+        phys >= IA64_FW_REGION7_DIRECTMAP_BASE &&
+        phys < env->mmu.region7_directmap_limit) {
+        *pa = phys - IA64_FW_REGION7_DIRECTMAP_BASE;
+        return true;
+    }
+
+    /*
+     * The remaining identity behaviour models SAL's boot-time TLB miss handler
+     * and only applies while SAL still owns the IVT (until ExitBootServices()
+     * completes).  It is a miss fallback only.
      */
     if (!ia64_sal_boot_environment_active(env)) {
         return false;
     }
 
-    /*
-     * This fallback models SAL's boot-time miss handler for otherwise
-     * unmapped identity accesses.  If firmware or the OS loader has already
-     * installed an explicit TR/TC for the same virtual range, a RID mismatch
-     * must remain an architectural TLB miss instead of silently falling back
-     * to a different identity physical address.
-     */
-    if (ia64_tlb_has_explicit_va_mapping(
-            env->mmu.tlb_data, env->mmu.tlb_data_count, va) ||
-        ia64_tlb_has_explicit_va_mapping(
-            env->mmu.tlb_inst, env->mmu.tlb_inst_count, va)) {
-        return false;
-    }
-
-    phys = va & IA64_REGION7_PHYS_MASK;
     if (phys >= IA64_FW_BOOT_IDENTITY_LIMIT) {
         return false;
     }
 
+    if (phys >= IA64_FW_REGION7_DIRECTMAP_BASE) {
+        phys -= IA64_FW_REGION7_DIRECTMAP_BASE;
+    }
+
     *pa = phys;
     return true;
+}
+
+/* Data-reference default: defers only to data TRs. */
+static inline bool ia64_sal_boot_identity_pa(const CPUIA64State *env,
+                                             uint64_t va, uint64_t *pa)
+{
+    return ia64_sal_boot_identity_pa_type(env, va, pa, false);
 }
 
 static inline bool ia64_vhpt_config_valid(const CPUIA64State *env,

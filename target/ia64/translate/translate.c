@@ -123,7 +123,7 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
         return pa == entry_pa;
     }
 
-    if (ia64_sal_boot_identity_pa(env, address, &pa)) {
+    if (ia64_sal_boot_identity_pa_type(env, address, &pa, true)) {
         return pa == entry_pa;
     }
 

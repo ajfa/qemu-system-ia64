@@ -22,6 +22,7 @@
 #include "exec/target_page.h"
 #include "exec/translation-block.h"
 #include "hw/core/sysemu-cpu-ops.h"
+#include "hw/core/boards.h"
 #include "accel/tcg/cpu-ops.h"
 #include "tcg/debug-assert.h"
 #include "exec/translator.h"
@@ -603,7 +604,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
             return true;
         }
     }
-    if (ia64_sal_boot_identity_pa(&cpu->env, addr, &pa)) {
+    if (ia64_sal_boot_identity_pa_type(&cpu->env, addr, &pa, is_ifetch)) {
         int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
 
         qemu_log_mask(CPU_LOG_MMU,
@@ -795,6 +796,14 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
         timer_del(cpu->itm_timer);
     }
     memset(&cpu->env, 0, sizeof(cpu->env));
+    /*
+     * Bound of the persistent region-7 KSEG physical alias (see
+     * ia64_sal_boot_identity_pa_type()): the loader/kernel reach top-of-RAM
+     * structures through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE,
+     * valid only for backed RAM.
+     */
+    cpu->env.mmu.region7_directmap_limit = IA64_FW_REGION7_DIRECTMAP_BASE +
+        (current_machine ? current_machine->ram_size : 0);
     cpu->env.alat_state.alat_full = cpu->alat_full;
     cpu->env.fp.fr[IA64_FR_ONE_INDEX] = IA64_FR_ONE;
     cpu->env.pr[IA64_PR_TRUE] = 1;
