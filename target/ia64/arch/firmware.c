@@ -245,11 +245,9 @@ uint32_t ia64_firmware_debug_enter(CPUIA64State *env, uint64_t address)
     return 1;
 }
 
-static void ia64_fw_debug_save_rse(CPUIA64State *env)
+static void ia64_rse_state_save(CPUIA64State *env,
+                                IA64FirmwareDebugRseState *state)
 {
-    IA64FirmwareDebugState *debug = ia64_firmware_debug_state(env);
-    IA64FirmwareDebugRseState *state = &debug->rse;
-
     memcpy(state->pgr, env->rse.rse_pgr, sizeof(state->pgr));
     memcpy(state->pgr_nat, env->rse.rse_pgr_nat, sizeof(state->pgr_nat));
     memcpy(state->gr_dirty, env->rse.rse_gr_dirty, sizeof(state->gr_dirty));
@@ -270,14 +268,11 @@ static void ia64_fw_debug_save_rse(CPUIA64State *env)
     state->cfm_rrb_fr = env->cfm_rrb_fr;
     state->cfm_rrb_pr = env->cfm_rrb_pr;
     state->cfle = env->rse.rse_cfle;
-    debug->rse_valid = true;
 }
 
-static void ia64_fw_debug_restore_rse(CPUIA64State *env)
+static void ia64_rse_state_restore(CPUIA64State *env,
+                                   const IA64FirmwareDebugRseState *state)
 {
-    const IA64FirmwareDebugRseState *state =
-        &ia64_firmware_debug_state(env)->rse;
-
     memcpy(env->rse.rse_pgr, state->pgr, sizeof(state->pgr));
     memcpy(env->rse.rse_pgr_nat, state->pgr_nat, sizeof(state->pgr_nat));
     memcpy(env->rse.rse_gr_dirty, state->gr_dirty, sizeof(state->gr_dirty));
@@ -308,7 +303,8 @@ uint32_t ia64_firmware_debug_save(CPUIA64State *env)
         return 0;
     }
     ia64_fw_debug_putq(env, FW_DEBUG_CTX_CR_IFS, env->cr_ifs);
-    ia64_fw_debug_save_rse(env);
+    ia64_rse_state_save(env, &debug->rse);
+    debug->rse_valid = true;
     (void)ia64_exec_physical_rw(
         ia64_fw_debug_context_pa(env),
         debug->context, sizeof(debug->context), true);
@@ -375,7 +371,7 @@ uint32_t ia64_firmware_debug_restore(CPUIA64State *env)
     (void)ia64_exec_physical_rw(
         ia64_fw_debug_context_pa(env),
         debug->context, sizeof(debug->context), false);
-    ia64_fw_debug_restore_rse(env);
+    ia64_rse_state_restore(env, &debug->rse);
     restored_bsp = ia64_fw_debug_getq(env, FW_DEBUG_CTX_AR_BSP);
     restored_bspstore = ia64_fw_debug_getq(env,
                                             FW_DEBUG_CTX_AR_BSPSTORE);
@@ -871,4 +867,120 @@ bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
     }
 
     return false;
+}
+
+/*
+ * SAL_PROC physical re-entry bridge (entry.S sal_runtime_entry, break
+ * 0x100005/0x100006).  The SST advertises a mode-agnostic SAL entry stub; a
+ * virtual-mode caller (e.g. the NT HAL, which maps the SAL code region and
+ * branches to it with translation on - SAL spec 3.1) cannot execute the
+ * firmware's fixed-address C dispatcher directly, so the enter break saves
+ * the caller's context, re-points the RSE at a firmware-owned physical
+ * backing store and resumes at the C dispatcher in physical mode.  The
+ * dispatcher's br.ret lands on sal_runtime_return, whose break restores the
+ * saved context and completes the stub's br.ret back to the caller.  SAL
+ * calls are not re-entrant (the OS serializes them).
+ */
+uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
+{
+    IA64SalBridgeState *bridge = &env->sal_bridge;
+    uint64_t block[4];
+    uint64_t entry, gp, stack, bstore;
+
+    if (bridge->active) {
+        return 0;
+    }
+    if (!ia64_exec_physical_rw(IA64_FW_SAL_DISPATCH_BLOCK_PA, block,
+                               sizeof(block), false)) {
+        return 0;
+    }
+    entry = le64_to_cpu(block[0]);
+    gp = le64_to_cpu(block[1]);
+    stack = le64_to_cpu(block[2]);
+    bstore = le64_to_cpu(block[3]);
+    if (!entry || !gp || !stack || !bstore ||
+        (entry & (IA64_BUNDLE_SIZE - 1)) || (bstore & 7)) {
+        return 0;
+    }
+
+    bridge->psr = env->psr;
+    bridge->b0 = env->br[0];
+    bridge->sp = env->gr[IA64_GR_STACK_POINTER];
+    bridge->gp = env->gr[IA64_GR_GLOBAL_POINTER];
+    bridge->rsc = env->ar_rsc;
+    ia64_rse_state_save(env, &bridge->rse);
+
+    /*
+     * Re-point the RSE at the firmware backing store.  The current frame
+     * (the caller's outgoing SAL arguments) stays in the physical file;
+     * nothing below it is dirty, so spills during the physical call go to
+     * firmware memory and the snapshot restore discards them on exit.
+     */
+    env->ar_rsc = 0;
+    env->ar_bspstore = bstore;
+    env->ar_bsp = bstore;
+    env->ar_rnat = 0;
+    env->rse.rse_dirty = 0;
+    env->rse.rse_dirty_nat = 0;
+    env->rse.rse_clean = 0;
+    env->rse.rse_clean_nat = 0;
+    env->rse.rse_invalid = IA64_STACKED_GR_COUNT - env->cfm_sof;
+    env->rse.rse_cfle = false;
+
+    env->gr[IA64_GR_GLOBAL_POINTER] = gp;
+    env->gr[IA64_GR_STACK_POINTER] = stack;
+    ia64_gr_nat_set(env, IA64_GR_GLOBAL_POINTER, false);
+    ia64_gr_nat_set(env, IA64_GR_STACK_POINTER, false);
+    env->br[0] = IA64_FW_SAL_RUNTIME_RETURN_PA;
+
+    ia64_set_psr(env, env->psr & ~(IA64_PSR_DT | IA64_PSR_RT |
+                                   IA64_PSR_IT | IA64_PSR_I |
+                                   IA64_PSR_RI_MASK));
+    ia64_tlb_serialize(env, 1, 1);
+    env->ip = entry;
+    env->exception_state.fault_slot = 0;
+    env->instruction_group_start = true;
+    bridge->active = true;
+    return 1;
+}
+
+uint32_t ia64_sal_runtime_exit(CPUIA64State *env)
+{
+    IA64SalBridgeState *bridge = &env->sal_bridge;
+    uint64_t pfs;
+    uint8_t ppl;
+
+    if (!bridge->active) {
+        return 0;
+    }
+    bridge->active = false;
+
+    /* Return to the caller's world: RSE snapshot + statics + psr. */
+    ia64_rse_state_restore(env, &bridge->rse);
+    env->ar_rsc = bridge->rsc;
+    env->gr[IA64_GR_GLOBAL_POINTER] = bridge->gp;
+    env->gr[IA64_GR_STACK_POINTER] = bridge->sp;
+    ia64_gr_nat_set(env, IA64_GR_GLOBAL_POINTER, false);
+    ia64_gr_nat_set(env, IA64_GR_STACK_POINTER, false);
+    env->br[0] = bridge->b0;
+    ia64_set_psr(env, bridge->psr);
+    ia64_tlb_serialize(env, 1, 1);
+
+    /*
+     * Complete the stub's br.ret b0 on the caller's behalf: pop the call
+     * frame and resume at the saved return address.  SAL results stay in
+     * r8-r11 as written by the dispatcher.
+     */
+    pfs = env->ar_pfs;
+    ppl = (pfs & IA64_PFS_PPL_MASK) >> IA64_PFS_PPL_SHIFT;
+    env->ip = ia64_ip_bundle_addr(bridge->b0);
+    env->psr &= ~IA64_PSR_RI_MASK;
+    if (ia64_psr_cpl(env->psr) < ppl) {
+        ia64_set_psr(env, (env->psr & ~IA64_PSR_CPL_MASK) |
+                          ((uint64_t)ppl << IA64_PSR_CPL_SHIFT));
+    }
+    ia64_rse_pop_return_frame(env, pfs);
+    env->exception_state.fault_slot = 0;
+    env->instruction_group_start = true;
+    return 1;
 }

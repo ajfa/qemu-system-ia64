@@ -19,3 +19,13 @@ uint32_t helper_firmware_debug_restore(CPUIA64State *env)
 {
     return ia64_firmware_debug_restore(env);
 }
+
+uint32_t helper_sal_runtime_enter(CPUIA64State *env)
+{
+    return ia64_sal_runtime_enter(env);
+}
+
+uint32_t helper_sal_runtime_exit(CPUIA64State *env)
+{
+    return ia64_sal_runtime_exit(env);
+}

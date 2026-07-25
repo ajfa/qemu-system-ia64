@@ -162,6 +162,21 @@ typedef struct IA64FPState {
     float_status fp_status;
 } IA64FPState;
 
+/*
+ * Caller context saved across a virtual-mode SAL_PROC call that the machine
+ * re-enters physically (see ia64_sal_runtime_enter).  SAL calls are not
+ * re-entrant - the OS serializes them (SAL spec 3.1) - so one slot suffices.
+ */
+typedef struct IA64SalBridgeState {
+    IA64FirmwareDebugRseState rse;
+    uint64_t psr;
+    uint64_t b0;
+    uint64_t sp;
+    uint64_t gp;
+    uint64_t rsc;
+    bool active;
+} IA64SalBridgeState;
+
 typedef struct IA64FirmwareDebugState {
     /* Device/firmware bridge state, deliberately outside CPUArchState. */
     uint8_t context[IA64_FW_DEBUG_CONTEXT_SIZE];

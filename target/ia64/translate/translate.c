@@ -144,6 +144,16 @@ bool ia64_is_pal_proc_break(CPUIA64State *env, uint64_t address)
                env, address, env->pal.pal_proc_copy_addr);
 }
 
+bool ia64_is_sal_runtime_break(CPUIA64State *env, uint64_t address,
+                               uint64_t imm)
+{
+    uint64_t entry_pa = imm == 0x100005 ? IA64_FW_SAL_RUNTIME_ENTRY_PA
+                                        : IA64_FW_SAL_RUNTIME_RETURN_PA;
+
+    return ia64_instruction_address_matches_physical_entry(env, address,
+                                                           entry_pa);
+}
+
 bool ia64_is_firmware_debug_break(uint64_t address, uint64_t imm)
 {
     if (imm == 0x100002) {

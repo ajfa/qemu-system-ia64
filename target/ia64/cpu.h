@@ -131,6 +131,17 @@
 #define IA64_PHYS_UC_BIT (1ULL << 63)
 #define IA64_FW_IDENTITY_BASE 0x00100000ULL
 #define IA64_FW_IDENTITY_SIZE 0x00100000ULL
+/*
+ * Fixed physical addresses of the SAL runtime stub trio (entry.S,
+ * .text.sal_runtime, pinned by firmware.lds).  The machine recognises the
+ * bridge breaks by entry address so they work for both a physical and a
+ * virtual fetch.  Windows Server 2003's HAL only derives a virtual SAL entry
+ * from the EfiRuntimeServicesCode descriptor containing the SST SalProc
+ * address, so the stubs live in runtime-services code, not the PAL page.
+ */
+#define IA64_FW_SAL_RUNTIME_ENTRY_PA  (IA64_FW_IDENTITY_BASE + 0x2000)
+#define IA64_FW_SAL_RUNTIME_RETURN_PA (IA64_FW_IDENTITY_BASE + 0x2020)
+#define IA64_FW_SAL_DISPATCH_BLOCK_PA (IA64_FW_IDENTITY_BASE + 0x2040)
 #define IA64_FIRMWARE_IVT_BASE 0x10000ULL
 #define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
 /*
@@ -865,6 +876,7 @@ typedef struct CPUArchState {
     uint8_t cfm_rrb_pr;
 
     IA64MMUState mmu;
+    IA64SalBridgeState sal_bridge;
     IA64InterruptState interrupt;
     IA64PalState pal;
 

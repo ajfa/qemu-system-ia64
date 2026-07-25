@@ -680,6 +680,26 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             ia64_gen_raise_exception(IA64_EXCP_BREAK, insn->address,
                                       op->immediate, insn->slot);
             return IA64_GEN_NORETURN;
+        } else if (op->auxiliary1 == 0 &&
+                   (op->immediate == 0x100005 ||
+                    op->immediate == 0x100006) &&
+                   ia64_is_sal_runtime_break(ctx->env, insn->address,
+                                             op->immediate)) {
+            TCGv_i32 handled = tcg_temp_new_i32();
+            TCGLabel *architected_break = gen_new_label();
+
+            if (op->immediate == 0x100005) {
+                gen_helper_sal_runtime_enter(handled, tcg_env);
+            } else {
+                gen_helper_sal_runtime_exit(handled, tcg_env);
+            }
+            tcg_gen_brcondi_i32(TCG_COND_EQ, handled, 0,
+                                architected_break);
+            tcg_gen_exit_tb(NULL, 0);
+            gen_set_label(architected_break);
+            ia64_gen_raise_exception(IA64_EXCP_BREAK, insn->address,
+                                      op->immediate, insn->slot);
+            return IA64_GEN_NORETURN;
         } else if (op->immediate == 0x100001) {
             gen_helper_fpswa_dispatch(tcg_env);
         } else if ((op->immediate & 0x100000) &&
