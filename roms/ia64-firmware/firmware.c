@@ -100,6 +100,33 @@
 #define FW_LOW_LEGACY_IMAGE_BASE 0x0000000003000000ULL
 #define FW_LOW_IMAGE_ALIGNED_END (FW_LOW_IMAGE_BASE + FW_LOW_IMAGE_ALIGN)
 #define FW_LOW_IMAGE_END  0x0000000005000000ULL
+/*
+ * SAL-style reserved guard page(s) placed exactly at the loader's 80 MB
+ * TR-staging line (FW_LOW_IMAGE_END).  This bounds the Windows IA-64 setup
+ * loader's [16MB,48MB)-confined heap free-block at 80 MB so its carve-from-end
+ * heap stays inside the 16-64 MB loader-TR window (else NTOSKRNL 0x1A).  Real
+ * SAL similarly reserves boot structures above the first 64 MB.  Conventional
+ * RAM handed to the OS begins just above the guard.
+ */
+#define FW_LOADER_STAGING_GUARD_SIZE 0x0000000000002000ULL
+#define FW_LOW_RAM_STAGING_BASE (FW_LOW_IMAGE_END + FW_LOADER_STAGING_GUARD_SIZE)
+/*
+ * SAL-style reserved split page ending exactly at the loader's 48 MB image
+ * base.  The Windows IA-64 setup loader requires that "any descriptor which
+ * starts less than 48MB [must] not extend beyond 48MB" (efi/ia64/memory.c);
+ * its own MempAllocDescriptor(_48MB,_80MB) split is erased when
+ * BlInsertDescriptor re-merges adjacent MemoryFree runs, after which the
+ * heap-extension (confined to selecting [16MB,48MB)-based free blocks but
+ * carving from the block's END) escapes to just below 80MB - outside the
+ * [16-64MB] the kernel's three loader-TRs cover -> NTOSKRNL bugcheck 0x1A.
+ * EfiReservedMemoryType maps to MemoryFirmwarePermanent (EfiToArcType
+ * default), which neither merges nor is reclaimed, so the [16-48MB) free run
+ * stays bounded below 48MB while [48MB,80MB) remains a single free
+ * descriptor for the loader's systemblock split.
+ */
+#define FW_LOADER_HEAP_SPLIT_SIZE 0x0000000000002000ULL
+#define FW_LOADER_HEAP_SPLIT_BASE \
+    (FW_LOW_LEGACY_IMAGE_BASE - FW_LOADER_HEAP_SPLIT_SIZE)
 #define FW_BOOTSTRAP_STACK_TOP 0x0000000008000000ULL
 #define FW_BOOT_STACK_SIZE     0x0000000000400000ULL
 #define IA64_EFI_MEMORY_ALIGN 0x0000000000002000ULL
@@ -12467,7 +12494,7 @@ static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
 
     if (pointer_start == 0) {
         return efi_memory_map_has_descriptor(
-                   EfiConventionalMemory, FW_LOW_IMAGE_END,
+                   EfiConventionalMemory, FW_LOW_RAM_STAGING_BASE,
                    mBootStackBase, EFI_MEMORY_WB) &&
                efi_memory_map_has_range_or_empty(
                    EfiConventionalMemory, mBootStackTop,
@@ -12482,7 +12509,7 @@ static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
 
     if (pointer_start < mBootStackBase) {
         return efi_memory_map_has_range_or_empty(
-                   EfiConventionalMemory, FW_LOW_IMAGE_END,
+                   EfiConventionalMemory, FW_LOW_RAM_STAGING_BASE,
                    pointer_start, EFI_MEMORY_WB) &&
                efi_memory_map_has_range_or_empty(
                    EfiConventionalMemory, pointer_end,
@@ -12493,7 +12520,7 @@ static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
     }
 
     return efi_memory_map_has_descriptor(
-               EfiConventionalMemory, FW_LOW_IMAGE_END,
+               EfiConventionalMemory, FW_LOW_RAM_STAGING_BASE,
                mBootStackBase, EFI_MEMORY_WB) &&
            efi_memory_map_has_range_or_empty(
                EfiConventionalMemory, mBootStackTop,
@@ -12647,15 +12674,19 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
     ordinary.Type = EfiConventionalMemory;
-    ordinary.PhysicalStart = FW_LOW_IMAGE_END;
+    ordinary.PhysicalStart = FW_LOW_RAM_STAGING_BASE;
     ordinary.VirtualStart = 0;
     ordinary.NumberOfPages = 1;
     ordinary.Attribute = EFI_MEMORY_WB;
     ordinary_next = ordinary;
-    ordinary_next.PhysicalStart = FW_LOW_IMAGE_END + 0x1000ULL;
+    ordinary_next.PhysicalStart = FW_LOW_RAM_STAGING_BASE + 0x1000ULL;
 
     if (!efi_memory_map_has_descriptor(EfiConventionalMemory,
                                        FW_LOW_IMAGE_BASE,
+                                       FW_LOADER_HEAP_SPLIT_BASE,
+                                       EFI_MEMORY_WB) ||
+        !efi_memory_map_has_descriptor(EfiReservedMemoryType,
+                                       FW_LOADER_HEAP_SPLIT_BASE,
                                        FW_LOW_LEGACY_IMAGE_BASE,
                                        EFI_MEMORY_WB) ||
         !efi_memory_map_has_descriptor(EfiConventionalMemory,
@@ -12665,6 +12696,12 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         !efi_memory_map_has_descriptor(EfiConventionalMemory,
                                        FW_LOW_IMAGE_ALIGNED_END,
                                        FW_LOW_IMAGE_END, EFI_MEMORY_WB) ||
+        /* The SAL-style loader-staging guard sits at the 80 MB line; usable
+         * conventional RAM begins just above it. */
+        !efi_memory_map_has_descriptor(EfiReservedMemoryType,
+                                       FW_LOW_IMAGE_END,
+                                       FW_LOW_RAM_STAGING_BASE,
+                                       EFI_MEMORY_WB) ||
         !efi_memory_map_has_boot_stack_layout() ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIO, IOSAPIC_BASE,
                                        IOSAPIC_BASE + IOSAPIC_SIZE,
@@ -12720,7 +12757,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     }
 
     /* Pool backing must not consume the low fixed-address candidate. */
-    loader_address = FW_LOW_IMAGE_END;
+    loader_address = FW_LOW_RAM_STAGING_BASE;
     if (!efi_range_is_available(loader_address,
                                 loader_address + EFI_PAGE_SIZE) ||
         !efi_find_pool_pages(EFI_POOL_CHUNK_SIZE,
@@ -12759,7 +12796,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
 
-    runtime_address = FW_LOW_IMAGE_END + IA64_EFI_MEMORY_ALIGN;
+    runtime_address = FW_LOW_RAM_STAGING_BASE + IA64_EFI_MEMORY_ALIGN;
     loader_address = runtime_address - EFI_PAGE_SIZE;
     if (bs_allocate_pages(AllocateAddress, EfiLoaderData, 1,
                           &loader_address) != EFI_SUCCESS ||
@@ -12781,7 +12818,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
 
-    runtime_address = FW_LOW_IMAGE_END + IA64_EFI_MEMORY_ALIGN +
+    runtime_address = FW_LOW_RAM_STAGING_BASE + IA64_EFI_MEMORY_ALIGN +
                       EFI_PAGE_SIZE;
     if (bs_allocate_pages(AllocateAddress, EfiRuntimeServicesCode, 1,
                           &runtime_address) != EFI_NOT_FOUND ||
@@ -12794,7 +12831,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
 
-    runtime_address = FW_LOW_IMAGE_END + 2U * IA64_EFI_MEMORY_ALIGN;
+    runtime_address = FW_LOW_RAM_STAGING_BASE + 2U * IA64_EFI_MEMORY_ALIGN;
     if (bs_allocate_pages(AllocateAddress, EfiACPIReclaimMemory, 1,
                           &runtime_address) != EFI_SUCCESS ||
         !efi_memory_map_has_descriptor(
@@ -12806,7 +12843,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
 
-    runtime_address = FW_LOW_IMAGE_END + 3U * IA64_EFI_MEMORY_ALIGN;
+    runtime_address = FW_LOW_RAM_STAGING_BASE + 3U * IA64_EFI_MEMORY_ALIGN;
     pool = NULL;
     if (bs_allocate_pages(AllocateAddress, EfiMaxMemoryType, 1,
                           &runtime_address) != EFI_INVALID_PARAMETER ||
@@ -13140,21 +13177,22 @@ out:
     return ok;
 }
 
-static void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 LowRamEnd)
+static void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 StartRam,
+                                       UINT64 LowRamEnd)
 {
     UINT64 pointer_start = mSystemTablePointerBase;
     UINT64 pointer_end = pointer_start + FW_SYSTEM_TABLE_POINTER_SIZE;
 
     if (pointer_start != 0 && pointer_start < mBootStackBase) {
         efi_add_memory_range(Index, EfiConventionalMemory,
-                             FW_LOW_IMAGE_END, pointer_start, EFI_MEMORY_WB);
+                             StartRam, pointer_start, EFI_MEMORY_WB);
         efi_add_memory_range(Index, EfiReservedMemoryType,
                              pointer_start, pointer_end, EFI_MEMORY_WB);
         efi_add_memory_range(Index, EfiConventionalMemory,
                              pointer_end, mBootStackBase, EFI_MEMORY_WB);
     } else {
         efi_add_memory_range(Index, EfiConventionalMemory,
-                             FW_LOW_IMAGE_END, mBootStackBase,
+                             StartRam, mBootStackBase,
                              EFI_MEMORY_WB);
     }
 
@@ -13261,6 +13299,10 @@ static void efi_init_memory_map(void)
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_FREE_BASE,
                          FW_LOW_IMAGE_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_BASE,
+                         FW_LOADER_HEAP_SPLIT_BASE, EFI_MEMORY_WB);
+    /* Non-free split page ending at 48 MB (see FW_LOADER_HEAP_SPLIT_BASE). */
+    efi_add_memory_range(&index, EfiReservedMemoryType,
+                         FW_LOADER_HEAP_SPLIT_BASE,
                          FW_LOW_LEGACY_IMAGE_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory,
                          FW_LOW_LEGACY_IMAGE_BASE,
@@ -13269,11 +13311,30 @@ static void efi_init_memory_map(void)
                          FW_LOW_IMAGE_ALIGNED_END,
                          FW_LOW_IMAGE_END, EFI_MEMORY_WB);
     /*
+     * SAL-style reserved guard at the 80 MB TR-staging line.  The Windows
+     * IA-64 setup loader (XP build 2002) allocates its heap by selecting a
+     * MemoryFree descriptor with BasePage in [16MB,48MB) and carving the new
+     * heap from that descriptor's END; because the loader also merges adjacent
+     * free descriptors, without a non-free boundary the [16MB..] free block
+     * extends to the top of RAM and the carve escapes the 16-64MB loader-TR
+     * window, tripping NTOSKRNL bugcheck 0x1A (MiConvertToLoaderVirtual).  A
+     * reserved page just above the loader's 80 MB staging line (matching how
+     * real SAL reserves boot structures above the first 64 MB) bounds that
+     * free block at 80 MB so the heap stays TR-mapped.  It sits ABOVE the
+     * loader's [48MB,80MB) systemblock split range, so the split still finds
+     * its container; bulk RAM above the guard stays conventional for OSes
+     * (e.g. Server 2003) whose loaders use the full range.
+     */
+    efi_add_memory_range(&index, EfiReservedMemoryType, FW_LOW_IMAGE_END,
+                         FW_LOW_RAM_STAGING_BASE, EFI_MEMORY_WB);
+
+    /*
      * SAL reuses each processor's RAM-top stack after ExitBootServices(), so
      * keep the entire stack pool as runtime data.  AllocatePool() uses only
      * the surrounding conventional-memory ranges.
      */
-    efi_add_boot_stack_low_ram(&index, low_ram_end);
+    efi_add_boot_stack_low_ram(&index, FW_LOW_RAM_STAGING_BASE,
+                               low_ram_end);
 
     /* Keep the high firmware scratch page unavailable to loaders. */
     efi_add_memory_range(&index, EfiReservedMemoryType, 0x80000000,
