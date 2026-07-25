@@ -16034,6 +16034,7 @@ static void efi_init_fpswa_loaded_image_proto(void)
 #define IMAGE_FILE_MACHINE_IA64   0x0200
 #define IMAGE_DOS_SIGNATURE       0x5A4D    /* "MZ" */
 #define IMAGE_NT_SIGNATURE        0x00004550  /* "PE\0\0" */
+#define IMAGE_FILE_RELOCS_STRIPPED 0x0001U
 #define IA64_EFI_IMAGE_FALLBACK_BASE         FW_LOW_FREE_BASE
 #define IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE FW_LOW_RUNTIME_IMAGE_BASE
 #define IA64_EFI_IMAGE_ALIGN                 0x00010000ULL
@@ -16271,11 +16272,21 @@ static UINT64 pe_image_allocation_floor(BOOLEAN RuntimeImage)
         IA64_EFI_IMAGE_FALLBACK_BASE;
 }
 
-static BOOLEAN pe_image_base_available(UINT64 base, UINT64 size,
-                                       BOOLEAN RuntimeImage)
+/*
+ * Alignment a loaded image must satisfy for its memory-map descriptors.
+ * This is the granularity pe_loaded_image_allocation_size() rounds to, so
+ * the range checked here is exactly the range the image goes on to occupy.
+ */
+static UINT64 pe_image_base_alignment(BOOLEAN RuntimeImage)
 {
-    if (base < pe_image_allocation_floor(RuntimeImage) ||
-        (base & (IA64_EFI_IMAGE_ALIGN - 1U)) != 0) {
+    return efi_memory_type_allocation_granularity(
+        RuntimeImage ? EfiRuntimeServicesCode : EfiLoaderCode);
+}
+
+/* Whether an image of Size bytes physically fits at base, ignoring policy. */
+static BOOLEAN pe_image_base_usable(UINT64 base, UINT64 size, UINT64 alignment)
+{
+    if (alignment == 0 || (base & (alignment - 1U)) != 0) {
         return 0;
     }
 
@@ -16284,11 +16295,36 @@ static BOOLEAN pe_image_base_available(UINT64 base, UINT64 size,
            !pe_image_base_in_use(base, size);
 }
 
+static BOOLEAN pe_image_base_available(UINT64 base, UINT64 size,
+                                       BOOLEAN RuntimeImage)
+{
+    /*
+     * The allocation floor is placement policy for addresses the firmware
+     * picks itself; it must not veto an address the image asks for.
+     */
+    if (base < pe_image_allocation_floor(RuntimeImage)) {
+        return 0;
+    }
+
+    return pe_image_base_usable(base, size, IA64_EFI_IMAGE_ALIGN);
+}
+
+/*
+ * FixedBase marks an image whose relocations were stripped: it runs at its
+ * linked base or not at all, so the staging floor - which is only placement
+ * policy for addresses the firmware picks itself - must not veto it.
+ * SourceBase/SourceSize describe the raw image being loaded from.  Sections
+ * are copied out of it, so the loaded copy must not alias it; LoadImage()
+ * takes any caller buffer, including memory no allocation record covers.
+ */
 static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size,
-                                   BOOLEAN RuntimeImage)
+                                   BOOLEAN RuntimeImage, BOOLEAN FixedBase,
+                                   UINT64 SourceBase, UINT64 SourceSize)
 {
     UINT64 base;
     UINT64 aligned_size;
+    UINT64 fixed_size;
+    UINT64 fixed_align = pe_image_base_alignment(RuntimeImage);
     UINT64 floor = pe_image_allocation_floor(RuntimeImage);
     UINT64 cursor = 0;
     BOOLEAN cursor_valid;
@@ -16299,7 +16335,20 @@ static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size,
         return 0;
     }
 
+    if (FixedBase) {
+        if (preferred_base == 0 ||
+            !efi_align_up_u64(size, fixed_align, &fixed_size) ||
+            ranges_overlap(preferred_base, fixed_size,
+                           SourceBase, SourceSize) ||
+            !pe_image_base_usable(preferred_base, fixed_size, fixed_align)) {
+            return 0;
+        }
+        return preferred_base;
+    }
+
     if (preferred_base != 0 &&
+        !ranges_overlap(preferred_base, aligned_size,
+                        SourceBase, SourceSize) &&
         pe_image_base_available(preferred_base, aligned_size,
                                 RuntimeImage)) {
         return preferred_base;
@@ -16351,7 +16400,9 @@ static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size,
                 if (pass != 0 && cursor_valid && base >= cursor) {
                     break;
                 }
-                if (pe_image_base_available(base, aligned_size,
+                if (!ranges_overlap(base, aligned_size,
+                                    SourceBase, SourceSize) &&
+                    pe_image_base_available(base, aligned_size,
                                             RuntimeImage)) {
                     mNextPeImageBase = base + aligned_size;
                     return base;
@@ -17142,6 +17193,7 @@ static void *load_pe_image(uint8_t *image_base, UINTN image_size,
     UINT16 subsystem = IMAGE_SUBSYSTEM_EFI_APPLICATION;
     UINT16 machine;
     UINT16 magic;
+    BOOLEAN relocations_stripped;
     UINTN optional_offset;
     UINTN section_offset;
     UINTN section_table_size;
@@ -17260,9 +17312,18 @@ static void *load_pe_image(uint8_t *image_base, UINTN image_size,
           subsystem == IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER))) {
         return NULL;
     }
+    /*
+     * Without a base relocation directory the image can only run where it
+     * was linked, so the base has to be honoured rather than reassigned.
+     */
+    relocations_stripped =
+        (file_hdr->Characteristics & IMAGE_FILE_RELOCS_STRIPPED) != 0 ||
+        number_of_rva_and_sizes < 6 || data_dir == NULL ||
+        data_dir[11] == 0;
     image_base_addr = pe_choose_image_base(
         linked_image_base_addr, size_of_image,
-        subsystem == IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER);
+        subsystem == IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER,
+        relocations_stripped, (UINT64)(UINTN)image_base, image_size);
     if (image_base_addr == 0) {
         return NULL;
     }
@@ -24042,7 +24103,7 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
                          EFI_MEMORY_WB);
 
     mNextPeImageBase = FW_LOW_FREE_BASE;
-    base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 0);
+    base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 0, 0, 0, 0);
     if (base != FW_LOW_IMAGE_BASE) {
         ok = 0;
         goto out;
@@ -24060,7 +24121,7 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
     mPoolAllocations[0].backing_pages = IA64_EFI_IMAGE_ALIGN >> 12;
     mPoolAllocations[0].type = EfiConventionalMemory;
     mNextPeImageBase = FW_LOW_IMAGE_BASE;
-    base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 0);
+    base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 0, 0, 0, 0);
     if (base != FW_LOW_IMAGE_BASE + 2U * IA64_EFI_IMAGE_ALIGN ||
         mNextPeImageBase !=
         FW_LOW_IMAGE_BASE + 3U * IA64_EFI_IMAGE_ALIGN) {
@@ -24071,7 +24132,7 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
     fw_set_mem(mPoolAllocations, sizeof(mPoolAllocations), 0);
 
     mNextPeImageBase = FW_LOW_FREE_BASE;
-    base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 1);
+    base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 1, 0, 0, 0);
     if (base != IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE ||
         mNextPeImageBase !=
         IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x10000ULL) {
@@ -24084,7 +24145,7 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
         (VOID *)(UINTN)(IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x10000ULL);
     mLoadedImages[0].loaded_image.ImageSize = 0x10000;
     base = pe_choose_image_base(IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE +
-                                0x10000ULL, 0x10000, 1);
+                                0x10000ULL, 0x10000, 1, 0, 0, 0);
     if (base != IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x20000ULL ||
         mNextPeImageBase !=
         IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x30000ULL) {
@@ -24092,9 +24153,51 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
         goto out;
     }
 
+    fw_set_mem(mLoadedImages, sizeof(mLoadedImages), 0);
+    fw_set_mem(mMemoryMap, sizeof(mMemoryMap), 0);
+    mMemoryMapEntries = 0;
+    efi_add_memory_range(&mMemoryMapEntries, EfiConventionalMemory,
+                         FW_LOW_RECLAIM_BASE, FW_LOW_IMAGE_BASE,
+                         EFI_MEMORY_WB);
+    mNextPeImageBase = FW_LOW_FREE_BASE;
+
+    /*
+     * Images without relocations must load where they were linked even below
+     * the staging floor; 0x1040000 is a common IA-64 default link address.
+     */
+    base = pe_choose_image_base(0x1040000ULL, 0x34000, 0, 1, 0, 0);
+    if (base != 0x1040000ULL || mNextPeImageBase != FW_LOW_FREE_BASE) {
+        ok = 0;
+        goto out;
+    }
+
+    /* The same base still loses to the floor when the image can move. */
+    if (pe_choose_image_base(0x1040000ULL, 0x34000, 0, 0, 0, 0) <
+        FW_LOW_FREE_BASE) {
+        ok = 0;
+        goto out;
+    }
+
+    /* A fixed base must never be placed on top of the source image. */
+    if (pe_choose_image_base(0x1040000ULL, 0x34000, 0, 1,
+                             0x1060000ULL, 0x1000) != 0) {
+        ok = 0;
+        goto out;
+    }
+
+    /* Occupied memory still rejects a fixed base instead of relocating it. */
+    mLoadedImages[0].in_use = 1;
+    mLoadedImages[0].loaded_image.ImageBase = (VOID *)(UINTN)0x1040000ULL;
+    mLoadedImages[0].loaded_image.ImageSize = 0x1000;
+    if (pe_choose_image_base(0x1040000ULL, 0x34000, 0, 1, 0, 0) != 0) {
+        ok = 0;
+        goto out;
+    }
+    fw_set_mem(mLoadedImages, sizeof(mLoadedImages), 0);
+
     mMemoryMapEntries = 0;
     mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
-    if (pe_choose_image_base(0, 0x10000, 0) != 0 ||
+    if (pe_choose_image_base(0, 0x10000, 0, 0, 0, 0) != 0 ||
         mNextPeImageBase != IA64_EFI_IMAGE_FALLBACK_BASE) {
         ok = 0;
     }
@@ -33664,7 +33767,7 @@ static EFI_STATUS __attribute__((noinline)) boot_image_from_disk(void)
     };
     FAT_DIR_ENTRY boot_entry;
     static UINT8 full_path[256];
-    UINT8 *file_buf = (UINT8 *)(UINTN)0x00600000ULL;
+    VOID *file_buf = NULL;
     UINT32 file_size = 0;
     EFI_HANDLE image = NULL;
     EFI_STATUS st;
@@ -33675,16 +33778,33 @@ static EFI_STATUS __attribute__((noinline)) boot_image_from_disk(void)
         uart_puts("Block I/O: BOOTIA64.EFI not found\r\n");
         return st;
     }
+    if (boot_entry.size == 0) {
+        uart_puts("Block I/O: BOOTIA64.EFI is empty\r\n");
+        return EFI_LOAD_ERROR;
+    }
+
+    /*
+     * Stage the file in a tracked allocation: it bounds the read to the
+     * directory entry's size, and it keeps the staging window out of the
+     * conventional memory that LoadImage() places the loaded image in.
+     */
+    st = bs_allocate_pool(EfiBootServicesData, boot_entry.size, &file_buf);
+    if (st != EFI_SUCCESS) {
+        uart_puts("Block I/O: BOOTIA64.EFI staging failed\r\n");
+        return st;
+    }
 
     st = fw_fat_read_file_entry(&boot_entry, file_buf, &file_size);
-    if (st != EFI_SUCCESS) {
+    if (st != EFI_SUCCESS || file_size != boot_entry.size) {
         uart_puts("Block I/O: BOOTIA64.EFI read failed\r\n");
-        return st;
+        (void)bs_free_pool(file_buf);
+        return st != EFI_SUCCESS ? st : EFI_DEVICE_ERROR;
     }
 
     uart_puts("Block I/O: BOOTIA64.EFI loaded\r\n");
 
     if (mDefaultFatVolume == NULL || !mDefaultFatVolume->valid) {
+        (void)bs_free_pool(file_buf);
         return EFI_NOT_FOUND;
     }
     st = fw_build_file_device_path(
@@ -33692,10 +33812,12 @@ static EFI_STATUS __attribute__((noinline)) boot_image_from_disk(void)
         (FW_DEVICE_PATH_NODE *)&mBootFullDevicePath.FileHeader,
         full_path, sizeof(full_path));
     if (st != EFI_SUCCESS) {
+        (void)bs_free_pool(file_buf);
         return st;
     }
     st = mBootServices.LoadImage(1, mImageHandle, full_path,
                                  file_buf, file_size, &image);
+    (void)bs_free_pool(file_buf);
     if (st != EFI_SUCCESS) {
         uart_puts("Block I/O: LoadImage failed\r\n");
         return st;

@@ -38,6 +38,7 @@ from .encoding import (
     br_ctop_few,
     br_ctop_many,
     br_indirect,
+    cover_b,
     br_ret,
     br_wexit,
     br_wtop,
@@ -1974,6 +1975,44 @@ test_br_ia_executes_ia32_and_jmpe_returns_to_ia64 = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
 
+"""An rfi whose IPSR selects IA-32 drops the dirty partition, so the
+backing store has nothing left to spill and AR.BSPSTORE meets AR.BSP.
+Leaving BSPSTORE behind would break BSPSTORE == BSP - 8*ndirty and leave
+AR.RNAT collecting for a group it no longer addresses.  br.ia rejects a
+non-empty store up front, but an rfi arrives with whatever the
+interrupted context left."""
+test_rfi_to_ia32_empties_backing_store = require_registers(
+    "rfi_to_ia32_empties_backing_store", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, nop_m(), alloc(1, 20, 0, 0, 0),
+         nop_i()),
+        (0x40, 0x18, nop_m(), nop_m(),
+         cover_b()),
+        (0x50, 0x00, rsm(IA64_PSR_IC), nop_i(),
+         nop_i()),
+        (0x60, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(19, IA64_PSR_IS)),
+        (0x80, 0x00, nop_m(), adds(31, 0x100, 0),
+         nop_i()),
+        *rfi_to_gr(0x90, 19, 31),
+        ia32_bundle(0x100, bytes.fromhex("0f b8 00 02")),
+        (0x200, 0x00, mov_m_ar_gr(8, 17), nop_i(),
+         nop_i()),
+        (0x210, 0x00, mov_m_ar_gr(9, 18), nop_i(),
+         nop_i()),
+        (0x220, 0x10, nop_m(), nop_i(),
+         br_cond(0x220, 0x220)),
+    ], {
+        "ip": 0x220,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x1000a0,
+        "r9": 0x1000a0,
+    }, entry=0x700, cpu="madison")
+
 test_ia32_indirect_jump_reaches_target = require_registers(
     "ia32_indirect_jump_reaches_target", [
         *ia32_environment_bundles(0x700, 0x10),
@@ -2801,6 +2840,7 @@ CASE_NAMES = (
     'reserved_application_register_is_illegal',
     'reserved_indirect_branch_btype_illegal',
     'reserved_ip_relative_branch_btype_illegal',
+    'rfi_to_ia32_empties_backing_store',
     'scalar_shift_count_64',
     'shl_var_ignored_bit_decode',
     'shladdp4_decode',
