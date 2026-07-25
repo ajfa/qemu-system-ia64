@@ -1347,6 +1347,29 @@ struct ArchCPU {
 void ia64_cpu_set_boot_info(IA64CPU *cpu, const IA64BootInfo *info);
 void ia64_cpu_reset_to_boot_info(IA64CPU *cpu);
 
+/*
+ * Model-dependent PAL response data.  Rather than sprinkling is_montecito /
+ * is_merced conditionals through the PAL dispatcher, each CPU model points at
+ * one profile carrying the values that differ between generations.  Values that
+ * are still identical across every supported model (PAL_VERSION words, cache
+ * geometry, PA/VA widths) stay shared in arch/pal.c and are not duplicated
+ * here; add them to the profile when a model needs to differ.
+ */
+typedef struct IA64PalProfile {
+    /* PAL_FREQ_BASE base clock in Hz. */
+    uint64_t freq_base_hz;
+    /* PAL_FREQ_RATIOS: each ratio is reported as (num << 32) | den. */
+    uint32_t proc_ratio_num, proc_ratio_den;   /* processor / base */
+    uint32_t bus_ratio_num, bus_ratio_den;      /* system bus / base */
+    uint32_t itc_ratio_num, itc_ratio_den;      /* interval timer / base */
+    /*
+     * PAL procedures that post-date the original Itanium (Merced).  When false,
+     * these indices return PAL_STATUS_NOT_IMPLEMENTED so the merced model
+     * reports the Merced-era PAL surface (245318-001/-002 §11.8).
+     */
+    bool has_post_merced_pal;
+} IA64PalProfile;
+
 struct IA64CPUClass {
     CPUClass parent_class;
 
@@ -1356,10 +1379,17 @@ struct IA64CPUClass {
     /* Guest-visible processor-model data. */
     uint64_t cpuid_version;
     uint64_t cpuid_features;
-    uint8_t tr_count;
+    /*
+     * Translation-register file sizes.  These are asymmetric on the original
+     * Itanium (8 ITR / 48 DTR, 248701-002 §2.5.6); Madison/Montecito use 64 of
+     * each in this model.  Bounds-checked separately for itr.i vs itr.d.
+     */
+    uint8_t itr_count;
+    uint8_t dtr_count;
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
+    const IA64PalProfile *pal;
 };
 
 static inline IA64CPU *ia64_cpu_from_cpu_state(CPUState *cs)

@@ -77,6 +77,8 @@ from .encoding import (
     PAL_PTCE_INFO,
     PAL_PURGE_PAGE_SIZE_MASK,
     PAL_RATIO_16_1,
+    PAL_RATIO_4_3,
+    PAL_RATIO_8_1,
     PAL_RATIO_16_3,
     PAL_RATIO_2_1,
     PAL_RATIO_4_1,
@@ -105,6 +107,7 @@ from .encoding import (
     PAL_VM_INFO_L1,
     PAL_VM_PAGE_SIZE,
     PAL_VM_SUMMARY,
+    PAL_VM_SUMMARY_INFO_1_MERCED,
     PAL_VM_SUMMARY_INFO_1,
     PAL_VM_SUMMARY_INFO_2,
     PAL_VM_TR_READ,
@@ -378,6 +381,59 @@ test_pal_freq_ratios_madison = require_registers(
     {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
      "r9": PAL_RATIO_16_1, "r10": PAL_RATIO_4_1,
      "r11": PAL_RATIO_2_1}, entry=0x10, cpu="madison")
+
+# --- Merced (original Itanium) model-differentiated PAL responses ----------
+# 800 MHz core / 133.33 MHz bus / 200 MHz ITC (249634-002 datasheet).
+test_pal_freq_ratios_merced = require_registers(
+    "pal_freq_ratios_merced", pal_call_program(PAL_FREQ_RATIOS),
+    {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
+     "r9": PAL_RATIO_8_1, "r10": PAL_RATIO_4_3,
+     "r11": PAL_RATIO_2_1}, entry=0x10, cpu="merced")
+
+# PAL_FREQ_BASE base clock is the same 100 MHz for merced.
+test_pal_freq_base_merced = require_registers(
+    "pal_freq_base_merced", pal_call_program(PAL_FREQ_BASE),
+    {"ip": 0x30, "r28": PAL_FREQ_BASE, "r8": 0,
+     "r9": 100000000, "r10": 0, "r11": 0}, entry=0x10, cpu="merced")
+
+# PAL_VM_SUMMARY reports the asymmetric 8 ITR / 48 DTR file.
+test_pal_vm_summary_merced = require_registers(
+    "pal_vm_summary_merced", pal_call_program(PAL_VM_SUMMARY),
+    {"ip": 0x30, "r28": PAL_VM_SUMMARY, "r8": 0,
+     "r9": PAL_VM_SUMMARY_INFO_1_MERCED, "r10": PAL_VM_SUMMARY_INFO_2},
+    entry=0x10, cpu="merced")
+
+# Procedures that post-date Merced return NOT_IMPLEMENTED on the merced model.
+test_pal_prefetch_vis_merced_unimplemented = require_registers(
+    "pal_prefetch_vis_merced_unimplemented",
+    pal_call_program(PAL_PREFETCH_VIS),
+    {"ip": 0x30, "r28": PAL_PREFETCH_VIS,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_cache_shared_info_merced_unimplemented = require_registers(
+    "pal_cache_shared_info_merced_unimplemented",
+    pal_call_program(PAL_CACHE_SHARED_INFO, [(29, 0), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_SHARED_INFO,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_brand_info_merced_unimplemented = require_registers(
+    "pal_brand_info_merced_unimplemented",
+    pal_stacked_call_program(PAL_BRAND_INFO, [18, 0, 0]),
+    {"ip": 0x80, "r28": PAL_BRAND_INFO,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+# logical_to_physical is already montecito-only; confirm merced too is
+# NOT_IMPLEMENTED (mirrors pal_logical_to_physical_madison_unimplemented).
+test_pal_logical_to_physical_merced_unimplemented = require_registers(
+    "pal_logical_to_physical_merced_unimplemented",
+    pal_call_program(PAL_LOGICAL_TO_PHYSICAL,
+                     [(29, 0xffffffffffffffff), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_LOGICAL_TO_PHYSICAL,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_freq_ratios_reserved_arg = require_registers(
     "pal_freq_ratios_reserved_arg",
@@ -1296,6 +1352,13 @@ CASE_NAMES = (
     'pal_freq_base_reserved_arg',
     'pal_freq_ratios',
     'pal_freq_ratios_madison',
+    'pal_freq_ratios_merced',
+    'pal_freq_base_merced',
+    'pal_vm_summary_merced',
+    'pal_prefetch_vis_merced_unimplemented',
+    'pal_cache_shared_info_merced_unimplemented',
+    'pal_brand_info_merced_unimplemented',
+    'pal_logical_to_physical_merced_unimplemented',
     'pal_freq_ratios_reserved_arg',
     'pal_halt_info',
     'pal_halt_info_bad_buffer',

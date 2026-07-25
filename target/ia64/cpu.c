@@ -893,6 +893,43 @@ static const TCGCPUOps ia64_tcg_ops = {
     .do_interrupt = ia64_cpu_do_interrupt,
 };
 
+/*
+ * Per-model PAL profiles (see IA64PalProfile in cpu.h).  Madison/Montecito
+ * carry the exact values the PAL dispatcher used before profiles existed, so
+ * their PAL responses stay bit-identical; only the merced profile differs.
+ * All models report a 100 MHz PAL_FREQ_BASE and encode core/bus/ITC as ratios.
+ */
+static const IA64PalProfile ia64_pal_profile_madison = {
+    .freq_base_hz = 100000000ULL,
+    .proc_ratio_num = 16, .proc_ratio_den = 1,   /* 1.6 GHz */
+    .bus_ratio_num = 4,   .bus_ratio_den = 1,     /* 400 MHz */
+    .itc_ratio_num = 2,   .itc_ratio_den = 1,     /* 200 MHz */
+    .has_post_merced_pal = true,
+};
+
+static const IA64PalProfile ia64_pal_profile_montecito = {
+    .freq_base_hz = 100000000ULL,
+    .proc_ratio_num = 16, .proc_ratio_den = 1,    /* 1.6 GHz */
+    .bus_ratio_num = 16,  .bus_ratio_den = 3,      /* 533.33 MHz */
+    .itc_ratio_num = 2,   .itc_ratio_den = 1,      /* 200 MHz */
+    .has_post_merced_pal = true,
+};
+
+/*
+ * Original Itanium (Merced), 800 MHz / 133 MHz bus SKU (249634-002 datasheet;
+ * CPUID table 249720-009).  brl is not implemented (cpuid_features = 0) and the
+ * post-Merced PAL procedures are absent (245318-001/-002 §11.8).  See
+ * plans/merced-model-notes.md for full citations.
+ */
+static const IA64PalProfile ia64_pal_profile_merced = {
+    .freq_base_hz = 100000000ULL,
+    .proc_ratio_num = 8,  .proc_ratio_den = 1,     /* 800 MHz */
+    .bus_ratio_num = 4,   .bus_ratio_den = 3,       /* 133.33 MHz */
+    .itc_ratio_num = 2,   .itc_ratio_den = 1,       /* 200 MHz (ITC ratio not
+                                                     * separately published) */
+    .has_post_merced_pal = false,
+};
+
 static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -920,19 +957,23 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
      */
     icc->cpuid_version = 0x000000001f010504ULL;
     icc->cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD;
-    icc->tr_count = 64;
+    icc->itr_count = 64;
+    icc->dtr_count = 64;
     icc->has_native_ia32 = true;
     icc->has_virtualization = false;
     icc->is_montecito = false;
+    icc->pal = &ia64_pal_profile_madison;
 }
 
 typedef struct IA64CPUModelDef {
     uint64_t cpuid_version;
     uint64_t cpuid_features;
-    uint8_t tr_count;
+    uint8_t itr_count;
+    uint8_t dtr_count;
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
+    const IA64PalProfile *pal;
 } IA64CPUModelDef;
 
 static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
@@ -942,10 +983,12 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
 
     icc->cpuid_version = model->cpuid_version;
     icc->cpuid_features = model->cpuid_features;
-    icc->tr_count = model->tr_count;
+    icc->itr_count = model->itr_count;
+    icc->dtr_count = model->dtr_count;
     icc->has_native_ia32 = model->has_native_ia32;
     icc->has_virtualization = model->has_virtualization;
     icc->is_montecito = model->is_montecito;
+    icc->pal = model->pal;
 }
 
 /*
@@ -958,16 +1001,19 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .cpuid_version = 0x000000001f010504ULL,
     /* No 16-byte atomics and no virtualization: both post-date Madison. */
     .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD,
-    .tr_count = 64,
+    .itr_count = 64,
+    .dtr_count = 64,
     .has_native_ia32 = true,
     .has_virtualization = false,
+    .pal = &ia64_pal_profile_madison,
 };
 
 static const IA64CPUModelDef ia64_cpu_model_montecito = {
     /* Family 0x20, model 0, C2 revision 7, CPUID[4] is the last register. */
     .cpuid_version = 0x0000000020000704ULL,
     .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD | IA64_CPUID4_AO,
-    .tr_count = 64,
+    .itr_count = 64,
+    .dtr_count = 64,
     /*
      * Montecito implements the virtualization extensions, but this model
      * does not virtualize.  vmsw is decoded and reported as a Virtualization
@@ -976,6 +1022,26 @@ static const IA64CPUModelDef ia64_cpu_model_montecito = {
      */
     .has_virtualization = true,
     .is_montecito = true,
+    .pal = &ia64_pal_profile_montecito,
+};
+
+/*
+ * Original Itanium ("Merced"), 800 MHz / 4 MB L3, C2 stepping.  Family 0x07,
+ * model 0, revision 8, CPUID[4] is the last register (249720-009 spec update).
+ * cpuid_features = 0: brl is not implemented (CPUID[4].lb = 0, 245319-002 brl
+ * page), which is what Windows' KF_BRL check expects on Merced.  Asymmetric TR
+ * file: 8 ITR / 48 DTR (248701-002 §2.5.6).  No 16-byte atomics, no
+ * virtualization.  See plans/merced-model-notes.md.
+ */
+static const IA64CPUModelDef ia64_cpu_model_merced = {
+    .cpuid_version = 0x0000000007000804ULL,
+    .cpuid_features = 0,
+    .itr_count = 8,
+    .dtr_count = 48,
+    .has_native_ia32 = true,
+    .has_virtualization = false,
+    .is_montecito = false,
+    .pal = &ia64_pal_profile_merced,
 };
 
 static const TypeInfo ia64_cpu_type_info[] = {
@@ -998,6 +1064,19 @@ static const TypeInfo ia64_cpu_type_info[] = {
         .parent = TYPE_IA64_CPU,
         .class_init = ia64_cpu_model_class_init,
         .class_data = &ia64_cpu_model_montecito,
+    },
+    {
+        .name = IA64_CPU_TYPE_NAME("merced"),
+        .parent = TYPE_IA64_CPU,
+        .class_init = ia64_cpu_model_class_init,
+        .class_data = &ia64_cpu_model_merced,
+    },
+    {
+        /* "itanium" is an alias for the original Itanium (Merced). */
+        .name = IA64_CPU_TYPE_NAME("itanium"),
+        .parent = TYPE_IA64_CPU,
+        .class_init = ia64_cpu_model_class_init,
+        .class_data = &ia64_cpu_model_merced,
     },
 };
 

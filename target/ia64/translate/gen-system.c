@@ -456,7 +456,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         ia64_gen_check_nat_register(insn, op->register_index);
         ia64_gen_check_register_index(
             insn, ia64_gr_src(op->register_index),
-            ia64_env_cpu_class(ctx->env)->tr_count);
+            ia64_env_cpu_class(ctx->env)->dtr_count);
         ia64_gen_sync_ip_for_helper(insn);
         gen_helper_itr_insert(tcg_env, ia64_gr_src(op->source),
                                ia64_gr_src(op->register_index),
@@ -470,7 +470,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         ia64_gen_check_nat_register(insn, op->register_index);
         ia64_gen_check_register_index(
             insn, ia64_gr_src(op->register_index),
-            ia64_env_cpu_class(ctx->env)->tr_count);
+            ia64_env_cpu_class(ctx->env)->itr_count);
         ia64_gen_sync_ip_for_helper(insn);
         gen_helper_itr_insert(tcg_env, ia64_gr_src(op->source),
                                ia64_gr_src(op->register_index),

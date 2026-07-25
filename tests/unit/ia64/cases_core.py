@@ -563,6 +563,22 @@ test_tf_feature_predicate_updates = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+# CPUID identity on merced: CPUID[3] = family 0x07, model 0, rev 8 (C2 stepping)
+# = 0x0000000007000804 (249720-009); CPUID[4] = 0, i.e. brl NOT implemented
+# (245319-002 brl page) -- the bit Windows keys KF_BRL off.
+test_cpuid_merced = require_registers(
+    "cpuid_merced", [
+        (0x10, 0x00, nop_m(), addl(31, 3, 0), nop_i()),
+        (0x20, 0x00, mov_cpuid(29, 31), nop_i(), nop_i()),
+        (0x30, 0x00, nop_m(), addl(30, 4, 0), nop_i()),
+        (0x40, 0x00, mov_cpuid(28, 30), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "r29": 0x0000000007000804,
+        "r28": 0x0000000000000000,
+    }, entry=0x10, cpu="merced")
+
 test_tf_upper_cpuid_feature_bits = require_registers(
     "tf_upper_cpuid_feature_bits", [
         (0x10, 0x00, nop_m(), addl(31, 4, 0),
@@ -2788,6 +2804,7 @@ CASE_NAMES = (
     'tf_same_pred_illegal',
     'tf_unc_same_pred_pred_false_illegal',
     'tf_upper_cpuid_feature_bits',
+    'cpuid_merced',
     'unpack2_l_decode',
     'vmsw0_madison_illegal_operation',
     'vmsw0_montecito_virtualization_fault',

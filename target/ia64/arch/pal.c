@@ -143,9 +143,11 @@ static void pal_rse_info(CPUIA64State *env)
 
 static void pal_vm_summary(CPUIA64State *env)
 {
-    uint64_t tr_count = ia64_env_cpu_class(env)->tr_count;
+    uint64_t itr_count = ia64_env_cpu_class(env)->itr_count;
+    uint64_t dtr_count = ia64_env_cpu_class(env)->dtr_count;
 
-    g_assert(tr_count > 0 && tr_count <= IA64_TR_MAX);
+    g_assert(itr_count > 0 && itr_count <= IA64_TR_MAX);
+    g_assert(dtr_count > 0 && dtr_count <= IA64_TR_MAX);
     if (pal_reserved_args_are_zero(env)) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
         env->gr[IA64_PAL_GR_RESULT1] = 1ULL |
@@ -153,8 +155,8 @@ static void pal_vm_summary(CPUIA64State *env)
                      ((uint64_t)IA64_IMPL_KEY_BITS << 8) |
                      (((uint64_t)IA64_PKR_COUNT - 1ULL) << 16) |
                      (8ULL << 24) |
-                     ((tr_count - 1ULL) << 32) |
-                     ((tr_count - 1ULL) << 40) |
+                     ((itr_count - 1ULL) << 32) |
+                     ((dtr_count - 1ULL) << 40) |
                      (4ULL << 48) | (2ULL << 56);
         env->gr[IA64_PAL_GR_RESULT2] = IA64_PAL_IMPL_VA_MSB |
                       ((uint64_t)IA64_IMPL_RID_BITS << 8);
@@ -1037,8 +1039,14 @@ static void pal_vm_tr_read(CPUIA64State *env, uintptr_t ra)
     uint64_t tr_valid = 0;
     uint64_t ps_shift;
 
-    if (reg_num >= ia64_env_cpu_class(env)->tr_count || tr_type > 1 ||
-        (tr_buffer & 7) != 0) {
+    /*
+     * tr_type: 0 = ITR, 1 = DTR (SDM 245318-004 sec 11.9 PAL_VM_TR_READ).
+     * Bound reg_num by the bank the lookup below actually selects; the two
+     * files are asymmetric on the original Itanium (8 ITR / 48 DTR).
+     */
+    uint64_t tr_bound = tr_type == 0 ? ia64_env_cpu_class(env)->itr_count
+                                     : ia64_env_cpu_class(env)->dtr_count;
+    if (tr_type > 1 || reg_num >= tr_bound || (tr_buffer & 7) != 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
         env->gr[IA64_PAL_GR_RESULT2] = 0;
@@ -1074,7 +1082,8 @@ static void pal_freq_base(CPUIA64State *env)
 {
     if (pal_reserved_args_are_zero(env)) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->gr[IA64_PAL_GR_RESULT1] = 100000000ULL;
+        env->gr[IA64_PAL_GR_RESULT1] =
+            ia64_env_cpu_class(env)->pal->freq_base_hz;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
@@ -1085,14 +1094,17 @@ static void pal_freq_base(CPUIA64State *env)
 
 static void pal_freq_ratios(CPUIA64State *env)
 {
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
+
     if (pal_reserved_args_are_zero(env)) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        /* Processor: 1.6 GHz. */
-        env->gr[IA64_PAL_GR_RESULT1] = (16ULL << 32) | 1ULL;
-        env->gr[IA64_PAL_GR_RESULT2] = ia64_env_cpu_class(env)->is_montecito ?
-                      (16ULL << 32) | 3ULL : /* bus: 533.33 MHz */
-                      (4ULL << 32) | 1ULL;   /* bus: 400 MHz */
-        env->gr[IA64_PAL_GR_RESULT3] = (2ULL << 32) | 1ULL; /* ITC: 200 MHz */
+        /* Each ratio is reported as (numerator << 32) | denominator. */
+        env->gr[IA64_PAL_GR_RESULT1] =
+            ((uint64_t)pal->proc_ratio_num << 32) | pal->proc_ratio_den;
+        env->gr[IA64_PAL_GR_RESULT2] =
+            ((uint64_t)pal->bus_ratio_num << 32) | pal->bus_ratio_den;
+        env->gr[IA64_PAL_GR_RESULT3] =
+            ((uint64_t)pal->itc_ratio_num << 32) | pal->itc_ratio_den;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
@@ -1326,6 +1338,21 @@ static void pal_fixed_addr(CPUIA64State *env)
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
+/* PAL procedures that post-date Merced return this on the merced model. */
+static void pal_return_not_implemented(CPUIA64State *env)
+{
+    env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_NOT_IMPLEMENTED;
+    env->gr[IA64_PAL_GR_RESULT1] = 0;
+    env->gr[IA64_PAL_GR_RESULT2] = 0;
+    env->gr[IA64_PAL_GR_RESULT3] = 0;
+}
+
+/* True when a post-Merced PAL procedure is available on this model. */
+static bool pal_post_merced_available(CPUIA64State *env)
+{
+    return ia64_env_cpu_class(env)->pal->has_post_merced_pal;
+}
+
 uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra)
 {
     uint64_t index = env->gr[IA64_PAL_GR_INDEX];
@@ -1351,7 +1378,11 @@ uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra)
         }
         break;
     case PAL_PREFETCH_VIS:
-        pal_prefetch_vis(env);
+        if (!pal_post_merced_available(env)) {
+            pal_return_not_implemented(env);
+        } else {
+            pal_prefetch_vis(env);
+        }
         break;
     case PAL_CACHE_FLUSH:
         if (pal_cache_flush(env)) {
@@ -1383,7 +1414,11 @@ uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra)
         pal_cache_prot_info(env);
         break;
     case PAL_CACHE_SHARED_INFO:
-        pal_cache_shared_info(env);
+        if (!pal_post_merced_available(env)) {
+            pal_return_not_implemented(env);
+        } else {
+            pal_cache_shared_info(env);
+        }
         break;
     case PAL_VM_INFO:
         pal_vm_info(env);
@@ -1428,7 +1463,11 @@ uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra)
         pal_fixed_addr(env);
         break;
     case PAL_LOGICAL_TO_PHYSICAL:
-        pal_logical_to_physical(env);
+        if (!pal_post_merced_available(env)) {
+            pal_return_not_implemented(env);
+        } else {
+            pal_logical_to_physical(env);
+        }
         break;
     case PAL_MC_CLEAR_LOG:
         pal_mc_clear_log(env);
@@ -1440,7 +1479,11 @@ uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra)
         pal_copy_pal(env);
         break;
     case PAL_BRAND_INFO:
-        pal_brand_info(env, ra);
+        if (!pal_post_merced_available(env)) {
+            pal_return_not_implemented(env);
+        } else {
+            pal_brand_info(env, ra);
+        }
         break;
     case PAL_HALT_INFO:
         pal_halt_info(env, ra);

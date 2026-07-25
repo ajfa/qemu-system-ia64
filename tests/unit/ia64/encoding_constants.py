@@ -199,9 +199,21 @@ PAL_VM_SUMMARY_INFO_1 = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                          ((IA64_TR_COUNT - 1) << 40) | (4 << 48) |
                          (2 << 56))
 PAL_VM_SUMMARY_INFO_2 = IA64_PAL_IMPL_VA_MSB | (24 << 8)
+# Merced reports 8 ITR / 48 DTR (248701-002 sec 2.5.6); only the max_itr/max_dtr
+# fields (bits 32:39 and 40:47) differ from the default summary word.
+IA64_MERCED_ITR_COUNT = 8
+IA64_MERCED_DTR_COUNT = 48
+PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
+                                ((IA64_PKR_COUNT - 1) << 16) |
+                                (8 << 24) |
+                                ((IA64_MERCED_ITR_COUNT - 1) << 32) |
+                                ((IA64_MERCED_DTR_COUNT - 1) << 40) |
+                                (4 << 48) | (2 << 56))
 PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_16_3 = (16 << 32) | 3
 PAL_RATIO_4_1 = (4 << 32) | 1
+PAL_RATIO_4_3 = (4 << 32) | 3
+PAL_RATIO_8_1 = (8 << 32) | 1
 PAL_RATIO_2_1 = (2 << 32) | 1
 PAL_MEM_ATTRIB_WB_UC = (1 << 0) | (1 << 4)
 PAL_CACHE_INFO_L0_I_1 = ((4 << 8) | (6 << 16) |
@@ -449,10 +461,15 @@ __all__ = (
     'PAL_INSERTABLE_PAGE_SIZE_MASK',
     'PAL_PURGE_PAGE_SIZE_MASK',
     'PAL_VM_SUMMARY_INFO_1',
+    'PAL_VM_SUMMARY_INFO_1_MERCED',
     'PAL_VM_SUMMARY_INFO_2',
+    'IA64_MERCED_ITR_COUNT',
+    'IA64_MERCED_DTR_COUNT',
     'PAL_RATIO_16_1',
     'PAL_RATIO_16_3',
     'PAL_RATIO_4_1',
+    'PAL_RATIO_4_3',
+    'PAL_RATIO_8_1',
     'PAL_RATIO_2_1',
     'PAL_MEM_ATTRIB_WB_UC',
     'PAL_CACHE_INFO_L0_I_1',

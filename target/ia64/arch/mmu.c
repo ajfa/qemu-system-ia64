@@ -618,7 +618,10 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     CPUState *cs = env_cpu(env);
     bool cached_old_tr;
 
-    if (slot >= ia64_env_cpu_class(env)->tr_count) {
+    /* itr.d (is_data=1) targets the DTR file, itr.i (is_data=0) the ITR file. */
+    uint8_t tr_slots = is_data ? ia64_env_cpu_class(env)->dtr_count
+                               : ia64_env_cpu_class(env)->itr_count;
+    if (slot >= tr_slots) {
         env->cr_isr = 0x30;
         ia64_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
                                ia64_ip_bundle_addr(env->ip), raw,
