@@ -531,6 +531,9 @@ const QEMULogItem qemu_log_items[] = {
       "include VPU registers in the 'cpu' logging" },
     { LOG_INVALID_MEM, "invalid_mem",
       "log invalid memory accesses" },
+    { CPU_LOG_IA32_FAULT, "ia32_fault",
+      "log IA-32 execution-layer faults and instruction intercepts "
+      "(EIP, opcode bytes, registers)" },
     { 0, NULL, NULL },
 };
 
