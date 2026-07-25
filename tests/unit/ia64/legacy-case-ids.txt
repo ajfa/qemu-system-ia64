@@ -633,6 +633,7 @@ pal_cache_shared_info_single_thread
 pal_cache_summary
 pal_cache_summary_madison
 pal_cache_summary_reserved_arg
+pal_call_clears_return_reg_nat
 pal_copy_info
 pal_copy_info_bad_type
 pal_copy_info_ia32_unsupported
