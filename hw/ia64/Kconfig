@@ -22,6 +22,7 @@ config IA64_VPC_NETWORK
     bool
     depends on IA64_VPC
     select E1000_PCI
+    select EEPRO100_PCI
 
 config IA64_VPC_PS2
     bool

@@ -146,6 +146,26 @@ static const ExpectedPCIDevice expected_e1000 = {
     },
 };
 
+/*
+ * The default adapter is the Intel PRO/100 (i82557b), the model Windows
+ * IA-64 ships an inbox driver for.  It exposes a 4 KiB prefetchable CSR BAR,
+ * a 64-byte I/O BAR, and a flash BAR, all placed by the machine's generic
+ * per-BAR NIC allocator inside the NIC memory / I/O windows.
+ */
+static const ExpectedPCIDevice expected_i82557b = {
+    .slot = IA64_E1000_SLOT,
+    .vendor = PCI_VENDOR_ID_INTEL,
+    .device = 0x1229,
+    .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
+    .irq_line = IA64_E1000_GSI,
+    .irq_pin = 1,
+    .bars = {
+        [0] = IA64_E1000_MMIO_BASE | PCI_BASE_ADDRESS_MEM_PREFETCH,
+        [1] = IA64_E1000_IO_BASE | PCI_BASE_ADDRESS_SPACE_IO,
+        [2] = 0xc1060000,
+    },
+};
+
 static uint32_t iosapic_read(QTestState *qts, uint32_t reg);
 static void iosapic_write(QTestState *qts, uint32_t reg, uint32_t value);
 
@@ -940,13 +960,13 @@ static void test_pci_default_layout(void)
                         PCI_VENDOR_ID_LSI_LOGIC);
         g_free(lsi);
     }
-    assert_pci_device(&gbus.bus, &expected_e1000);
+    assert_pci_device(&gbus.bus, &expected_i82557b);
     qtest_quit(qts);
 }
 
 static void test_e1000_resources_survive_reset(void)
 {
-    QTestState *qts = ia64_vpc_start(NULL);
+    QTestState *qts = ia64_vpc_start("-nic user,model=e1000");
     QGenericPCIBus gbus;
 
     ia64_qpci_init(&gbus, qts);
@@ -960,7 +980,7 @@ static void test_e1000_intx_route(void)
 {
     const uint8_t vector = 0x52;
     const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + IA64_E1000_GSI * 2;
-    QTestState *qts = ia64_vpc_start(NULL);
+    QTestState *qts = ia64_vpc_start("-nic user,model=e1000");
 
     iosapic_write(qts, rte_low, vector | IA64_IOSAPIC_RTE_LEVEL);
     qtest_writel(qts, IA64_E1000_MMIO_BASE + E1000_IMC, UINT32_MAX);
@@ -1302,7 +1322,7 @@ static void test_iosapic_level_remote_irr(void)
     const unsigned pin = 23;
     const uint8_t vector = 0x51;
     const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + pin * 2;
-    QTestState *qts = ia64_vpc_start(NULL);
+    QTestState *qts = ia64_vpc_start("-nic user,model=e1000");
     g_autofree char *iosapic_path =
         find_unattached_child(qts, "ia64-iosapic");
     uint32_t rte;
