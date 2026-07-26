@@ -758,7 +758,7 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
     bool unimplemented_ia32_target =
         (ipsr & IA64_PSR_IS) &&
         ((ipsr & IA64_PSR_IT) ? !ia64_va_is_implemented(raw_iip) :
-                                !ia64_pa_is_implemented(raw_iip));
+                                !ia64_pa_is_implemented(env, raw_iip));
 
     /*
      * Montecito has no native IA-32 execution engine.  An OS must use its
@@ -1005,7 +1005,7 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
 
     trap_code = ((env->psr & IA64_PSR_IT) ?
                  !ia64_va_is_implemented(target) :
-                 !ia64_pa_is_implemented(target)) ? IA64_ISR_CODE_UI : 0;
+                 !ia64_pa_is_implemented(env, target)) ? IA64_ISR_CODE_UI : 0;
     trap_code |= (env->psr & IA64_PSR_TB) ? IA64_ISR_CODE_TB : 0;
     trap_code |= (env->psr & IA64_PSR_SS) ? IA64_ISR_CODE_SS : 0;
     if (!trap_code) {

@@ -107,7 +107,7 @@ G_NORETURN void ia64_raise_unaligned(CPUIA64State *env, uint64_t addr,
 {
     bool unimplemented = env->psr & IA64_PSR_DT ?
                          !ia64_va_is_implemented(addr) :
-                         !ia64_pa_is_implemented(addr);
+                         !ia64_pa_is_implemented(env, addr);
 
     /*
      * An unimplemented address precludes a concurrent unaligned-reference
@@ -523,7 +523,7 @@ void ia64_cpu_do_interrupt(CPUState *cs)
         } else {
             cpu->env.ip = cpu->env.psr & IA64_PSR_IT ?
                           ia64_va_canonicalize(cpu->env.ip) :
-                          ia64_pa_canonicalize(cpu->env.ip);
+                          ia64_pa_canonicalize(&cpu->env, cpu->env.ip);
             fault_addr = cpu->env.ip;
         }
         break;

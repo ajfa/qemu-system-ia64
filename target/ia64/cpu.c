@@ -410,14 +410,14 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
 
     rid = ia64_region_rid(&cpu->env, addr);
     if (mmu_idx == MMU_PHYS_IDX) {
-        if (!ia64_pa_is_implemented(addr)) {
+        if (!ia64_pa_is_implemented(&cpu->env, addr)) {
             if (probe) {
                 return false;
             }
             excp = is_ifetch ? IA64_EXCP_UNIMPL_INST_ADDR :
                    IA64_EXCP_UNIMPL_DATA_ADDR;
             if (is_ifetch) {
-                cpu->env.ip = ia64_pa_canonicalize(addr);
+                cpu->env.ip = ia64_pa_canonicalize(&cpu->env, addr);
             }
             goto raise_exception;
         }
@@ -803,6 +803,10 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
      */
     cpu->env.insertable_page_mask = icc->insertable_page_mask;
     cpu->env.purgeable_page_mask = icc->purgeable_page_mask;
+    cpu->env.impl_pa_bits = icc->impl_pa_bits;
+    cpu->env.impl_va_msb = icc->impl_va_msb;
+    cpu->env.impl_rid_bits = icc->impl_rid_bits;
+    cpu->env.impl_key_bits = icc->impl_key_bits;
     /*
      * Bound of the persistent region-7 KSEG physical alias (see
      * ia64_sal_boot_identity_pa_type()): the loader/kernel reach top-of-RAM
@@ -1153,6 +1157,10 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     icc->dtr_count = 64;
     icc->insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK;
     icc->purgeable_page_mask = IA64_PURGEABLE_PAGE_SIZE_MASK;
+    icc->impl_pa_bits = IA64_IMPL_PA_BITS;
+    icc->impl_va_msb = IA64_IMPL_VA_MSB;
+    icc->impl_rid_bits = IA64_IMPL_RID_BITS;
+    icc->impl_key_bits = IA64_IMPL_KEY_BITS;
     icc->has_native_ia32 = true;
     icc->has_virtualization = false;
     icc->is_montecito = false;
@@ -1166,6 +1174,10 @@ typedef struct IA64CPUModelDef {
     uint8_t dtr_count;
     uint64_t insertable_page_mask;
     uint64_t purgeable_page_mask;
+    uint8_t impl_pa_bits;
+    uint8_t impl_va_msb;
+    uint8_t impl_rid_bits;
+    uint8_t impl_key_bits;
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
@@ -1183,6 +1195,10 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->dtr_count = model->dtr_count;
     icc->insertable_page_mask = model->insertable_page_mask;
     icc->purgeable_page_mask = model->purgeable_page_mask;
+    icc->impl_pa_bits = model->impl_pa_bits;
+    icc->impl_va_msb = model->impl_va_msb;
+    icc->impl_rid_bits = model->impl_rid_bits;
+    icc->impl_key_bits = model->impl_key_bits;
     icc->has_native_ia32 = model->has_native_ia32;
     icc->has_virtualization = model->has_virtualization;
     icc->is_montecito = model->is_montecito;
@@ -1203,6 +1219,10 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .dtr_count = 64,
     .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
     .purgeable_page_mask = IA64_PURGEABLE_PAGE_SIZE_MASK,
+    .impl_pa_bits = IA64_IMPL_PA_BITS,
+    .impl_va_msb = IA64_IMPL_VA_MSB,
+    .impl_rid_bits = IA64_IMPL_RID_BITS,
+    .impl_key_bits = IA64_IMPL_KEY_BITS,
     .has_native_ia32 = true,
     .has_virtualization = false,
     .pal = &ia64_pal_profile_madison,
@@ -1216,6 +1236,10 @@ static const IA64CPUModelDef ia64_cpu_model_montecito = {
     .dtr_count = 64,
     .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
     .purgeable_page_mask = IA64_PURGEABLE_PAGE_SIZE_MASK,
+    .impl_pa_bits = IA64_IMPL_PA_BITS,
+    .impl_va_msb = IA64_IMPL_VA_MSB,
+    .impl_rid_bits = IA64_IMPL_RID_BITS,
+    .impl_key_bits = IA64_IMPL_KEY_BITS,
     /*
      * Montecito implements the virtualization extensions, but this model
      * does not virtualize.  vmsw is decoded and reported as a Virtualization
@@ -1242,6 +1266,23 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
     .dtr_count = 48,
     .insertable_page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK,
     .purgeable_page_mask = IA64_MERCED_PURGEABLE_PAGE_SIZE_MASK,
+    /*
+     * Merced implements 44 physical and 54 virtual address bits
+     * (245320-002 sec 3.2), but this machine cannot yet be described inside
+     * a 44-bit physical space: ia64-vpc places the PCI I/O port window at
+     * 0x8000_1000_0000 and the PAL I/O block at 0x8000_0C00_0000, both of
+     * which set bit 47.  Narrowing the width here makes the firmware's own
+     * UART and I/O accesses take Unimplemented Data Address faults before
+     * the loader ever runs.  Relocating those windows is a machine-wide
+     * change -- hw/ia64, the firmware and the ACPI _CRS all describe them --
+     * so until that lands these two keep the width this platform needs.  The
+     * region-ID and protection-key widths do not depend on the platform
+     * layout and are Merced's.
+     */
+    .impl_pa_bits = IA64_IMPL_PA_BITS,
+    .impl_va_msb = IA64_IMPL_VA_MSB,
+    .impl_rid_bits = IA64_MERCED_IMPL_RID_BITS,
+    .impl_key_bits = IA64_MERCED_IMPL_KEY_BITS,
     .has_native_ia32 = true,
     .has_virtualization = false,
     .is_montecito = false,

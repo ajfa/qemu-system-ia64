@@ -18,7 +18,6 @@
 #include "exec/tlb-flags.h"
 #include "trace.h"
 
-#define IA64_PTE_PPN_MASK 0x0003fffffffff000ULL
 #define IA64_PTE_PL_SHIFT 7
 #define IA64_PTE_PL_MASK  (3ULL << IA64_PTE_PL_SHIFT)
 #define IA64_PTE_AR_SHIFT 9
@@ -639,7 +638,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
 
     ps = ia64_itir_page_size(env);
     va = env->cr_ifa & ~(ps - 1);
-    pa = (pte & IA64_PTE_PPN_MASK) & ~(ps - 1);
+    pa = (pte & ia64_pte_ppn_mask(env)) & ~(ps - 1);
     key = (env->cr_itir & IA64_ITIR_KEY_MASK) >> IA64_ITIR_KEY_SHIFT;
     ar = ia64_pte_ar(pte);
     pl = ia64_pte_pl(pte);
@@ -1034,7 +1033,7 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
         result->valid = false;
     }
     if (!(env->psr & IA64_PSR_DT)) {
-        if (!ia64_pa_is_implemented(va)) {
+        if (!ia64_pa_is_implemented(env, va)) {
             return IA64_EXCP_UNIMPL_DATA_ADDR;
         }
         pa = ia64_physical_address(va);
@@ -2014,7 +2013,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
 
             *perm = ia64_pte_perm(translation, access_level);
             page_mask = (1ULL << page_shift) - 1;
-            *pa = ((translation & IA64_PTE_PPN_MASK) & ~page_mask) |
+            *pa = ((translation & ia64_pte_ppn_mask(env)) & ~page_mask) |
                   (va & page_mask);
             IA64TlbEntry *entry = ia64_vhpt_install_tc(
                 env, va, rid, is_ifetch, *pa, 1ULL << page_shift, ar, pl,
@@ -2109,7 +2108,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
                     *access_key = entry_key;
                 }
                 *perm = ia64_pte_perm(translation, access_level);
-                *pa = ((translation & IA64_PTE_PPN_MASK) & ~page_mask) |
+                *pa = ((translation & ia64_pte_ppn_mask(env)) & ~page_mask) |
                       (va & page_mask);
                 IA64TlbEntry *entry = ia64_vhpt_install_tc(
                     env, va, rid, is_ifetch, *pa,
@@ -2185,7 +2184,7 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
     uint16_t *pending_count;
     uint64_t ps = ia64_itir_page_size(env);
     uint64_t va = env->cr_ifa & ~(ps - 1);
-    uint64_t pa = (pte & IA64_PTE_PPN_MASK) & ~(ps - 1);
+    uint64_t pa = (pte & ia64_pte_ppn_mask(env)) & ~(ps - 1);
     uint32_t key = (env->cr_itir & IA64_ITIR_KEY_MASK) >>
                    IA64_ITIR_KEY_SHIFT;
     uint32_t rid = ia64_region_rid(env, env->cr_ifa);

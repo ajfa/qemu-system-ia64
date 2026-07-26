@@ -797,7 +797,7 @@ uint64_t ia64_system_validate_rr_value(CPUIA64State *env, uint64_t value,
 {
     uint8_t ps = (value >> 2) & 0x3f;
     uint64_t allowed = 1ULL | (0x3fULL << 2) |
-                       (((1ULL << IA64_IMPL_RID_BITS) - 1) << 8);
+                       (ia64_rid_mask(env) << 8);
 
     if ((value & ~allowed) || !ia64_page_shift_insertable(env, ps)) {
         env->cr_isr = 0x30;
@@ -855,8 +855,8 @@ uint64_t ia64_system_mov_pkrgr_indexed_read(CPUIA64State *env, uint64_t pkr_num)
 static void ia64_pkr_write(CPUIA64State *env, uint32_t pkr_num,
                            uint64_t value)
 {
-    uint64_t masked = value & IA64_PKR_MASK;
-    uint64_t key = masked & IA64_PKR_KEY_MASK;
+    uint64_t masked = value & ia64_pkr_mask(env);
+    uint64_t key = masked & ia64_pkr_key_mask(env);
     bool changed;
 
     if (pkr_num >= IA64_PKR_COUNT) {
@@ -867,7 +867,7 @@ static void ia64_pkr_write(CPUIA64State *env, uint32_t pkr_num,
     if (masked & IA64_PKR_VALID) {
         for (uint32_t i = 0; i < IA64_PKR_COUNT; i++) {
             if (i != pkr_num && (env->pkr[i] & IA64_PKR_VALID) &&
-                (env->pkr[i] & IA64_PKR_KEY_MASK) == key) {
+                (env->pkr[i] & ia64_pkr_key_mask(env)) == key) {
                 env->pkr[i] &= ~IA64_PKR_VALID;
                 changed = true;
             }

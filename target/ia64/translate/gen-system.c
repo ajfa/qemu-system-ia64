@@ -180,7 +180,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
     case IA64_OP_MOV_GRPKR:
         ia64_gen_check_nat_register(insn, op->destination);
         ia64_gen_check_reserved_bits(insn, ia64_gr_src(op->destination),
-                                     IA64_PKR_MASK);
+                                     ia64_pkr_mask(ctx->env));
         gen_helper_mov_grpkr_write(tcg_env, tcg_constant_i32(op->source),
                                    ia64_gr_src(op->destination));
         ctx->restart.exit_after_bundle = true;
@@ -191,7 +191,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         ia64_gen_check_register_index(insn, ia64_gr_src(op->register_index),
                                       IA64_PKR_COUNT);
         ia64_gen_check_reserved_bits(insn, ia64_gr_src(op->destination),
-                                     IA64_PKR_MASK);
+                                     ia64_pkr_mask(ctx->env));
         gen_helper_mov_grpkr_indexed_write(
             tcg_env, ia64_gr_src(op->register_index),
             ia64_gr_src(op->destination));

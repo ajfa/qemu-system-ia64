@@ -60,16 +60,30 @@
 #define IA64_SUPPRESSED_TLB_MAX 4
 
 #define IA64_REGION_BITS 3
+/*
+ * Implementation limits.  These are the Itanium 2 values (251110-003 table
+ * 6-1: 50 physical address bits, 64 virtual address bits, and 8 region
+ * registers and 16 protection keys of 24 bits each); the original Itanium
+ * implements 44, 54, 18 and 21 respectively (245320-002 sec 3.2-3.4).  The
+ * per-model values live in IA64CPUClass and are cached into CPUArchState;
+ * these names remain as the Itanium 2 defaults and as the bound on anything
+ * that has to be sized at compile time.
+ */
 #define IA64_IMPL_PA_BITS 50
 /*
- * This CPU model exposes 64-bit virtual addressing: VA{60:0} plus the
- * three region bits VA{63:61}.
+ * Itanium 2 exposes 64-bit virtual addressing: VA{60:0} plus the three
+ * region bits VA{63:61}.
  */
 #define IA64_IMPL_VA_MSB 60
 #define IA64_IMPL_VA_BITS (IA64_IMPL_VA_MSB + 1 + IA64_REGION_BITS)
 #define IA64_PAL_IMPL_VA_MSB IA64_IMPL_VA_MSB
 #define IA64_IMPL_RID_BITS 24
 #define IA64_IMPL_KEY_BITS 24
+
+#define IA64_MERCED_IMPL_PA_BITS 44
+#define IA64_MERCED_IMPL_VA_MSB 50
+#define IA64_MERCED_IMPL_RID_BITS 18
+#define IA64_MERCED_IMPL_KEY_BITS 21
 
 #define IA64_PAL_DISPATCH_HALTED  (1U << 0)
 #define IA64_PAL_DISPATCH_EXIT_TB (1U << 1)
@@ -207,16 +221,17 @@ static inline uint64_t ia64_physical_address(uint64_t addr)
     return addr & ~IA64_PHYS_UC_BIT;
 }
 
-static inline bool ia64_pa_is_implemented(uint64_t addr)
+static inline bool ia64_pa_bits_implemented(uint8_t pa_bits, uint64_t addr)
 {
-    uint64_t implemented_mask = (1ULL << IA64_IMPL_PA_BITS) - 1;
+    uint64_t implemented_mask = (1ULL << pa_bits) - 1;
 
     return (addr & ~(IA64_PHYS_UC_BIT | implemented_mask)) == 0;
 }
 
-static inline uint64_t ia64_pa_canonicalize(uint64_t addr)
+static inline uint64_t ia64_pa_bits_canonicalize(uint8_t pa_bits,
+                                                 uint64_t addr)
 {
-    uint64_t implemented_mask = (1ULL << IA64_IMPL_PA_BITS) - 1;
+    uint64_t implemented_mask = (1ULL << pa_bits) - 1;
 
     return addr & (IA64_PHYS_UC_BIT | implemented_mask);
 }
@@ -944,7 +959,47 @@ typedef struct CPUArchState {
     uint64_t insertable_page_mask;
     uint64_t purgeable_page_mask;
 
+    /* Implementation limits, likewise copied out of the model. */
+    uint8_t impl_pa_bits;
+    uint8_t impl_va_msb;
+    uint8_t impl_rid_bits;
+    uint8_t impl_key_bits;
+
 } CPUIA64State;
+
+static inline bool ia64_pa_is_implemented(const CPUIA64State *env,
+                                          uint64_t addr)
+{
+    return ia64_pa_bits_implemented(env->impl_pa_bits, addr);
+}
+
+static inline uint64_t ia64_pa_canonicalize(const CPUIA64State *env,
+                                            uint64_t addr)
+{
+    return ia64_pa_bits_canonicalize(env->impl_pa_bits, addr);
+}
+
+/* Physical page-number field of a PTE, bounded by the implemented width. */
+static inline uint64_t ia64_pte_ppn_mask(const CPUIA64State *env)
+{
+    return (((1ULL << env->impl_pa_bits) - 1) & ~0xfffULL);
+}
+
+static inline uint64_t ia64_rid_mask(const CPUIA64State *env)
+{
+    return (1ULL << env->impl_rid_bits) - 1;
+}
+
+static inline uint64_t ia64_pkr_key_mask(const CPUIA64State *env)
+{
+    return ((1ULL << env->impl_key_bits) - 1) << IA64_PKR_KEY_SHIFT;
+}
+
+static inline uint64_t ia64_pkr_mask(const CPUIA64State *env)
+{
+    return IA64_PKR_VALID | IA64_PKR_WD | IA64_PKR_RD | IA64_PKR_XD |
+           ia64_pkr_key_mask(env);
+}
 
 void ia64_tlb_bump_generation(CPUIA64State *env, bool is_ifetch);
 const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
@@ -995,7 +1050,7 @@ ia64_key_exception_for_key(const CPUIA64State *env, uint32_t key,
         uint64_t pkr = env->pkr[i];
 
         if ((pkr & IA64_PKR_VALID) &&
-            (pkr & IA64_PKR_KEY_MASK) == pkr_key) {
+            (pkr & ia64_pkr_key_mask(env)) == pkr_key) {
             matched = true;
             disable_bits = pkr;
             break;
@@ -1545,6 +1600,11 @@ struct IA64CPUClass {
     /* Page sizes accepted by itr/itc/mov-to-RR, and by ptc/ptr. */
     uint64_t insertable_page_mask;
     uint64_t purgeable_page_mask;
+    /* Implemented physical/virtual address, region-ID and key widths. */
+    uint8_t impl_pa_bits;
+    uint8_t impl_va_msb;
+    uint8_t impl_rid_bits;
+    uint8_t impl_key_bits;
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;

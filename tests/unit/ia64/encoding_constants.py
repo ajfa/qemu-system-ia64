@@ -212,15 +212,25 @@ PAL_VM_SUMMARY_INFO_2 = IA64_PAL_IMPL_VA_MSB | (24 << 8)
 # ITLB and L1/L2 DTLB).  Those are the only fields that differ from the
 # default summary word.  SDM Vol. 2 figure 11-39 places max_dtr_entry
 # (bits 39:32) below max_itr_entry (bits 47:40).
+# 245320-002 sec 3.2-3.4: 44 physical address bits, 54 virtual address bits
+# (51 plus 3 region bits, so impl_va_msb is 50), 18-bit region IDs and
+# 21-bit protection keys, against Itanium 2's 50/64/24/24.
+IA64_MERCED_IMPL_PA_BITS = 44
+IA64_MERCED_IMPL_VA_MSB = 50
+IA64_MERCED_IMPL_RID_BITS = 18
+IA64_MERCED_IMPL_KEY_BITS = 21
 IA64_MERCED_ITR_COUNT = 8
 IA64_MERCED_DTR_COUNT = 48
 IA64_MERCED_UNIQUE_TCS = 3
-PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
+PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_IMPL_PA_BITS << 1) |
+                                (IA64_MERCED_IMPL_KEY_BITS << 8) |
                                 ((IA64_PKR_COUNT - 1) << 16) |
                                 (8 << 24) |
                                 ((IA64_MERCED_DTR_COUNT - 1) << 32) |
                                 ((IA64_MERCED_ITR_COUNT - 1) << 40) |
                                 (IA64_MERCED_UNIQUE_TCS << 48) | (2 << 56))
+PAL_VM_SUMMARY_INFO_2_MERCED = (IA64_PAL_IMPL_VA_MSB |
+                                (IA64_MERCED_IMPL_RID_BITS << 8))
 PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_16_3 = (16 << 32) | 3
 PAL_RATIO_4_1 = (4 << 32) | 1
@@ -510,6 +520,11 @@ __all__ = (
     'PAL_VM_SUMMARY_INFO_1_MERCED',
     'PAL_VM_SUMMARY_INFO_2',
     'IA64_MERCED_UNIQUE_TCS',
+    'IA64_MERCED_IMPL_PA_BITS',
+    'IA64_MERCED_IMPL_VA_MSB',
+    'IA64_MERCED_IMPL_RID_BITS',
+    'IA64_MERCED_IMPL_KEY_BITS',
+    'PAL_VM_SUMMARY_INFO_2_MERCED',
     'IA64_MERCED_ITR_COUNT',
     'IA64_MERCED_DTR_COUNT',
     'PAL_RATIO_16_1',

@@ -170,16 +170,16 @@ static void pal_vm_summary(CPUIA64State *env)
          * Itanium's asymmetric 8 ITR / 48 DTR file.
          */
         env->gr[IA64_PAL_GR_RESULT1] = 1ULL |
-                     ((uint64_t)IA64_IMPL_PA_BITS << 1) |
-                     ((uint64_t)IA64_IMPL_KEY_BITS << 8) |
+                     ((uint64_t)env->impl_pa_bits << 1) |
+                     ((uint64_t)env->impl_key_bits << 8) |
                      (((uint64_t)IA64_PKR_COUNT - 1ULL) << 16) |
                      (8ULL << 24) |
                      ((dtr_count - 1ULL) << 32) |
                      ((itr_count - 1ULL) << 40) |
                      ((uint64_t)pal->unique_tcs << 48) |
                      ((uint64_t)pal->tc_levels << 56);
-        env->gr[IA64_PAL_GR_RESULT2] = IA64_PAL_IMPL_VA_MSB |
-                      ((uint64_t)IA64_IMPL_RID_BITS << 8);
+        env->gr[IA64_PAL_GR_RESULT2] = (uint64_t)env->impl_va_msb |
+                      ((uint64_t)env->impl_rid_bits << 8);
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
@@ -398,9 +398,9 @@ static void pal_vm_page_size(CPUIA64State *env)
  * reported as an invalid argument.
  */
 /* Cache tags cover the whole implemented physical address. */
-static uint8_t pal_cache_tag_msb(void)
+static uint8_t pal_cache_tag_msb(const CPUIA64State *env)
 {
-    return IA64_IMPL_PA_BITS - 1;
+    return env->impl_pa_bits - 1;
 }
 
 static const IA64PalCacheLevel *
@@ -952,7 +952,7 @@ static void pal_cache_info(CPUIA64State *env)
     env->gr[IA64_PAL_GR_RESULT2] = info->size |
                   ((uint64_t)info->line_shift << 32) |
                   ((uint64_t)info->tag_lsb << 40) |
-                  ((uint64_t)pal_cache_tag_msb() << 48);
+                  ((uint64_t)pal_cache_tag_msb(env) << 48);
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
@@ -975,7 +975,7 @@ static void pal_cache_prot_info(CPUIA64State *env)
     }
 
     tag_none = (1U << 30) | ((uint32_t)info->tag_lsb << 8) |
-               ((uint32_t)pal_cache_tag_msb() << 14);
+               ((uint32_t)pal_cache_tag_msb(env) << 14);
     env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
     env->gr[IA64_PAL_GR_RESULT1] = data_none | ((uint64_t)tag_none << 32);
     env->gr[IA64_PAL_GR_RESULT2] = 0;

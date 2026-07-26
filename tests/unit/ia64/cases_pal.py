@@ -125,6 +125,7 @@ from .encoding import (
     PAL_VM_SUMMARY_INFO_1_MERCED,
     PAL_VM_SUMMARY_INFO_1,
     PAL_VM_SUMMARY_INFO_2,
+    PAL_VM_SUMMARY_INFO_2_MERCED,
     PAL_VM_TR_READ,
     addl,
     adds,
@@ -441,7 +442,8 @@ test_pal_freq_base_merced = require_registers(
 test_pal_vm_summary_merced = require_registers(
     "pal_vm_summary_merced", pal_call_program(PAL_VM_SUMMARY),
     {"ip": 0x30, "r28": PAL_VM_SUMMARY, "r8": 0,
-     "r9": PAL_VM_SUMMARY_INFO_1_MERCED, "r10": PAL_VM_SUMMARY_INFO_2},
+     "r9": PAL_VM_SUMMARY_INFO_1_MERCED,
+     "r10": PAL_VM_SUMMARY_INFO_2_MERCED},
     entry=0x10, cpu="merced")
 
 # The ITR and DTR files are bounded independently, so PAL_VM_TR_READ accepts
