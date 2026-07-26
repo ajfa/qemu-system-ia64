@@ -7,6 +7,8 @@ from .encoding import (
     IA64_CR_ITM,
     IA64_CR_ITV,
     IA64_EXCP_NONE,
+    IA64_MERCED_DTR_COUNT,
+    IA64_MERCED_ITR_COUNT,
     IA64_TR_COUNT,
     PAL_AR_IMPLEMENTED_HIGH,
     PAL_AR_IMPLEMENTED_LOW,
@@ -427,6 +429,34 @@ test_pal_vm_summary_merced = require_registers(
     "pal_vm_summary_merced", pal_call_program(PAL_VM_SUMMARY),
     {"ip": 0x30, "r28": PAL_VM_SUMMARY, "r8": 0,
      "r9": PAL_VM_SUMMARY_INFO_1_MERCED, "r10": PAL_VM_SUMMARY_INFO_2},
+    entry=0x10, cpu="merced")
+
+# The ITR and DTR files are bounded independently, so PAL_VM_TR_READ accepts
+# index 8 as a DTR (48 implemented) and rejects it as an ITR (8 implemented).
+# This pins the asymmetry behaviourally, independent of how vm_info_1 packs
+# max_itr_entry and max_dtr_entry.
+test_pal_vm_tr_read_merced_itr_bound = require_registers(
+    "pal_vm_tr_read_merced_itr_bound",
+    pal_stacked_call_program(PAL_VM_TR_READ, [IA64_MERCED_ITR_COUNT, 0,
+                                              0x2000]),
+    {"ip": 0x80, "r28": PAL_VM_TR_READ,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_vm_tr_read_merced_dtr_bound = require_registers(
+    "pal_vm_tr_read_merced_dtr_bound",
+    pal_stacked_call_program(PAL_VM_TR_READ, [IA64_MERCED_ITR_COUNT, 1,
+                                              0x2000]),
+    {"ip": 0x80, "r28": PAL_VM_TR_READ, "r8": 0,
+     "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_vm_tr_read_merced_dtr_limit = require_registers(
+    "pal_vm_tr_read_merced_dtr_limit",
+    pal_stacked_call_program(PAL_VM_TR_READ, [IA64_MERCED_DTR_COUNT, 1,
+                                              0x2000]),
+    {"ip": 0x80, "r28": PAL_VM_TR_READ,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="merced")
 
 # Procedures that post-date Merced return NOT_IMPLEMENTED on the merced model.
@@ -1382,6 +1412,9 @@ CASE_NAMES = (
     'pal_freq_ratios_merced',
     'pal_freq_base_merced',
     'pal_vm_summary_merced',
+    'pal_vm_tr_read_merced_itr_bound',
+    'pal_vm_tr_read_merced_dtr_bound',
+    'pal_vm_tr_read_merced_dtr_limit',
     'pal_prefetch_vis_merced_unimplemented',
     'pal_cache_shared_info_merced_unimplemented',
     'pal_brand_info_merced_unimplemented',

@@ -150,13 +150,22 @@ static void pal_vm_summary(CPUIA64State *env)
     g_assert(dtr_count > 0 && dtr_count <= IA64_TR_MAX);
     if (pal_reserved_args_are_zero(env)) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
+        /*
+         * vm_info_1 field placement follows SDM Vol. 2 figure 11-39:
+         * vw{0}, phys_add_size{7:1}, key_size{15:8}, max_pkr{23:16},
+         * hash_tag_id{31:24}, max_dtr_entry{39:32}, max_itr_entry{47:40},
+         * num_unique_tcs{55:48}, num_tc_levels{63:56}.  The data field comes
+         * first: the two were transposed here, which stayed invisible while
+         * every model had 64 of each and became live with the original
+         * Itanium's asymmetric 8 ITR / 48 DTR file.
+         */
         env->gr[IA64_PAL_GR_RESULT1] = 1ULL |
                      ((uint64_t)IA64_IMPL_PA_BITS << 1) |
                      ((uint64_t)IA64_IMPL_KEY_BITS << 8) |
                      (((uint64_t)IA64_PKR_COUNT - 1ULL) << 16) |
                      (8ULL << 24) |
-                     ((itr_count - 1ULL) << 32) |
-                     ((dtr_count - 1ULL) << 40) |
+                     ((dtr_count - 1ULL) << 32) |
+                     ((itr_count - 1ULL) << 40) |
                      (4ULL << 48) | (2ULL << 56);
         env->gr[IA64_PAL_GR_RESULT2] = IA64_PAL_IMPL_VA_MSB |
                       ((uint64_t)IA64_IMPL_RID_BITS << 8);

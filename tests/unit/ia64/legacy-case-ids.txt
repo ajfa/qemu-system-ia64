@@ -739,6 +739,9 @@ pal_vm_tr_read_dtr
 pal_vm_tr_read_empty
 pal_vm_tr_read_invalid
 pal_vm_tr_read_max_dtr
+pal_vm_tr_read_merced_dtr_bound
+pal_vm_tr_read_merced_dtr_limit
+pal_vm_tr_read_merced_itr_bound
 pal_vm_tr_read_misaligned_buffer
 pal_vm_tr_read_rejects_first_non_tr
 past_itm_does_not_fire

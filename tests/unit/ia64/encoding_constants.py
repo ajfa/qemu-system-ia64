@@ -199,15 +199,16 @@ PAL_VM_SUMMARY_INFO_1 = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                          ((IA64_TR_COUNT - 1) << 40) | (4 << 48) |
                          (2 << 56))
 PAL_VM_SUMMARY_INFO_2 = IA64_PAL_IMPL_VA_MSB | (24 << 8)
-# Merced reports 8 ITR / 48 DTR (248701-002 sec 2.5.6); only the max_itr/max_dtr
-# fields (bits 32:39 and 40:47) differ from the default summary word.
+# Merced reports 8 ITR / 48 DTR (248701-002 sec 2.5.6); only the max_dtr/max_itr
+# fields (bits 39:32 and 47:40) differ from the default summary word.  SDM Vol. 2
+# figure 11-39 places max_dtr_entry below max_itr_entry.
 IA64_MERCED_ITR_COUNT = 8
 IA64_MERCED_DTR_COUNT = 48
 PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                                 ((IA64_PKR_COUNT - 1) << 16) |
                                 (8 << 24) |
-                                ((IA64_MERCED_ITR_COUNT - 1) << 32) |
-                                ((IA64_MERCED_DTR_COUNT - 1) << 40) |
+                                ((IA64_MERCED_DTR_COUNT - 1) << 32) |
+                                ((IA64_MERCED_ITR_COUNT - 1) << 40) |
                                 (4 << 48) | (2 << 56))
 PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_16_3 = (16 << 32) | 3
