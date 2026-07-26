@@ -1655,23 +1655,28 @@ void ia64_gen_gr_nat_from_1(uint8_t dst, uint8_t src)
     ia64_gen_gr_nat_assign(dst, ia64_gen_gr_nat_read(src));
 }
 
-static TCGv_i64 ia64_gen_va_unimplemented(TCGv_i64 va)
+/*
+ * The implemented virtual address width is a property of the CPU model and
+ * is fixed from reset, so specialise on it at translation time.
+ */
+static TCGv_i64 ia64_gen_va_unimplemented(DisasContext *ctx, TCGv_i64 va)
 {
     TCGv_i64 result = tcg_temp_new_i64();
+    uint8_t va_msb = ctx->env->impl_va_msb;
 
-    if (IA64_IMPL_VA_MSB >= 60) {
+    if (va_msb >= 60) {
         tcg_gen_movi_i64(result, 0);
     } else {
         TCGv_i64 sign = tcg_temp_new_i64();
         TCGv_i64 expected = tcg_temp_new_i64();
-        uint64_t count = 60 - IA64_IMPL_VA_MSB;
+        uint64_t count = 60 - va_msb;
         uint64_t mask = (1ULL << count) - 1;
 
-        tcg_gen_shri_i64(sign, va, IA64_IMPL_VA_MSB);
+        tcg_gen_shri_i64(sign, va, va_msb);
         tcg_gen_andi_i64(sign, sign, 1);
         tcg_gen_neg_i64(expected, sign);
         tcg_gen_andi_i64(expected, expected, mask);
-        tcg_gen_shri_i64(result, va, IA64_IMPL_VA_MSB + 1);
+        tcg_gen_shri_i64(result, va, va_msb + 1);
         tcg_gen_andi_i64(result, result, mask);
         tcg_gen_xor_i64(result, result, expected);
         tcg_gen_setcondi_i64(TCG_COND_NE, result, result, 0);
@@ -1680,7 +1685,8 @@ static TCGv_i64 ia64_gen_va_unimplemented(TCGv_i64 va)
     return result;
 }
 
-void ia64_gen_gr_nat_from_1_or_unimplemented_va(uint8_t dst, uint8_t src)
+void ia64_gen_gr_nat_from_1_or_unimplemented_va(DisasContext *ctx,
+                                                uint8_t dst, uint8_t src)
 {
     TCGv_i64 nat;
     TCGv_i64 unimplemented;
@@ -1690,7 +1696,7 @@ void ia64_gen_gr_nat_from_1_or_unimplemented_va(uint8_t dst, uint8_t src)
     }
 
     nat = ia64_gen_gr_nat_read(src);
-    unimplemented = ia64_gen_va_unimplemented(ia64_gr_src(src));
+    unimplemented = ia64_gen_va_unimplemented(ctx, ia64_gr_src(src));
     tcg_gen_or_i64(nat, nat, unimplemented);
     ia64_gen_gr_nat_assign(dst, nat);
 }

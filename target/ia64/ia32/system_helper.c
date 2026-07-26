@@ -32,7 +32,7 @@ static uint64_t ia32_io_checked_address(CPUX86State *xenv, uint32_t port,
     CPUIA64State *env = (CPUIA64State *)xenv;
     uint64_t addr = ia32_io_address(env, port);
 
-    if (!ia64_va_is_implemented(addr)) {
+    if (!ia64_va_is_implemented(env, addr)) {
         raise_exception_err_ra(xenv, EXCP0D_GPF, 0, retaddr);
     }
     return addr;

@@ -441,14 +441,14 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
 
     /* A translated MMU index is itself the serialized translation state. */
     virt_translation_enabled = true;
-    if (virt_translation_enabled && !ia64_va_is_implemented(addr)) {
+    if (virt_translation_enabled && !ia64_va_is_implemented(&cpu->env, addr)) {
         if (probe) {
             return false;
         }
         excp = is_ifetch ? IA64_EXCP_UNIMPL_INST_ADDR :
                IA64_EXCP_UNIMPL_DATA_ADDR;
         if (is_ifetch) {
-            cpu->env.ip = ia64_va_canonicalize(addr);
+            cpu->env.ip = ia64_va_canonicalize(&cpu->env, addr);
         }
         goto raise_exception;
     }
@@ -1267,20 +1267,20 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
     .insertable_page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK,
     .purgeable_page_mask = IA64_MERCED_PURGEABLE_PAGE_SIZE_MASK,
     /*
-     * Merced implements 44 physical and 54 virtual address bits
-     * (245320-002 sec 3.2), but this machine cannot yet be described inside
-     * a 44-bit physical space: ia64-vpc places the PCI I/O port window at
-     * 0x8000_1000_0000 and the PAL I/O block at 0x8000_0C00_0000, both of
-     * which set bit 47.  Narrowing the width here makes the firmware's own
-     * UART and I/O accesses take Unimplemented Data Address faults before
-     * the loader ever runs.  Relocating those windows is a machine-wide
-     * change -- hw/ia64, the firmware and the ACPI _CRS all describe them --
-     * so until that lands these two keep the width this platform needs.  The
-     * region-ID and protection-key widths do not depend on the platform
+     * Merced implements 44 physical address bits (245320-002 sec 3.2), but
+     * this machine cannot yet be described inside a 44-bit physical space:
+     * ia64-vpc places the PCI I/O port window at 0x8000_1000_0000 and the
+     * PAL I/O block at 0x8000_0C00_0000, both of which set bit 47.
+     * Narrowing impl_pa_bits makes the firmware's own UART and I/O accesses
+     * take Unimplemented Data Address faults before the loader ever runs.
+     * Relocating those windows is a machine-wide change -- hw/ia64, the
+     * firmware and the ACPI _CRS all describe them -- so until that lands
+     * the physical width stays at what this platform needs.  The virtual
+     * width, region-ID width and key width do not depend on the platform
      * layout and are Merced's.
      */
     .impl_pa_bits = IA64_IMPL_PA_BITS,
-    .impl_va_msb = IA64_IMPL_VA_MSB,
+    .impl_va_msb = IA64_MERCED_IMPL_VA_MSB,
     .impl_rid_bits = IA64_MERCED_IMPL_RID_BITS,
     .impl_key_bits = IA64_MERCED_IMPL_KEY_BITS,
     .has_native_ia32 = true,

@@ -232,7 +232,7 @@ void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
 {
     uint64_t pa;
 
-    if ((env->psr & IA64_PSR_DT) && !ia64_va_is_implemented(addr)) {
+    if ((env->psr & IA64_PSR_DT) && !ia64_va_is_implemented(env, addr)) {
         ia64_raise_unimplemented_data_address(
             env, addr, IA64_ISR_R, true, false, ia64_current_code_tlb_ed(env));
     }
@@ -645,7 +645,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     perm = ia64_pte_perm(pte, 0);
     rid = ia64_region_rid(env, env->cr_ifa);
 
-    if (!ia64_va_is_implemented(env->cr_ifa)) {
+    if (!ia64_va_is_implemented(env, env->cr_ifa)) {
         ia64_raise_unimplemented_data_address(
             env, env->cr_ifa, 0, true, false, ia64_current_code_tlb_ed(env));
     }
@@ -715,7 +715,7 @@ void ia64_mmu_ptr_purge(CPUIA64State *env, uint64_t ifa, uint64_t size_reg,
     uint32_t rid = ia64_region_rid(env, ifa);
     uint16_t count;
 
-    if (!ia64_va_is_implemented(ifa)) {
+    if (!ia64_va_is_implemented(env, ifa)) {
         ia64_raise_unimplemented_data_address(
             env, ifa, 0, true, false, ia64_current_code_tlb_ed(env));
     }
@@ -792,7 +792,7 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
     uint32_t rid = ia64_region_rid(env, va);
     uint64_t ps = ia64_gr_page_size(size_reg);
 
-    if (!ia64_va_is_implemented(va)) {
+    if (!ia64_va_is_implemented(env, va)) {
         ia64_raise_unimplemented_data_address(
             env, va, 0, true, false, ia64_current_code_tlb_ed(env));
     }
@@ -861,7 +861,7 @@ uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
     const IA64TlbEntry *entry;
 
     if (env->psr & IA64_PSR_DT) {
-        if (!ia64_va_is_implemented(va)) {
+        if (!ia64_va_is_implemented(env, va)) {
             excp = IA64_EXCP_UNIMPL_DATA_ADDR;
             goto tpa_fault;
         }
@@ -961,7 +961,7 @@ static uint64_t ia64_probe_address(CPUIA64State *env, uint64_t va,
         return 1;
     }
 
-    if (!ia64_va_is_implemented(va)) {
+    if (!ia64_va_is_implemented(env, va)) {
         return 0;
     }
 
@@ -1052,7 +1052,7 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
         return IA64_EXCP_NONE;
     }
 
-    if (!ia64_va_is_implemented(va)) {
+    if (!ia64_va_is_implemented(env, va)) {
         return IA64_EXCP_UNIMPL_DATA_ADDR;
     }
 
@@ -1319,7 +1319,7 @@ static uint64_t ia64_probe_dt_disabled(CPUIA64State *env, uint64_t va,
     const IA64TlbEntry *entry;
     IA64Exception excp;
 
-    if (!ia64_va_is_implemented(va)) {
+    if (!ia64_va_is_implemented(env, va)) {
         return 0;
     }
 
@@ -2202,7 +2202,7 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
         return;
     }
 
-    if (!ia64_va_is_implemented(env->cr_ifa)) {
+    if (!ia64_va_is_implemented(env, env->cr_ifa)) {
         ia64_raise_unimplemented_data_address(
             env, env->cr_ifa, 0, true, false, ia64_current_code_tlb_ed(env));
     }

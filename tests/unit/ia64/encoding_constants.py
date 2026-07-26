@@ -229,7 +229,7 @@ PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_IMPL_PA_BITS << 1) |
                                 ((IA64_MERCED_DTR_COUNT - 1) << 32) |
                                 ((IA64_MERCED_ITR_COUNT - 1) << 40) |
                                 (IA64_MERCED_UNIQUE_TCS << 48) | (2 << 56))
-PAL_VM_SUMMARY_INFO_2_MERCED = (IA64_PAL_IMPL_VA_MSB |
+PAL_VM_SUMMARY_INFO_2_MERCED = (IA64_MERCED_IMPL_VA_MSB |
                                 (IA64_MERCED_IMPL_RID_BITS << 8))
 PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_16_3 = (16 << 32) | 3

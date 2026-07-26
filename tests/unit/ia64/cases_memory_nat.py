@@ -1267,6 +1267,55 @@ test_unimplemented_physical_load_faults = require_registers(
         "r10": 1 << IA64_IMPL_PA_BITS,
     }, entry=0x10)
 
+# 245320-002 sec 3.2: Merced implements 54 virtual address bits, so
+# VA{60:51} must sign-extend VA{50}.  A region-0 address with bit 51 set and
+# bit 50 clear is unimplemented there and takes a General Exception with
+# ISR.code 43, while Itanium 2 implements the full VA{60:0} and merely misses
+# in the TLB.
+MERCED_UNIMPLEMENTED_VA = 1 << 51
+
+test_unimplemented_virtual_load_faults_merced = require_registers(
+    "unimplemented_virtual_load_faults_merced", [
+        (0x10, *movl_mlx(3, MERCED_UNIMPLEMENTED_VA)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x00, mov_m_cr_gr(10, 20),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x30,
+                 IA64_GENERAL_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x50,
+        "r9": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R,
+        "r10": MERCED_UNIMPLEMENTED_VA,
+    }, entry=0x10, cpu="merced")
+
+# The same address on Itanium 2 is implemented, so it reaches translation and
+# takes an Alternate Data TLB fault instead.
+test_unimplemented_virtual_load_translates_madison = require_registers(
+    "unimplemented_virtual_load_translates_madison", [
+        (0x10, *movl_mlx(3, MERCED_UNIMPLEMENTED_VA)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR, 0x00, mov_m_cr_gr(10, 20), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_ALT_DTLB_VECTOR + 0x10,
+                 IA64_ALT_DTLB_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": MERCED_UNIMPLEMENTED_VA,
+    }, entry=0x10, cpu="madison")
+
 test_unimplemented_physical_precludes_unaligned = require_registers(
     "unimplemented_physical_precludes_unaligned", [
         (0x10, *movl_mlx(3, (1 << IA64_IMPL_PA_BITS) | 1)),
@@ -2652,6 +2701,8 @@ CASE_NAMES = (
     'tnat_nz_or_decode',
     'tnat_unc_same_pred_pred_false_illegal',
     'unimplemented_physical_load_faults',
+    'unimplemented_virtual_load_faults_merced',
+    'unimplemented_virtual_load_translates_madison',
     'unimplemented_physical_precludes_unaligned',
     'ws2003_cmd646_unaligned_check_load_sets_ed',
     'xchg4_decode',

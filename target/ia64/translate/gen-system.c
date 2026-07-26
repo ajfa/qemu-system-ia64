@@ -800,14 +800,14 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             gen_helper_thash(result, tcg_env, ia64_gr_src(op->register_index));
             if (op->destination != 0) {
                 tcg_gen_mov_i64(cpu_gr[op->destination], result);
-                ia64_gen_gr_nat_from_1_or_unimplemented_va(op->destination,
+                ia64_gen_gr_nat_from_1_or_unimplemented_va(ctx, op->destination,
                                                            op->register_index);
             }
         } else {
             gen_helper_ttag(result, tcg_env, ia64_gr_src(op->register_index));
             if (op->destination != 0) {
                 tcg_gen_mov_i64(cpu_gr[op->destination], result);
-                ia64_gen_gr_nat_from_1_or_unimplemented_va(op->destination,
+                ia64_gen_gr_nat_from_1_or_unimplemented_va(ctx, op->destination,
                                                            op->register_index);
             }
         }

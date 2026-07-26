@@ -127,7 +127,8 @@ void ia64_gen_check_nat_register(const Ia64Instruction *insn, uint8_t reg);
 void ia64_gen_check_nat_consumption(const Ia64Instruction *insn,
                                     uint8_t reg, uint64_t isr_access,
                                     Ia64NatConsumptionKind kind);
-void ia64_gen_gr_nat_from_1_or_unimplemented_va(uint8_t dst, uint8_t src);
+void ia64_gen_gr_nat_from_1_or_unimplemented_va(DisasContext *ctx,
+                                                uint8_t dst, uint8_t src);
 MemOp ia64_data_memop(DisasContext *ctx, MemOp memop);
 void ia64_gen_check_alignment_access(const Ia64Instruction *insn,
                                      TCGv_i64 addr, uint32_t size,

@@ -241,32 +241,30 @@ static inline uint64_t ia64_ip_bundle_addr(uint64_t ip)
     return ip & IA64_IP_BUNDLE_MASK;
 }
 
-static inline bool ia64_va_is_implemented(uint64_t va)
+static inline bool ia64_va_msb_implemented(uint8_t va_msb, uint64_t va)
 {
-    if (IA64_IMPL_VA_MSB >= 60) {
+    if (va_msb >= 60) {
         return true;
     }
 
     {
-        uint64_t count = 60 - IA64_IMPL_VA_MSB;
+        uint64_t count = 60 - va_msb;
         uint64_t mask = (1ULL << count) - 1;
-        uint64_t unimplemented = (va >> (IA64_IMPL_VA_MSB + 1)) & mask;
-        uint64_t expected = (va & (1ULL << IA64_IMPL_VA_MSB)) ? mask : 0;
+        uint64_t unimplemented = (va >> (va_msb + 1)) & mask;
+        uint64_t expected = (va & (1ULL << va_msb)) ? mask : 0;
 
         return unimplemented == expected;
     }
 }
 
-static inline uint64_t ia64_va_canonicalize(uint64_t va)
+static inline uint64_t ia64_va_msb_canonicalize(uint8_t va_msb, uint64_t va)
 {
     uint64_t region = va & (IA64_REGION_MASK << IA64_REGION_SHIFT);
-    uint64_t implemented_mask = (1ULL << (IA64_IMPL_VA_MSB + 1)) - 1;
+    uint64_t implemented_mask = (1ULL << (va_msb + 1)) - 1;
     uint64_t payload = va & implemented_mask;
 
-    if (IA64_IMPL_VA_MSB < 60 &&
-        (payload & (1ULL << IA64_IMPL_VA_MSB))) {
-        payload |= ((1ULL << (60 - IA64_IMPL_VA_MSB)) - 1) <<
-                   (IA64_IMPL_VA_MSB + 1);
+    if (va_msb < 60 && (payload & (1ULL << va_msb))) {
+        payload |= ((1ULL << (60 - va_msb)) - 1) << (va_msb + 1);
     }
 
     return region | payload;
@@ -977,6 +975,18 @@ static inline uint64_t ia64_pa_canonicalize(const CPUIA64State *env,
                                             uint64_t addr)
 {
     return ia64_pa_bits_canonicalize(env->impl_pa_bits, addr);
+}
+
+static inline bool ia64_va_is_implemented(const CPUIA64State *env,
+                                          uint64_t va)
+{
+    return ia64_va_msb_implemented(env->impl_va_msb, va);
+}
+
+static inline uint64_t ia64_va_canonicalize(const CPUIA64State *env,
+                                            uint64_t va)
+{
+    return ia64_va_msb_canonicalize(env->impl_va_msb, va);
 }
 
 /* Physical page-number field of a PTE, bounded by the implemented width. */

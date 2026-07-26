@@ -106,7 +106,7 @@ G_NORETURN void ia64_raise_unaligned(CPUIA64State *env, uint64_t addr,
                             uint64_t isr_access, uint64_t fault_info)
 {
     bool unimplemented = env->psr & IA64_PSR_DT ?
-                         !ia64_va_is_implemented(addr) :
+                         !ia64_va_is_implemented(env, addr) :
                          !ia64_pa_is_implemented(env, addr);
 
     /*
@@ -522,7 +522,7 @@ void ia64_cpu_do_interrupt(CPUState *cs)
             fault_addr = cpu->env.exception_state.fault_ip;
         } else {
             cpu->env.ip = cpu->env.psr & IA64_PSR_IT ?
-                          ia64_va_canonicalize(cpu->env.ip) :
+                          ia64_va_canonicalize(&cpu->env, cpu->env.ip) :
                           ia64_pa_canonicalize(&cpu->env, cpu->env.ip);
             fault_addr = cpu->env.ip;
         }
