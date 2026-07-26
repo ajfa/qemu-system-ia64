@@ -1592,9 +1592,10 @@ uint64_t ia64_mmu_thash(CPUIA64State *env, uint64_t va)
     return ia64_vhpt_hash_address(env, va);
 }
 
-static uint64_t ia64_implemented_va_payload(uint64_t va)
+static uint64_t ia64_implemented_va_payload(const CPUIA64State *env,
+                                            uint64_t va)
 {
-    return va & ((1ULL << (IA64_IMPL_VA_MSB + 1)) - 1);
+    return va & ((1ULL << (env->impl_va_msb + 1)) - 1);
 }
 
 static uint8_t ia64_region_preferred_ps(CPUIA64State *env, uint64_t va)
@@ -1616,18 +1617,33 @@ static bool ia64_vhpt_preferred_page_size_supported(CPUIA64State *env,
 
 static uint64_t ia64_vhpt_hpn(CPUIA64State *env, uint64_t va)
 {
-    return ia64_implemented_va_payload(va) >>
+    return ia64_implemented_va_payload(env, va) >>
            ia64_region_preferred_ps(env, va);
 }
+
+/*
+ * Long-format VHPT tag.  The function is implementation-specific; only the
+ * original Itanium's is published, in 245320-002 sec 5.5:
+ *
+ *   GR[r1] = (VA{50:0} >> RR.ps) ^ ((zero{5:0} || RR.RID{17:0}) << 39)
+ *
+ * Nothing equivalent is published for Itanium 2, so those models keep the
+ * function this fork has always used.
+ */
+#define IA64_MERCED_VHPT_TAG_RID_SHIFT 39
 
 static uint64_t ia64_vhpt_long_tag(CPUIA64State *env, uint64_t va)
 {
     uint8_t rr_ps = ia64_region_preferred_ps(env, va);
-    uint8_t hpn_bits = rr_ps > IA64_IMPL_VA_MSB ? 0 :
-                       IA64_IMPL_VA_MSB + 1 - rr_ps;
+    uint8_t hpn_bits;
     uint64_t hpn = ia64_vhpt_hpn(env, va);
     uint64_t rid = ia64_region_rid(env, va);
 
+    if (!ia64_env_cpu_class(env)->vhpt_hash_folds_hpn) {
+        return hpn ^ (rid << IA64_MERCED_VHPT_TAG_RID_SHIFT);
+    }
+
+    hpn_bits = rr_ps > env->impl_va_msb ? 0 : env->impl_va_msb + 1 - rr_ps;
     if (hpn_bits == 0) {
         return rid;
     }
@@ -1654,7 +1670,15 @@ static uint64_t ia64_vhpt_long_hash_address(CPUIA64State *env, uint64_t va,
     uint64_t base = env->cr_pta & IA64_PTA_BASE_MASK;
     uint64_t entries = 1ULL << (size - 5);
     uint64_t hpn = ia64_vhpt_hpn(env, va);
-    uint64_t hash = (hpn ^ (hpn >> 7) ^ ia64_region_rid(env, va)) &
+    /*
+     * 245320-002 sec 5.4 gives the original Itanium's hash as
+     * Hash_Index = HPN ^ (zero{63:18} || rid{17:0}), with no folded copy of
+     * HPN.  Itanium 2's function is not published, so those models keep the
+     * extra term this fork has always applied.
+     */
+    uint64_t folded = ia64_env_cpu_class(env)->vhpt_hash_folds_hpn ?
+                      hpn >> 7 : 0;
+    uint64_t hash = (hpn ^ folded ^ ia64_region_rid(env, va)) &
                     (entries - 1);
     uint64_t offset = hash << 5;
     uint64_t mask = (1ULL << size) - 1;

@@ -4744,6 +4744,37 @@ test_short_vhpt_thash_uses_implemented_va_bits = require_registers(
         "r21": 0x1fffff00001ff,
     }, entry=0x10)
 
+# 245320-002 sec 5.4 and 5.5 publish the original Itanium's long-format VHPT
+# hash and tag exactly:
+#   Hash_Index  = HPN ^ (zero{63:18} || rid{17:0}),  HPN = VA{50:0} >> RR.ps
+#   VHPT_Offset = Hash_Index << 5
+#   tag         = (VA{50:0} >> RR.ps) ^ ((zero{5:0} || RR.RID{17:0}) << 39)
+# with no folded copy of HPN in the index and no RID above 18 bits.  The
+# expected values below were computed from that pseudo-code by hand for
+# PTA base 0x80000000, size 20, vf=1; RR rid 0x2ab, ps 12; VA 0x12345000.
+MERCED_VHPT_PTA = 0x80000000 | (1 << 8) | (20 << 2) | 1
+MERCED_VHPT_RR = (0x2ab << 8) | (12 << 2) | 1
+MERCED_VHPT_VA = 0x12345000
+MERCED_VHPT_THASH = 0x80043dc0
+MERCED_VHPT_TTAG = 0x1558000012345
+
+test_long_vhpt_thash_ttag_merced = require_registers(
+    "long_vhpt_thash_ttag_merced", [
+        (0x10, *movl_mlx(16, MERCED_VHPT_PTA)),
+        (0x20, *movl_mlx(17, 0x0000000000000000)),
+        (0x30, *movl_mlx(18, MERCED_VHPT_RR)),
+        (0x40, *movl_mlx(19, MERCED_VHPT_VA)),
+        (0x50, 0x00, mov_m_gr_cr(16, 8), nop_i(), nop_i()),
+        (0x60, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0x70, 0x00, thash(20, 19), nop_i(), nop_i()),
+        (0x80, 0x00, ttag(21, 19), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "r20": MERCED_VHPT_THASH,
+        "r21": MERCED_VHPT_TTAG,
+    }, entry=0x10, cpu="merced")
+
 test_short_vhpt_thash_high_region_self_map = require_registers(
     "short_vhpt_thash_high_region_self_map", [
         (0x10, *movl_mlx(16, 0x1ffff000000000b1)),
@@ -6275,6 +6306,7 @@ CASE_NAMES = (
     'long_vhpt_table_tlb_miss_raises_vhpt_translation',
     'long_vhpt_uncacheable_table_aborts_to_dtlb_miss',
     'long_vhpt_unsupported_page_size_aborts_to_dtlb_miss',
+    'long_vhpt_thash_ttag_merced',
     'long_vhpt_walk_uses_dcr_byte_order',
     'long_vhpt_walk_uses_standard_entry_layout',
     'long_vhpt_walker_does_not_search_collision_chain',

@@ -1610,6 +1610,13 @@ struct IA64CPUClass {
     /* Page sizes accepted by itr/itc/mov-to-RR, and by ptc/ptr. */
     uint64_t insertable_page_mask;
     uint64_t purgeable_page_mask;
+    /*
+     * Long-format VHPT hash and tag shape.  True selects the function this
+     * fork has always used, which folds HPN>>7 into the hash index; false
+     * selects the original Itanium's published function (245320-002 sec 5.4
+     * and 5.5).
+     */
+    bool vhpt_hash_folds_hpn;
     /* Implemented physical/virtual address, region-ID and key widths. */
     uint8_t impl_pa_bits;
     uint8_t impl_va_msb;

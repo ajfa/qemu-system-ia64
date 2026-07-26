@@ -1157,6 +1157,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     icc->dtr_count = 64;
     icc->insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK;
     icc->purgeable_page_mask = IA64_PURGEABLE_PAGE_SIZE_MASK;
+    icc->vhpt_hash_folds_hpn = true;
     icc->impl_pa_bits = IA64_IMPL_PA_BITS;
     icc->impl_va_msb = IA64_IMPL_VA_MSB;
     icc->impl_rid_bits = IA64_IMPL_RID_BITS;
@@ -1178,6 +1179,7 @@ typedef struct IA64CPUModelDef {
     uint8_t impl_va_msb;
     uint8_t impl_rid_bits;
     uint8_t impl_key_bits;
+    bool vhpt_hash_folds_hpn;
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
@@ -1195,6 +1197,7 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->dtr_count = model->dtr_count;
     icc->insertable_page_mask = model->insertable_page_mask;
     icc->purgeable_page_mask = model->purgeable_page_mask;
+    icc->vhpt_hash_folds_hpn = model->vhpt_hash_folds_hpn;
     icc->impl_pa_bits = model->impl_pa_bits;
     icc->impl_va_msb = model->impl_va_msb;
     icc->impl_rid_bits = model->impl_rid_bits;
@@ -1223,6 +1226,7 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .impl_va_msb = IA64_IMPL_VA_MSB,
     .impl_rid_bits = IA64_IMPL_RID_BITS,
     .impl_key_bits = IA64_IMPL_KEY_BITS,
+    .vhpt_hash_folds_hpn = true,
     .has_native_ia32 = true,
     .has_virtualization = false,
     .pal = &ia64_pal_profile_madison,
@@ -1240,6 +1244,7 @@ static const IA64CPUModelDef ia64_cpu_model_montecito = {
     .impl_va_msb = IA64_IMPL_VA_MSB,
     .impl_rid_bits = IA64_IMPL_RID_BITS,
     .impl_key_bits = IA64_IMPL_KEY_BITS,
+    .vhpt_hash_folds_hpn = true,
     /*
      * Montecito implements the virtualization extensions, but this model
      * does not virtualize.  vmsw is decoded and reported as a Virtualization
@@ -1283,6 +1288,7 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
     .impl_va_msb = IA64_MERCED_IMPL_VA_MSB,
     .impl_rid_bits = IA64_MERCED_IMPL_RID_BITS,
     .impl_key_bits = IA64_MERCED_IMPL_KEY_BITS,
+    .vhpt_hash_folds_hpn = false,
     .has_native_ia32 = true,
     .has_virtualization = false,
     .is_montecito = false,
