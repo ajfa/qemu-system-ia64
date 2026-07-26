@@ -35,7 +35,25 @@
 
 #define IA64_DCR_LC     (1ULL << 2)
 
-#define SAL_REVISION                 0x0340U
+/*
+ * SST SAL_REV is BCD major.minor and must name a revision the specification
+ * actually defines.  245359-007 table 3-3 enumerates them: 3.2 (0x0320) is the
+ * December 2003 specification, 3.1 the November 2002 one, 3.0 the January/July
+ * 2001 pair, 2.9 July 2000 and 2.8 January 2000.  There is no 3.4, which is
+ * what this firmware used to report.
+ *
+ * Which one is truthful depends on the processor the machine is impersonating,
+ * so it is chosen at run time from CPUID[3].family (see fw_sal_revision()).
+ * A Merced platform is a SAL 3.0 platform: the SST template in the HP i2000's
+ * own firmware (bios130.BIN at file offset 0x37d120) reads "SST_" followed by
+ * minor 0x00, major 0x03.  Everything newer reports 3.2, which matches the
+ * procedure set this SAL implements.
+ */
+#define SAL_REVISION_3_0             0x0300U
+#define SAL_REVISION_3_2             0x0320U
+#define IA64_CPUID3_FAMILY_SHIFT     24U
+#define IA64_CPUID3_FAMILY_MASK      0xffU
+#define IA64_CPUID3_FAMILY_MERCED    0x07U
 #define SAL_TR_VIRTUAL_ADDRESS       0x0000000000000000ULL
 #define SAL_TR_PAGE_SHIFT            22U
 #define SAL_TR_ENCODED_PAGE_SIZE     (SAL_TR_PAGE_SHIFT << 2)
@@ -2922,6 +2940,21 @@ typedef struct {
 #define SAL_ERROR_RECORD_MIN_SIZE \
     (SAL_ERROR_RECORD_HEADER_SIZE + SAL_ERROR_SECTION_HEADER_SIZE)
 
+/*
+ * SAL revision advertised in the SST, chosen from the processor this machine
+ * is impersonating.  See the SAL_REVISION_* definitions for the rationale and
+ * the hardware cross-check.  It also selects the procedure set: a call that
+ * post-dates the advertised revision must not be offered.
+ */
+static UINT16 fw_sal_revision(void)
+{
+    UINT64 family = (fw_read_cpuid3() >> IA64_CPUID3_FAMILY_SHIFT) &
+                    IA64_CPUID3_FAMILY_MASK;
+
+    return family == IA64_CPUID3_FAMILY_MERCED ? SAL_REVISION_3_0 :
+                                                 SAL_REVISION_3_2;
+}
+
 typedef struct {
     UINT64 HandlerAddr1;
     UINT64 Gp1;
@@ -3800,7 +3833,18 @@ static SAL_RETURN_VALUE sal_proc_entry(UINT64 Index, UINT64 Arg1, UINT64 Arg2,
         goto out;
     }
 
+    /*
+     * SAL_PHYSICAL_ID_INFO arrived with the December 2003 specification
+     * (245359-007 revision history, "Added SAL_PHYSICAL_ID_INFO call"), so it
+     * exists only on a platform advertising SAL 3.2.  A SAL 3.0 platform --
+     * the Merced persona -- must report it as unimplemented rather than
+     * offering a call its own SST revision predates.
+     */
     if (FunctionId == SAL_PHYSICAL_ID_INFO) {
+        if (fw_sal_revision() < SAL_REVISION_3_2) {
+            ret = sal_return(SAL_STATUS_NOT_IMPLEMENTED, 0, 0, 0);
+            goto out;
+        }
         ret = sal_physical_id_info(Arg1, Arg2, Arg3, Arg4,
                                    Arg5, Arg6, Arg7);
         goto out;
@@ -4085,6 +4129,14 @@ UINT64 fw_read_psr(void)
 
     __asm__ volatile ("mov %0 = psr" : "=r"(psr));
     return psr;
+}
+
+UINT64 fw_read_cpuid3(void)
+{
+    UINT64 value;
+
+    __asm__ volatile ("mov %0 = cpuid[%1]" : "=r"(value) : "r"(3UL));
+    return value;
 }
 
 void fw_flush_instruction_cache(VOID *start, UINTN bytes)
@@ -14230,7 +14282,7 @@ static void efi_init_platform_tables(void)
 
     mSalSystemTable.Signature = EFI_SIGNATURE_32('S', 'S', 'T', '_');
     mSalSystemTable.Length = sizeof(mSalSystemTable);
-    mSalSystemTable.Revision = SAL_REVISION;
+    mSalSystemTable.Revision = fw_sal_revision();
     mSalSystemTable.EntryCount = 8;
     mSalSystemTable.Checksum = 0;
     for (i = 0; i < sizeof(mSalSystemTable.Reserved0); i++) {
@@ -14755,7 +14807,7 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
 
     if (mSalSystemTable.Signature != EFI_SIGNATURE_32('S', 'S', 'T', '_') ||
         mSalSystemTable.Length != sizeof(mSalSystemTable) ||
-        mSalSystemTable.Revision != SAL_REVISION ||
+        mSalSystemTable.Revision != fw_sal_revision() ||
         mSalSystemTable.EntryCount != 8 ||
         mSalSystemTable.MemoryDescriptors[0].Type != 1 ||
         mSalSystemTable.MemoryDescriptors[0].MemoryUsage !=

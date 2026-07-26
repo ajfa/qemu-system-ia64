@@ -57,6 +57,7 @@ void fw_copy_mem(VOID *destination, const VOID *source, UINTN length);
 UINT64 fw_read_itc(void);
 volatile UINT8 *fw_uart_reg(UINTN offset);
 UINT64 fw_read_psr(void);
+UINT64 fw_read_cpuid3(void);
 UINT64 fw_read_ivr(void);
 void fw_write_eoi(void);
 void fw_flush_instruction_cache(VOID *start, UINTN bytes);
