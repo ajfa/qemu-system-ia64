@@ -68,14 +68,15 @@ static uint64_t ia64_gr_page_size(uint64_t value)
                                      IA64_ITIR_PS_MASK);
 }
 
-static bool ia64_translation_insert_fields_valid(uint64_t pte, uint64_t itir)
+static bool ia64_translation_insert_fields_valid(const CPUIA64State *env,
+                                                 uint64_t pte, uint64_t itir)
 {
     uint8_t page_shift = (itir >> IA64_ITIR_PS_SHIFT) &
                          IA64_ITIR_PS_MASK;
     uint64_t itir_reserved = IA64_ITIR_RESERVED_MASK;
     uint8_t ma;
 
-    if (!ia64_page_shift_insertable(page_shift)) {
+    if (!ia64_page_shift_insertable(env, page_shift)) {
         return false;
     }
     if (!(pte & IA64_PTE_PRESENT)) {
@@ -628,7 +629,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
                                fault_slot);
         return;
     }
-    if (!ia64_translation_insert_fields_valid(pte, env->cr_itir)) {
+    if (!ia64_translation_insert_fields_valid(env, pte, env->cr_itir)) {
         env->cr_isr = 0x30;
         ia64_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
                                ia64_ip_bundle_addr(env->ip), raw,
@@ -1611,7 +1612,7 @@ static bool ia64_vhpt_preferred_page_size_supported(CPUIA64State *env,
     uint8_t rr_ps = (env->rr[ia64_rr_index(va)] >> IA64_ITIR_PS_SHIFT) &
                     IA64_ITIR_PS_MASK;
 
-    return ia64_page_shift_insertable(rr_ps);
+    return ia64_page_shift_insertable(env, rr_ps);
 }
 
 static uint64_t ia64_vhpt_hpn(CPUIA64State *env, uint64_t va)
@@ -1800,7 +1801,8 @@ static bool ia64_vhpt_pte_valid(uint64_t pte)
     return !(pte & IA64_PTE_RESERVED_MASK) && (ma == 0 || ma >= 4);
 }
 
-static bool ia64_vhpt_itir_valid(uint64_t pte, uint64_t itir)
+static bool ia64_vhpt_itir_valid(const CPUIA64State *env,
+                                 uint64_t pte, uint64_t itir)
 {
     uint8_t page_shift = (itir >> IA64_ITIR_PS_SHIFT) & IA64_ITIR_PS_MASK;
     uint64_t reserved_mask = IA64_ITIR_RESERVED_MASK;
@@ -1809,7 +1811,7 @@ static bool ia64_vhpt_itir_valid(uint64_t pte, uint64_t itir)
         reserved_mask &= 3;
     }
     return !(itir & reserved_mask) &&
-           ia64_page_shift_insertable(page_shift);
+           ia64_page_shift_insertable(env, page_shift);
 }
 
 static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
@@ -1853,7 +1855,7 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
             return false;
         }
         return ia64_vhpt_pte_valid(*pte) &&
-               ia64_vhpt_itir_valid(*pte, itir);
+               ia64_vhpt_itir_valid(env, *pte, itir);
     }
 }
 
@@ -2079,7 +2081,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
             goto long_miss;
         }
         if (!ia64_vhpt_pte_valid(translation) ||
-            !ia64_vhpt_itir_valid(translation, itir)) {
+            !ia64_vhpt_itir_valid(env, translation, itir)) {
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt reserved translation %c"
                           " va=0x%016" PRIx64 " rid=0x%06" PRIx32
@@ -2193,7 +2195,7 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
     int slot;
     bool purged;
 
-    if (!ia64_translation_insert_fields_valid(pte, env->cr_itir)) {
+    if (!ia64_translation_insert_fields_valid(env, pte, env->cr_itir)) {
         env->cr_isr = 0x30;
         ia64_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
                                ia64_ip_bundle_addr(env->ip), raw,

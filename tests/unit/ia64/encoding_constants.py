@@ -193,6 +193,14 @@ PAL_INSERTABLE_PAGE_SIZE_MASK = ((1 << 12) | (1 << 13) | (1 << 14) |
                                  (1 << 22) | (1 << 24) | (1 << 26) |
                                  (1 << 28) | (1 << 30) | (1 << 32))
 PAL_PURGE_PAGE_SIZE_MASK = PAL_INSERTABLE_PAGE_SIZE_MASK
+# Merced implements 4 KB..256 MB for insertion -- no 1 GB and no 4 GB -- and
+# additionally accepts 4 GB for purges (245473-002 sec 4.7).
+PAL_MERCED_INSERTABLE_PAGE_SIZE_MASK = ((1 << 12) | (1 << 13) | (1 << 14) |
+                                        (1 << 16) | (1 << 18) | (1 << 20) |
+                                        (1 << 22) | (1 << 24) | (1 << 26) |
+                                        (1 << 28))
+PAL_MERCED_PURGE_PAGE_SIZE_MASK = (PAL_MERCED_INSERTABLE_PAGE_SIZE_MASK |
+                                   (1 << 32))
 PAL_VM_SUMMARY_INFO_1 = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                          ((IA64_PKR_COUNT - 1) << 16) |
                          (8 << 24) | ((IA64_TR_COUNT - 1) << 32) |
@@ -496,6 +504,8 @@ __all__ = (
     'PAL_VERSION_VALUE',
     'PAL_INSERTABLE_PAGE_SIZE_MASK',
     'PAL_PURGE_PAGE_SIZE_MASK',
+    'PAL_MERCED_INSERTABLE_PAGE_SIZE_MASK',
+    'PAL_MERCED_PURGE_PAGE_SIZE_MASK',
     'PAL_VM_SUMMARY_INFO_1',
     'PAL_VM_SUMMARY_INFO_1_MERCED',
     'PAL_VM_SUMMARY_INFO_2',

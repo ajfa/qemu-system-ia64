@@ -65,6 +65,8 @@ from .encoding import (
     PAL_MC_RESUME,
     PAL_MEM_ATTRIB,
     PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    PAL_MERCED_INSERTABLE_PAGE_SIZE_MASK,
+    PAL_MERCED_PURGE_PAGE_SIZE_MASK,
     PAL_CACHE_INFO_MERCED_L0_D_1,
     PAL_CACHE_INFO_MERCED_L0_I_1,
     PAL_CACHE_INFO_MERCED_L0_I_2,
@@ -517,21 +519,21 @@ test_pal_vm_info_merced_l0_instruction = require_registers(
     pal_call_program(PAL_VM_INFO, [(29, 0), (30, 1), (31, 0)]),
     {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
      "r9": PAL_VM_INFO_MERCED_L0_I,
-     "r10": PAL_INSERTABLE_PAGE_SIZE_MASK}, entry=0x10, cpu="merced")
+     "r10": PAL_MERCED_INSERTABLE_PAGE_SIZE_MASK}, entry=0x10, cpu="merced")
 
 test_pal_vm_info_merced_l0_data = require_registers(
     "pal_vm_info_merced_l0_data",
     pal_call_program(PAL_VM_INFO, [(29, 0), (30, 2), (31, 0)]),
     {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
      "r9": PAL_VM_INFO_MERCED_L0_D,
-     "r10": PAL_INSERTABLE_PAGE_SIZE_MASK}, entry=0x10, cpu="merced")
+     "r10": PAL_MERCED_INSERTABLE_PAGE_SIZE_MASK}, entry=0x10, cpu="merced")
 
 test_pal_vm_info_merced_l1_data = require_registers(
     "pal_vm_info_merced_l1_data",
     pal_call_program(PAL_VM_INFO, [(29, 1), (30, 2), (31, 0)]),
     {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
      "r9": PAL_VM_INFO_MERCED_L1_D,
-     "r10": PAL_INSERTABLE_PAGE_SIZE_MASK}, entry=0x10, cpu="merced")
+     "r10": PAL_MERCED_INSERTABLE_PAGE_SIZE_MASK}, entry=0x10, cpu="merced")
 
 test_pal_vm_info_merced_l1_instruction_invalid = require_registers(
     "pal_vm_info_merced_l1_instruction_invalid",
@@ -539,6 +541,14 @@ test_pal_vm_info_merced_l1_instruction_invalid = require_registers(
     {"ip": 0x60, "r28": PAL_VM_INFO,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="merced")
+
+# Merced has neither 1 GB nor 4 GB pages for insertion, and takes 4 GB only
+# for purges (245473-002 sec 4.7).
+test_pal_vm_page_size_merced = require_registers(
+    "pal_vm_page_size_merced", pal_call_program(PAL_VM_PAGE_SIZE),
+    {"ip": 0x30, "r28": PAL_VM_PAGE_SIZE, "r8": 0,
+     "r9": PAL_MERCED_INSERTABLE_PAGE_SIZE_MASK,
+     "r10": PAL_MERCED_PURGE_PAGE_SIZE_MASK}, entry=0x10, cpu="merced")
 
 # PAL 8.8.30 is the C2 stepping's firmware version (249720-009).
 test_pal_version_merced = require_registers(
@@ -1509,6 +1519,7 @@ CASE_NAMES = (
     'pal_vm_info_merced_l0_data',
     'pal_vm_info_merced_l1_data',
     'pal_vm_info_merced_l1_instruction_invalid',
+    'pal_vm_page_size_merced',
     'pal_version_merced',
     'pal_vm_tr_read_merced_itr_bound',
     'pal_vm_tr_read_merced_dtr_bound',

@@ -797,6 +797,13 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     }
     memset(&cpu->env, 0, sizeof(cpu->env));
     /*
+     * Page sizes this model implements, cached out of the class so the MMU
+     * and VHPT paths do not reach for it on every check.  Must be restored
+     * after the memset above, on every reset.
+     */
+    cpu->env.insertable_page_mask = icc->insertable_page_mask;
+    cpu->env.purgeable_page_mask = icc->purgeable_page_mask;
+    /*
      * Bound of the persistent region-7 KSEG physical alias (see
      * ia64_sal_boot_identity_pa_type()): the loader/kernel reach top-of-RAM
      * structures through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE,
@@ -1100,17 +1107,17 @@ static const IA64PalProfile ia64_pal_profile_merced = {
             /* ITLB: single level, holds the instruction TRs. */
             [0] = { .num_entries = 64, .num_ways = 64, .num_sets = 1,
                     .reduced_by_trs = true,
-                    .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK },
+                    .page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK },
             /* DTLB1: a cache of DTLB2, holds no TRs. */
             [1] = { .num_entries = 32, .num_ways = 32, .num_sets = 1,
-                    .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK },
+                    .page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK },
         },
         [1] = {
             /* No second instruction TC level. */
             [1] = { .num_entries = 96, .num_ways = 96, .num_sets = 1,
                     .preferred_page_size_optimized = true,
                     .reduced_by_trs = true,
-                    .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK },
+                    .page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK },
         },
     },
 };
@@ -1144,6 +1151,8 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     icc->cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD;
     icc->itr_count = 64;
     icc->dtr_count = 64;
+    icc->insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK;
+    icc->purgeable_page_mask = IA64_PURGEABLE_PAGE_SIZE_MASK;
     icc->has_native_ia32 = true;
     icc->has_virtualization = false;
     icc->is_montecito = false;
@@ -1155,6 +1164,8 @@ typedef struct IA64CPUModelDef {
     uint64_t cpuid_features;
     uint8_t itr_count;
     uint8_t dtr_count;
+    uint64_t insertable_page_mask;
+    uint64_t purgeable_page_mask;
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
@@ -1170,6 +1181,8 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->cpuid_features = model->cpuid_features;
     icc->itr_count = model->itr_count;
     icc->dtr_count = model->dtr_count;
+    icc->insertable_page_mask = model->insertable_page_mask;
+    icc->purgeable_page_mask = model->purgeable_page_mask;
     icc->has_native_ia32 = model->has_native_ia32;
     icc->has_virtualization = model->has_virtualization;
     icc->is_montecito = model->is_montecito;
@@ -1188,6 +1201,8 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD,
     .itr_count = 64,
     .dtr_count = 64,
+    .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
+    .purgeable_page_mask = IA64_PURGEABLE_PAGE_SIZE_MASK,
     .has_native_ia32 = true,
     .has_virtualization = false,
     .pal = &ia64_pal_profile_madison,
@@ -1199,6 +1214,8 @@ static const IA64CPUModelDef ia64_cpu_model_montecito = {
     .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD | IA64_CPUID4_AO,
     .itr_count = 64,
     .dtr_count = 64,
+    .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
+    .purgeable_page_mask = IA64_PURGEABLE_PAGE_SIZE_MASK,
     /*
      * Montecito implements the virtualization extensions, but this model
      * does not virtualize.  vmsw is decoded and reported as a Virtualization
@@ -1223,6 +1240,8 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
     .cpuid_features = 0,
     .itr_count = 8,
     .dtr_count = 48,
+    .insertable_page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK,
+    .purgeable_page_mask = IA64_MERCED_PURGEABLE_PAGE_SIZE_MASK,
     .has_native_ia32 = true,
     .has_virtualization = false,
     .is_montecito = false,

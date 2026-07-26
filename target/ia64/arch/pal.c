@@ -380,8 +380,8 @@ static void pal_vm_page_size(CPUIA64State *env)
 {
     if (pal_reserved_args_are_zero(env)) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->gr[IA64_PAL_GR_RESULT1] = IA64_INSERTABLE_PAGE_SIZE_MASK;
-        env->gr[IA64_PAL_GR_RESULT2] = IA64_PURGEABLE_PAGE_SIZE_MASK;
+        env->gr[IA64_PAL_GR_RESULT1] = env->insertable_page_mask;
+        env->gr[IA64_PAL_GR_RESULT2] = env->purgeable_page_mask;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;

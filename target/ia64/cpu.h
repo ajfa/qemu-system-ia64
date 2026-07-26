@@ -331,11 +331,34 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 #define IA64_ITIR_PS_SHIFT   2
 #define IA64_ITIR_KEY_MASK   (0xffffffULL << 8)
 #define IA64_ITIR_KEY_SHIFT  8
+/*
+ * Architected page sizes an implementation may support, as a bit per log2
+ * size.  Which of these a processor actually implements is model-specific and
+ * lives in IA64CPUClass; these two names describe the Itanium 2 set, which is
+ * every architected size from 4 KB to 4 GB for both insertion and purging
+ * (251110-003 table 6-1 and sec 12.2).
+ */
 #define IA64_INSERTABLE_PAGE_SIZE_MASK \
     ((1ULL << 12) | (1ULL << 13) | (1ULL << 14) | (1ULL << 16) | \
      (1ULL << 18) | (1ULL << 20) | (1ULL << 22) | (1ULL << 24) | \
      (1ULL << 26) | (1ULL << 28) | (1ULL << 30) | (1ULL << 32))
 #define IA64_PURGEABLE_PAGE_SIZE_MASK IA64_INSERTABLE_PAGE_SIZE_MASK
+
+/*
+ * The original Itanium implements 4 KB through 256 MB for insertion -- it has
+ * neither 1 GB nor 4 GB pages -- and additionally accepts 4 GB for purges
+ * (245473-002 sec 4.7: "Page sizes supported by both are: 4k, 8k, 16k, 64k,
+ * 256k, 1M, 4M, 16M, 64M, and 256M.  Purges supported include all page sizes
+ * and 4G").  245320-002 sec 3.1 gives the same list without 64 MB; the
+ * microarchitecture reference is the more specific document about the TLBs
+ * themselves, so 64 MB is included here.
+ */
+#define IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK \
+    ((1ULL << 12) | (1ULL << 13) | (1ULL << 14) | (1ULL << 16) | \
+     (1ULL << 18) | (1ULL << 20) | (1ULL << 22) | (1ULL << 24) | \
+     (1ULL << 26) | (1ULL << 28))
+#define IA64_MERCED_PURGEABLE_PAGE_SIZE_MASK \
+    (IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK | (1ULL << 32))
 
 /* ---- General exception codes ---- */
 #define IA64_GENEX_UNIMPL_DATA_ADDR 43
@@ -914,6 +937,13 @@ typedef struct CPUArchState {
 
     IA64FPState fp;
 
+    /*
+     * Implemented page sizes, copied from the CPU model at realize time so
+     * the MMU and VHPT paths do not have to reach the class on every check.
+     */
+    uint64_t insertable_page_mask;
+    uint64_t purgeable_page_mask;
+
 } CPUIA64State;
 
 void ia64_tlb_bump_generation(CPUIA64State *env, bool is_ifetch);
@@ -1123,9 +1153,10 @@ static inline bool ia64_tlb_has_explicit_va_mapping(const IA64TlbEntry *tlb,
     return false;
 }
 
-static inline bool ia64_page_shift_insertable(uint8_t page_shift)
+static inline bool ia64_page_shift_insertable(const CPUIA64State *env,
+                                              uint8_t page_shift)
 {
-    return (IA64_INSERTABLE_PAGE_SIZE_MASK >> page_shift) & 1;
+    return (env->insertable_page_mask >> page_shift) & 1;
 }
 
 static inline uint32_t ia64_region_rid(const CPUIA64State *env, uint64_t va)
@@ -1511,6 +1542,9 @@ struct IA64CPUClass {
      */
     uint8_t itr_count;
     uint8_t dtr_count;
+    /* Page sizes accepted by itr/itc/mov-to-RR, and by ptc/ptr. */
+    uint64_t insertable_page_mask;
+    uint64_t purgeable_page_mask;
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;

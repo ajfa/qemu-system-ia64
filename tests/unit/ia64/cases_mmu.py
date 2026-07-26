@@ -3534,6 +3534,40 @@ test_itr_d_slot_uses_low_8_bits = require_registers(
         "r31": 0x4008430,
     }, entry=0x10)
 
+# 245473-002 sec 4.7: the original Itanium has no 1 GB page.  An itc.d whose
+# ITIR names one must be refused as a reserved field; Itanium 2 implements it
+# (251110-003 table 6-1) and takes the same insertion without faulting.
+ONE_GIGABYTE_ITIR = 30 << 2
+
+# require_exception() wraps the program in a stub that sets PSR.ic so the
+# fault is collected and vectored, but mov-to-CR on the interruption
+# registers is illegal while PSR.ic is set, so drop it around the ITIR and
+# IFA writes and restore it before the insertion.
+ONE_GIGABYTE_ITC_PROGRAM = (
+    (0x10, *movl_mlx(2, KEY_TEST_VA)),
+    (0x20, *movl_mlx(16, KEY_TEST_RR)),
+    (0x30, *movl_mlx(18, 0x0010000004000661)),
+    (0x40, *movl_mlx(7, ONE_GIGABYTE_ITIR)),
+    (0x50, 0x00, mov_rr_write(16, 0), nop_i(), nop_i()),
+    (0x60, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+    (0x70, 0x00, srlz_d(), nop_i(), nop_i()),
+    (0x80, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+    (0x90, 0x00, mov_m_gr_cr(2, 20), nop_i(), nop_i()),
+    (0xa0, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
+    (0xb0, 0x00, srlz_d(), nop_i(), nop_i()),
+    (0xc0, 0x00, itc_d(18), nop_i(), nop_i()),
+)
+
+test_itc_d_merced_rejects_1gb_page = require_exception(
+    "itc_d_merced_rejects_1gb_page", list(ONE_GIGABYTE_ITC_PROGRAM),
+    IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0xc0, entry=0x10, cpu="merced")
+
+test_itc_d_madison_accepts_1gb_page = require_registers(
+    "itc_d_madison_accepts_1gb_page", [
+        *ONE_GIGABYTE_ITC_PROGRAM,
+        (0xd0, 0x10, nop_m(), nop_i(), br_cond(0xd0, 0xd0)),
+    ], {"ip": 0xd0, "exception": IA64_EXCP_NONE}, entry=0x10, cpu="madison")
+
 test_itr_d_reserved_slot_faults = require_exception(
     "itr_d_reserved_slot_faults", [
         (0x10, *movl_mlx(18, 0x0010000004000661)),
@@ -6216,6 +6250,8 @@ CASE_NAMES = (
     'itr_d_cached_translation_survives_region_register_write',
     'itr_d_nat_slot_consumes',
     'itr_d_not_present_raises_page_fault',
+    'itc_d_madison_accepts_1gb_page',
+    'itc_d_merced_rejects_1gb_page',
     'itr_d_reserved_slot_faults',
     'itr_d_slot_replacement_keeps_old_translation_cached',
     'itr_d_slot_uses_low_8_bits',

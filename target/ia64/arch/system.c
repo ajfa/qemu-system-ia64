@@ -799,7 +799,7 @@ uint64_t ia64_system_validate_rr_value(CPUIA64State *env, uint64_t value,
     uint64_t allowed = 1ULL | (0x3fULL << 2) |
                        (((1ULL << IA64_IMPL_RID_BITS) - 1) << 8);
 
-    if ((value & ~allowed) || !ia64_page_shift_insertable(ps)) {
+    if ((value & ~allowed) || !ia64_page_shift_insertable(env, ps)) {
         env->cr_isr = 0x30;
         ia64_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
                                fault_ip, raw, slot);
