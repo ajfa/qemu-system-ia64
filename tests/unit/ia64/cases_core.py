@@ -1851,6 +1851,19 @@ test_brl_cond_mlx_decode = require_registers("brl_cond_mlx_decode", [
      br_cond(0x50, 0x50)),
 ], {"ip": 0x50, "r8": 0x5b}, entry=0x10)
 
+# 245319-002 Vol. 3, brl: the original Itanium does not implement long
+# branches and takes an Illegal Operation fault on one.  Presence is
+# advertised by CPUID[4].lb, which the merced model clears.
+test_brl_call_merced_illegal_operation = require_exception(
+    "brl_call_merced_illegal_operation", [
+        (0x10, *brl_call_mlx(6, 0x10, 0x40)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="merced")
+
+test_brl_cond_merced_illegal_operation = require_exception(
+    "brl_cond_merced_illegal_operation", [
+        (0x10, *brl_cond_mlx(0x10, 0x40)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="merced")
+
 test_brl_cond_mlx_no_stop_decode = require_registers(
     "brl_cond_mlx_no_stop_decode", [
         (0x10, *brl_cond_mlx(0x10, 0x40, template=0x04)),
@@ -2733,6 +2746,8 @@ CASE_NAMES = (
     'brl_call_mlx_decode',
     'brl_call_mlx_negative_lslot_decode',
     'brl_call_mlx_no_stop_decode',
+    'brl_call_merced_illegal_operation',
+    'brl_cond_merced_illegal_operation',
     'brl_cond_mlx_decode',
     'brl_cond_mlx_no_stop_decode',
     'brp_loop_imp_decode',
