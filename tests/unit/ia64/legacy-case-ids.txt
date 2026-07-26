@@ -621,6 +621,11 @@ pal_cache_info_l1_data
 pal_cache_info_l1_instruction
 pal_cache_info_l2_unified
 pal_cache_info_l2_unified_bad_type
+pal_cache_info_merced_l0_d
+pal_cache_info_merced_l0_i
+pal_cache_info_merced_l1_instruction_invalid
+pal_cache_info_merced_l1_unified
+pal_cache_info_merced_l2_unified
 pal_cache_init
 pal_cache_init_invalid
 pal_cache_line_init
@@ -723,6 +728,7 @@ pal_test_proc_healthy
 pal_test_proc_missing_cacheable_attr
 pal_unknown
 pal_version
+pal_version_merced
 pal_version_reserved_arg
 pal_vm_info
 pal_vm_info_invalid
@@ -730,6 +736,10 @@ pal_vm_info_l0_data
 pal_vm_info_l1_data
 pal_vm_info_l1_instruction
 pal_vm_info_l2_invalid
+pal_vm_info_merced_l0_data
+pal_vm_info_merced_l0_instruction
+pal_vm_info_merced_l1_data
+pal_vm_info_merced_l1_instruction_invalid
 pal_vm_page_size
 pal_vm_page_size_reserved_arg
 pal_vm_summary

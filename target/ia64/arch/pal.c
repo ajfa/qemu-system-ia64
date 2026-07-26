@@ -91,7 +91,6 @@
 #define IA64_L0_CACHE_LINE_SIZE    64ULL
 #define IA64_L1_CACHE_LINE_SIZE    128ULL
 #define IA64_L2_CACHE_LINE_SIZE    128ULL
-#define IA64_MONTECITO_L3_SIZE     (12ULL * MiB)
 #define IA64_MONTECITO_PACKAGE_CACHE_SIZE (24ULL * MiB)
 #define IA64_MONTECITO_FREQUENCY   1600000000ULL
 #define IA64_MONTECITO_BUS_FREQUENCY 533333333ULL
@@ -113,11 +112,21 @@ static uint64_t pal_stacked_arg(CPUIA64State *env, uint32_t arg)
 
 static void pal_get_version(CPUIA64State *env)
 {
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
+
     if (pal_reserved_args_are_zero(env)) {
+        /*
+         * SDM Vol. 2 figure 11-37: PAL_B_version{15:0}, PAL_vendor{31:24},
+         * PAL_A_version{47:32}.  Both the minimum and the current version
+         * report the same firmware; this model has only one.
+         */
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
         env->gr[IA64_PAL_GR_RESULT1] =
-            (2ULL << 40) | (0x23ULL << 32) | (1ULL << 24) |
-            (2ULL << 8) | 0x23ULL;
+            ((uint64_t)pal->pal_a_model << 40) |
+            ((uint64_t)pal->pal_a_revision << 32) |
+            ((uint64_t)pal->pal_vendor << 24) |
+            ((uint64_t)pal->pal_b_model << 8) |
+            (uint64_t)pal->pal_b_revision;
         env->gr[IA64_PAL_GR_RESULT2] = env->gr[IA64_PAL_GR_RESULT1];
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
@@ -143,6 +152,7 @@ static void pal_rse_info(CPUIA64State *env)
 
 static void pal_vm_summary(CPUIA64State *env)
 {
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
     uint64_t itr_count = ia64_env_cpu_class(env)->itr_count;
     uint64_t dtr_count = ia64_env_cpu_class(env)->dtr_count;
 
@@ -166,7 +176,8 @@ static void pal_vm_summary(CPUIA64State *env)
                      (8ULL << 24) |
                      ((dtr_count - 1ULL) << 32) |
                      ((itr_count - 1ULL) << 40) |
-                     (4ULL << 48) | (2ULL << 56);
+                     ((uint64_t)pal->unique_tcs << 48) |
+                     ((uint64_t)pal->tc_levels << 56);
         env->gr[IA64_PAL_GR_RESULT2] = IA64_PAL_IMPL_VA_MSB |
                       ((uint64_t)IA64_IMPL_RID_BITS << 8);
     } else {
@@ -355,8 +366,8 @@ static void pal_mem_attrib(CPUIA64State *env)
 {
     if (pal_reserved_args_are_zero(env)) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        /* WB and UC. */
-        env->gr[IA64_PAL_GR_RESULT1] = (1ULL << 0) | (1ULL << 4);
+        env->gr[IA64_PAL_GR_RESULT1] =
+            ia64_env_cpu_class(env)->pal->memory_attributes;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
@@ -379,83 +390,57 @@ static void pal_vm_page_size(CPUIA64State *env)
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
-typedef struct IA64PalCacheInfo {
-    bool unified;
-    uint8_t attribute;
-    uint8_t associativity;
-    uint8_t line_shift;
-    uint8_t stride_shift;
-    uint8_t store_latency;
-    uint8_t load_latency;
-    uint8_t tag_lsb;
-    uint8_t tag_msb;
-    uint32_t size;
-} IA64PalCacheInfo;
-
-static bool pal_cache_info_for_model(CPUIA64State *env, uint64_t level,
-                                     uint64_t type, IA64PalCacheInfo *info)
+/*
+ * PAL_CACHE_INFO and PAL_VM_INFO both index a (level, type) pair, where
+ * type 1 is the instruction side and type 2 the data or unified side.  The
+ * geometry differs per processor generation, so it lives in the model's PAL
+ * profile; a pair the processor does not implement is left zeroed there and
+ * reported as an invalid argument.
+ */
+/* Cache tags cover the whole implemented physical address. */
+static uint8_t pal_cache_tag_msb(void)
 {
-    bool montecito = ia64_env_cpu_class(env)->is_montecito;
+    return IA64_IMPL_PA_BITS - 1;
+}
 
-    if (type < 1 || type > 2 || level >= 3) {
-        return false;
+static const IA64PalCacheLevel *
+pal_cache_level_for_model(CPUIA64State *env, uint64_t level, uint64_t type)
+{
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
+    const IA64PalCacheLevel *entry;
+
+    if (type < 1 || type > IA64_PAL_CACHE_TYPES ||
+        level >= IA64_PAL_CACHE_LEVELS || level >= pal->cache_levels) {
+        return NULL;
     }
 
-    *info = (IA64PalCacheInfo) {
-        .tag_msb = IA64_IMPL_PA_BITS - 1,
-    };
+    entry = &pal->cache[level][type - 1];
+    return entry->size != 0 ? entry : NULL;
+}
 
-    switch (level) {
-    case 0:
-        info->attribute = 0;
-        info->associativity = 4;
-        info->line_shift = 6;
-        info->stride_shift = 6;
-        info->store_latency = type == 1 ? 0xff : 1;
-        info->load_latency = 1;
-        info->tag_lsb = 12;
-        info->size = 16 * KiB;
-        return true;
-    case 1:
-        if (!montecito && type != 2) {
-            return false;
-        }
-        info->unified = !montecito;
-        info->attribute = type == 1 ? 0 : 1;
-        info->associativity = 8;
-        info->line_shift = 7;
-        info->stride_shift = 7;
-        info->store_latency = type == 1 ? 0xff : 1;
-        info->load_latency = type == 1 ? 7 : 5;
-        info->tag_lsb = type == 1 ? 17 : 15;
-        info->size = type == 1 ? 1 * MiB : 256 * KiB;
-        return true;
-    case 2:
-        if (type != 2) {
-            return false;
-        }
-        info->unified = true;
-        info->attribute = 1;
-        info->associativity = 12;
-        info->line_shift = 7;
-        info->stride_shift = 7;
-        info->store_latency = 1;
-        info->load_latency = montecito ? 14 : 12;
-        info->tag_lsb = montecito ? 20 : 18;
-        info->size = montecito ? IA64_MONTECITO_L3_SIZE : 3 * MiB;
-        return true;
-    default:
-        g_assert_not_reached();
+static const IA64PalTcLevel *
+pal_tc_level_for_model(CPUIA64State *env, uint64_t level, uint64_t type)
+{
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
+    const IA64PalTcLevel *entry;
+
+    if (type < 1 || type > IA64_PAL_CACHE_TYPES ||
+        level >= IA64_PAL_CACHE_LEVELS || level >= pal->tc_levels) {
+        return NULL;
     }
+
+    entry = &pal->tc[level][type - 1];
+    return entry->num_entries != 0 ? entry : NULL;
 }
 
 static void pal_cache_summary(CPUIA64State *env)
 {
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
+
     if (pal_reserved_args_are_zero(env)) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->gr[IA64_PAL_GR_RESULT1] = 3;
-        env->gr[IA64_PAL_GR_RESULT2] =
-            ia64_env_cpu_class(env)->is_montecito ? 5 : 4;
+        env->gr[IA64_PAL_GR_RESULT1] = pal->cache_levels;
+        env->gr[IA64_PAL_GR_RESULT2] = pal->unique_caches;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
@@ -672,7 +657,6 @@ static void pal_logical_to_physical(CPUIA64State *env)
 static void pal_cache_shared_info(CPUIA64State *env)
 {
     IA64PalTopology topology;
-    IA64PalCacheInfo cache;
     uint64_t number = env->gr[IA64_PAL_GR_ARG3];
     uint32_t core_base;
     uint32_t shared;
@@ -686,8 +670,8 @@ static void pal_cache_shared_info(CPUIA64State *env)
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_NOT_IMPLEMENTED;
         return;
     }
-    if (!pal_cache_info_for_model(env, env->gr[IA64_PAL_GR_ARG1],
-                                  env->gr[IA64_PAL_GR_ARG2], &cache)) {
+    if (!pal_cache_level_for_model(env, env->gr[IA64_PAL_GR_ARG1],
+                                   env->gr[IA64_PAL_GR_ARG2])) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         return;
     }
@@ -946,10 +930,10 @@ static void pal_cache_info(CPUIA64State *env)
 {
     uint64_t level = env->gr[IA64_PAL_GR_ARG1];
     uint64_t cache_type = env->gr[IA64_PAL_GR_ARG2];
-    IA64PalCacheInfo info;
+    const IA64PalCacheLevel *info =
+        pal_cache_level_for_model(env, level, cache_type);
 
-    if (env->gr[IA64_PAL_GR_ARG3] != 0 ||
-        !pal_cache_info_for_model(env, level, cache_type, &info)) {
+    if (env->gr[IA64_PAL_GR_ARG3] != 0 || info == NULL) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
         env->gr[IA64_PAL_GR_RESULT2] = 0;
@@ -958,17 +942,17 @@ static void pal_cache_info(CPUIA64State *env)
     }
 
     env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-    env->gr[IA64_PAL_GR_RESULT1] = (info.unified ? 1ULL : 0ULL) |
-                 ((uint64_t)info.attribute << 1) |
-                 ((uint64_t)info.associativity << 8) |
-                 ((uint64_t)info.line_shift << 16) |
-                 ((uint64_t)info.stride_shift << 24) |
-                 ((uint64_t)info.store_latency << 32) |
-                 ((uint64_t)info.load_latency << 40);
-    env->gr[IA64_PAL_GR_RESULT2] = info.size |
-                  ((uint64_t)info.line_shift << 32) |
-                  ((uint64_t)info.tag_lsb << 40) |
-                  ((uint64_t)info.tag_msb << 48);
+    env->gr[IA64_PAL_GR_RESULT1] = (info->unified ? 1ULL : 0ULL) |
+                 ((uint64_t)info->attribute << 1) |
+                 ((uint64_t)info->associativity << 8) |
+                 ((uint64_t)info->line_shift << 16) |
+                 ((uint64_t)info->stride_shift << 24) |
+                 ((uint64_t)info->store_latency << 32) |
+                 ((uint64_t)info->load_latency << 40);
+    env->gr[IA64_PAL_GR_RESULT2] = info->size |
+                  ((uint64_t)info->line_shift << 32) |
+                  ((uint64_t)info->tag_lsb << 40) |
+                  ((uint64_t)pal_cache_tag_msb() << 48);
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
@@ -979,10 +963,10 @@ static void pal_cache_prot_info(CPUIA64State *env)
     uint64_t reserved = env->gr[IA64_PAL_GR_ARG3];
     uint32_t data_none = 64;
     uint32_t tag_none;
-    IA64PalCacheInfo info;
+    const IA64PalCacheLevel *info =
+        pal_cache_level_for_model(env, level, cache_type);
 
-    if (reserved != 0 ||
-        !pal_cache_info_for_model(env, level, cache_type, &info)) {
+    if (reserved != 0 || info == NULL) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
         env->gr[IA64_PAL_GR_RESULT2] = 0;
@@ -990,8 +974,8 @@ static void pal_cache_prot_info(CPUIA64State *env)
         return;
     }
 
-    tag_none = (1U << 30) | ((uint32_t)info.tag_lsb << 8) |
-               ((uint32_t)info.tag_msb << 14);
+    tag_none = (1U << 30) | ((uint32_t)info->tag_lsb << 8) |
+               ((uint32_t)pal_cache_tag_msb() << 14);
     env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
     env->gr[IA64_PAL_GR_RESULT1] = data_none | ((uint64_t)tag_none << 32);
     env->gr[IA64_PAL_GR_RESULT2] = 0;
@@ -1002,9 +986,9 @@ static void pal_vm_info(CPUIA64State *env)
 {
     uint64_t level = env->gr[IA64_PAL_GR_ARG1];
     uint64_t tc_type = env->gr[IA64_PAL_GR_ARG2];
+    const IA64PalTcLevel *tc = pal_tc_level_for_model(env, level, tc_type);
 
-    if (level > 1 || env->gr[IA64_PAL_GR_ARG3] != 0 ||
-        tc_type < 1 || tc_type > 2) {
+    if (env->gr[IA64_PAL_GR_ARG3] != 0 || tc == NULL) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
         env->gr[IA64_PAL_GR_RESULT2] = 0;
@@ -1012,15 +996,18 @@ static void pal_vm_info(CPUIA64State *env)
         return;
     }
 
+    /*
+     * tc_info layout, SDM Vol. 2 figure 11-38: num_sets{7:0},
+     * num_ways{15:8}, num_entries{31:16}, pf{32}, ut{33}, tr{34}.
+     */
     env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-    if (level == 0) {
-        env->gr[IA64_PAL_GR_RESULT1] = 1ULL | (32ULL << 8) | (32ULL << 16);
-        env->gr[IA64_PAL_GR_RESULT2] = 1ULL << 12;
-    } else {
-        env->gr[IA64_PAL_GR_RESULT1] = 1ULL | (128ULL << 8) | (128ULL << 16) |
-                     (1ULL << 32) | (1ULL << 34);
-        env->gr[IA64_PAL_GR_RESULT2] = IA64_INSERTABLE_PAGE_SIZE_MASK;
-    }
+    env->gr[IA64_PAL_GR_RESULT1] = (uint64_t)tc->num_sets |
+                 ((uint64_t)tc->num_ways << 8) |
+                 ((uint64_t)tc->num_entries << 16) |
+                 ((uint64_t)tc->preferred_page_size_optimized << 32) |
+                 ((uint64_t)tc->unified << 33) |
+                 ((uint64_t)tc->reduced_by_trs << 34);
+    env->gr[IA64_PAL_GR_RESULT2] = tc->page_mask;
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 

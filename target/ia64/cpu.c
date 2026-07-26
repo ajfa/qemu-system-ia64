@@ -8,6 +8,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
@@ -907,12 +908,74 @@ static const TCGCPUOps ia64_tcg_ops = {
  * their PAL responses stay bit-identical; only the merced profile differs.
  * All models report a 100 MHz PAL_FREQ_BASE and encode core/bus/ITC as ratios.
  */
+/*
+ * Memory attributes reported by PAL_MEM_ATTRIB: bit n is set for the memory
+ * attribute with encoding n (SDM Vol. 2 figure 11-34, encodings in sec 4.4).
+ * Both supported generations implement write-back, uncacheable, uncacheable
+ * exported and write-coalescing: 251110-003 sec 12.1 states it for Itanium 2
+ * ("supports WB, UC, and WC ... The UCE memory attribute is also supported"),
+ * and Merced's write-coalescing buffer has a chapter of its own in
+ * 245320-002 ch. 4.  This emulation implements all four identically on every
+ * model, so every model reports all four.
+ */
+#define IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC \
+    ((1ULL << IA64_PTE_MA_WB) | (1ULL << IA64_PTE_MA_UC) | \
+     (1ULL << IA64_PTE_MA_UCE) | (1ULL << IA64_PTE_MA_WC))
+
+/*
+ * Itanium 2 (Madison) translation caches, 251110-003 sec 6.1.1 and 6.1.2:
+ * a 32-entry fully associative L1 ITLB and L1 DTLB that "directly support
+ * only a 4KB-page size", over a 128-entry fully associative L2 ITLB and
+ * L2 DTLB, each of which may hold up to 64 translation registers and holds
+ * every architected page size.  Four unique TCs across two levels.
+ */
+#define IA64_PAL_TC_ITANIUM2_L1 \
+    { .num_entries = 32, .num_ways = 32, .num_sets = 1, \
+      .page_mask = 1ULL << 12 }
+#define IA64_PAL_TC_ITANIUM2_L2 \
+    { .num_entries = 128, .num_ways = 128, .num_sets = 1, \
+      .preferred_page_size_optimized = true, .reduced_by_trs = true, \
+      .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK }
+
 static const IA64PalProfile ia64_pal_profile_madison = {
     .freq_base_hz = 100000000ULL,
     .proc_ratio_num = 16, .proc_ratio_den = 1,   /* 1.6 GHz */
     .bus_ratio_num = 4,   .bus_ratio_den = 1,     /* 400 MHz */
     .itc_ratio_num = 2,   .itc_ratio_den = 1,     /* 200 MHz */
     .has_post_merced_pal = true,
+    .pal_vendor = 1,
+    .pal_a_model = 2, .pal_a_revision = 0x23,
+    .pal_b_model = 2, .pal_b_revision = 0x23,
+    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    .cache_levels = 3,
+    .unique_caches = 4,
+    .cache = {
+        [0] = {
+            [0] = { .size = 16 * KiB, .associativity = 4, .line_shift = 6,
+                    .stride_shift = 6, .store_latency = 0xff,
+                    .load_latency = 1, .tag_lsb = 12 },
+            [1] = { .size = 16 * KiB, .associativity = 4, .line_shift = 6,
+                    .stride_shift = 6, .store_latency = 1,
+                    .load_latency = 1, .tag_lsb = 12 },
+        },
+        /* Unified L2: reported on the data/unified type only. */
+        [1] = {
+            [1] = { .size = 256 * KiB, .associativity = 8, .line_shift = 7,
+                    .stride_shift = 7, .attribute = 1, .store_latency = 1,
+                    .load_latency = 5, .tag_lsb = 15, .unified = true },
+        },
+        [2] = {
+            [1] = { .size = 3 * MiB, .associativity = 12, .line_shift = 7,
+                    .stride_shift = 7, .attribute = 1, .store_latency = 1,
+                    .load_latency = 12, .tag_lsb = 18, .unified = true },
+        },
+    },
+    .tc_levels = 2,
+    .unique_tcs = 4,
+    .tc = {
+        [0] = { IA64_PAL_TC_ITANIUM2_L1, IA64_PAL_TC_ITANIUM2_L1 },
+        [1] = { IA64_PAL_TC_ITANIUM2_L2, IA64_PAL_TC_ITANIUM2_L2 },
+    },
 };
 
 static const IA64PalProfile ia64_pal_profile_montecito = {
@@ -921,13 +984,69 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
     .bus_ratio_num = 16,  .bus_ratio_den = 3,      /* 533.33 MHz */
     .itc_ratio_num = 2,   .itc_ratio_den = 1,      /* 200 MHz */
     .has_post_merced_pal = true,
+    .pal_vendor = 1,
+    .pal_a_model = 2, .pal_a_revision = 0x23,
+    .pal_b_model = 2, .pal_b_revision = 0x23,
+    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    .cache_levels = 3,
+    .unique_caches = 5,
+    .cache = {
+        [0] = {
+            [0] = { .size = 16 * KiB, .associativity = 4, .line_shift = 6,
+                    .stride_shift = 6, .store_latency = 0xff,
+                    .load_latency = 1, .tag_lsb = 12 },
+            [1] = { .size = 16 * KiB, .associativity = 4, .line_shift = 6,
+                    .stride_shift = 6, .store_latency = 1,
+                    .load_latency = 1, .tag_lsb = 12 },
+        },
+        /* Montecito splits L2 into separate instruction and data caches. */
+        [1] = {
+            [0] = { .size = 1 * MiB, .associativity = 8, .line_shift = 7,
+                    .stride_shift = 7, .store_latency = 0xff,
+                    .load_latency = 7, .tag_lsb = 17 },
+            [1] = { .size = 256 * KiB, .associativity = 8, .line_shift = 7,
+                    .stride_shift = 7, .attribute = 1, .store_latency = 1,
+                    .load_latency = 5, .tag_lsb = 15 },
+        },
+        [2] = {
+            [1] = { .size = 12 * MiB, .associativity = 12,
+                    .line_shift = 7, .stride_shift = 7, .attribute = 1,
+                    .store_latency = 1, .load_latency = 14, .tag_lsb = 20,
+                    .unified = true },
+        },
+    },
+    .tc_levels = 2,
+    .unique_tcs = 4,
+    .tc = {
+        [0] = { IA64_PAL_TC_ITANIUM2_L1, IA64_PAL_TC_ITANIUM2_L1 },
+        [1] = { IA64_PAL_TC_ITANIUM2_L2, IA64_PAL_TC_ITANIUM2_L2 },
+    },
 };
 
 /*
- * Original Itanium (Merced), 800 MHz / 133 MHz bus SKU (249634-002 datasheet;
- * CPUID table 249720-009).  brl is not implemented (cpuid_features = 0) and the
- * post-Merced PAL procedures are absent (245318-001/-002 §11.8).  See
- * plans/merced-model-notes.md for full citations.
+ * Original Itanium (Merced), 800 MHz / 133 MHz bus / 4 MB L3 SKU (249634-002
+ * datasheet; CPUID table 249720-009).  brl is not implemented
+ * (cpuid_features = 0) and the post-Merced PAL procedures are absent
+ * (245318-001/-002 §11.8).  See plans/merced-model-notes.md for full
+ * citations.
+ *
+ * Cache geometry, 245473-002 sec 4.1-4.4 and 248701-002 sec 2.5.4:
+ *   L1I  16 KB, 4-way, 32 B lines
+ *   L1D  16 KB, 4-way, 32 B lines, write-through, no write-allocate,
+ *        2-cycle integer load latency
+ *   L2   96 KB, 6-way, 64 B lines, write-back, write-allocate,
+ *        6-cycle integer load latency
+ *   L3   4 MB,  4-way, 64 B lines, 21-cycle integer load latency
+ * tag_lsb is the first tag bit above the index and offset: 128 sets of 32 B
+ * for the 16 KB caches (12), 256 sets of 64 B for L2 (14), 16384 sets of 64 B
+ * for L3 (20).
+ *
+ * Translation caches, 248701-002 sec 2.5.6: a single-level 64-entry fully
+ * associative ITLB holding the instruction TRs, and a two-level data TLB --
+ * a 32-entry DTLB1 that is not architecturally visible over a 96-entry DTLB2
+ * holding the data TRs.  Both data levels hold every architected page size
+ * (245473-002 sec 4.7).  That is three unique TCs across two levels, and
+ * there is no second instruction level.
  */
 static const IA64PalProfile ia64_pal_profile_merced = {
     .freq_base_hz = 100000000ULL,
@@ -936,6 +1055,64 @@ static const IA64PalProfile ia64_pal_profile_merced = {
     .itc_ratio_num = 2,   .itc_ratio_den = 1,       /* 200 MHz (ITC ratio not
                                                      * separately published) */
     .has_post_merced_pal = false,
+    /*
+     * PAL 8.8.30, the C2 stepping's firmware version (249720-009 revision
+     * history and the errata stepping/PAL-version matrix, which lists 6.6.21,
+     * 6.6.23, 6.6.24, 6.6.25, 6.6.26, 7.7.27, 7.7.28 and 8.8.30).  The split
+     * into PAL_A and PAL_B version fields is vendor-defined (SDM Vol. 2
+     * figure 11-37), but the third component is pinned by a guest: XP's EFI
+     * loader reads the byte at PAL_A_version{7:0} and refuses to boot below
+     * 0x23 (WXPSP1 NT/base/boot/efi/ia64/miscc.c:38-50 for the field layout,
+     * :356 and :407 for the minimum).  0x23 is itself one of the published
+     * versions, so that byte is the monotonic third component read as hex,
+     * and the leading pair tracks the stepping (C0 6.6, C1 7.7, C2 8.8).
+     */
+    .pal_vendor = 1,
+    .pal_a_model = 8, .pal_a_revision = 0x30,
+    .pal_b_model = 8, .pal_b_revision = 0x30,
+    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    .cache_levels = 3,
+    .unique_caches = 4,
+    .cache = {
+        [0] = {
+            [0] = { .size = 16 * KiB, .associativity = 4, .line_shift = 5,
+                    .stride_shift = 5, .store_latency = 0xff,
+                    .load_latency = 1, .tag_lsb = 12 },
+            [1] = { .size = 16 * KiB, .associativity = 4, .line_shift = 5,
+                    .stride_shift = 5, .store_latency = 1,
+                    .load_latency = 2, .tag_lsb = 12 },
+        },
+        [1] = {
+            [1] = { .size = 96 * KiB, .associativity = 6, .line_shift = 6,
+                    .stride_shift = 6, .attribute = 1, .store_latency = 1,
+                    .load_latency = 6, .tag_lsb = 14, .unified = true },
+        },
+        [2] = {
+            [1] = { .size = 4 * MiB, .associativity = 4, .line_shift = 6,
+                    .stride_shift = 6, .attribute = 1, .store_latency = 1,
+                    .load_latency = 21, .tag_lsb = 20, .unified = true },
+        },
+    },
+    .tc_levels = 2,
+    .unique_tcs = 3,
+    .tc = {
+        [0] = {
+            /* ITLB: single level, holds the instruction TRs. */
+            [0] = { .num_entries = 64, .num_ways = 64, .num_sets = 1,
+                    .reduced_by_trs = true,
+                    .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK },
+            /* DTLB1: a cache of DTLB2, holds no TRs. */
+            [1] = { .num_entries = 32, .num_ways = 32, .num_sets = 1,
+                    .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK },
+        },
+        [1] = {
+            /* No second instruction TC level. */
+            [1] = { .num_entries = 96, .num_ways = 96, .num_sets = 1,
+                    .preferred_page_size_optimized = true,
+                    .reduced_by_trs = true,
+                    .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK },
+        },
+    },
 };
 
 static void ia64_cpu_class_init(ObjectClass *oc, const void *data)

@@ -1423,6 +1423,42 @@ void ia64_cpu_reset_to_boot_info(IA64CPU *cpu);
  * geometry, PA/VA widths) stay shared in arch/pal.c and are not duplicated
  * here; add them to the profile when a model needs to differ.
  */
+/*
+ * One cache level as PAL_CACHE_INFO reports it.  Fields map directly onto the
+ * cache_info_1/cache_info_2 layouts of SDM Vol. 2 figures 11-6 and 11-7.
+ * A level is described once per cache type (1 = instruction, 2 = data or
+ * unified); an absent (level, type) pair has size == 0 and is rejected.
+ */
+typedef struct IA64PalCacheLevel {
+    uint32_t size;            /* bytes; 0 marks the pair as not implemented */
+    uint8_t  associativity;
+    uint8_t  line_shift;      /* log2 of the line size in bytes */
+    uint8_t  stride_shift;
+    uint8_t  attribute;       /* 0 = write-through, 1 = write-back */
+    uint8_t  store_latency;
+    uint8_t  load_latency;
+    uint8_t  tag_lsb;
+    bool     unified;
+} IA64PalCacheLevel;
+
+#define IA64_PAL_CACHE_LEVELS 3
+#define IA64_PAL_CACHE_TYPES  2   /* index 0 = instruction, 1 = data/unified */
+
+/*
+ * One translation cache as PAL_VM_INFO reports it, indexed the same way.
+ * num_entries == 0 marks a (level, type) pair the processor does not
+ * implement, for which PAL_VM_INFO must return an invalid-argument status.
+ */
+typedef struct IA64PalTcLevel {
+    uint16_t num_entries;
+    uint8_t  num_ways;        /* equals num_entries when fully associative */
+    uint8_t  num_sets;        /* 1 when fully associative */
+    bool     unified;
+    bool     preferred_page_size_optimized;
+    bool     reduced_by_trs;  /* installed TRs consume entries in this TC */
+    uint64_t page_mask;       /* page sizes usable by this TC */
+} IA64PalTcLevel;
+
 typedef struct IA64PalProfile {
     /* PAL_FREQ_BASE base clock in Hz. */
     uint64_t freq_base_hz;
@@ -1436,6 +1472,27 @@ typedef struct IA64PalProfile {
      * reports the Merced-era PAL surface (245318-001/-002 §11.8).
      */
     bool has_post_merced_pal;
+
+    /* PAL_VERSION: PAL_B/PAL_A model and revision, BCD (SDM Vol. 2 11.8). */
+    uint8_t pal_b_model, pal_b_revision;
+    uint8_t pal_vendor;
+    uint8_t pal_a_model, pal_a_revision;
+
+    /*
+     * PAL_MEM_ATTRIB: bit n set for each implemented memory-attribute
+     * encoding n (SDM Vol. 2 figure 11-34 and section 4.4).
+     */
+    uint64_t memory_attributes;
+
+    /* PAL_CACHE_INFO / PAL_CACHE_PROT_INFO geometry, and the summary counts. */
+    IA64PalCacheLevel cache[IA64_PAL_CACHE_LEVELS][IA64_PAL_CACHE_TYPES];
+    uint8_t cache_levels;
+    uint8_t unique_caches;
+
+    /* PAL_VM_INFO geometry, and the PAL_VM_SUMMARY counts derived from it. */
+    IA64PalTcLevel tc[IA64_PAL_CACHE_LEVELS][IA64_PAL_CACHE_TYPES];
+    uint8_t tc_levels;
+    uint8_t unique_tcs;
 } IA64PalProfile;
 
 struct IA64CPUClass {

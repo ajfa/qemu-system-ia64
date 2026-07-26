@@ -199,24 +199,29 @@ PAL_VM_SUMMARY_INFO_1 = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                          ((IA64_TR_COUNT - 1) << 40) | (4 << 48) |
                          (2 << 56))
 PAL_VM_SUMMARY_INFO_2 = IA64_PAL_IMPL_VA_MSB | (24 << 8)
-# Merced reports 8 ITR / 48 DTR (248701-002 sec 2.5.6); only the max_dtr/max_itr
-# fields (bits 39:32 and 47:40) differ from the default summary word.  SDM Vol. 2
-# figure 11-39 places max_dtr_entry below max_itr_entry.
+# Merced reports 8 ITR / 48 DTR (248701-002 sec 2.5.6), and three unique TCs
+# -- ITLB, DTLB1, DTLB2 -- over two levels, against Itanium 2's four (L1/L2
+# ITLB and L1/L2 DTLB).  Those are the only fields that differ from the
+# default summary word.  SDM Vol. 2 figure 11-39 places max_dtr_entry
+# (bits 39:32) below max_itr_entry (bits 47:40).
 IA64_MERCED_ITR_COUNT = 8
 IA64_MERCED_DTR_COUNT = 48
+IA64_MERCED_UNIQUE_TCS = 3
 PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                                 ((IA64_PKR_COUNT - 1) << 16) |
                                 (8 << 24) |
                                 ((IA64_MERCED_DTR_COUNT - 1) << 32) |
                                 ((IA64_MERCED_ITR_COUNT - 1) << 40) |
-                                (4 << 48) | (2 << 56))
+                                (IA64_MERCED_UNIQUE_TCS << 48) | (2 << 56))
 PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_16_3 = (16 << 32) | 3
 PAL_RATIO_4_1 = (4 << 32) | 1
 PAL_RATIO_4_3 = (4 << 32) | 3
 PAL_RATIO_8_1 = (8 << 32) | 1
 PAL_RATIO_2_1 = (2 << 32) | 1
-PAL_MEM_ATTRIB_WB_UC = (1 << 0) | (1 << 4)
+# WB(0), UC(4), UCE(5) and WC(6) are all implemented by both supported
+# generations (251110-003 sec 12.1; 245320-002 ch. 4 for Merced's WC buffer).
+PAL_MEM_ATTRIB_WB_UC_UCE_WC = (1 << 0) | (1 << 4) | (1 << 5) | (1 << 6)
 PAL_CACHE_INFO_L0_I_1 = ((4 << 8) | (6 << 16) |
                          (6 << 24) | (0xff << 32) | (1 << 40))
 PAL_CACHE_INFO_L0_D_1 = ((4 << 8) | (6 << 16) |
@@ -235,6 +240,36 @@ PAL_CACHE_INFO_L2_U_2 = (12 * 1024 * 1024 | (7 << 32) | (20 << 40) |
 PAL_VM_INFO_L0 = 1 | (32 << 8) | (32 << 16)
 PAL_VM_INFO_L1 = (1 | (128 << 8) | (128 << 16) |
                   (1 << 32) | (1 << 34))
+
+# --- Merced cache and TC geometry -------------------------------------------
+# L1I/L1D 16 KB 4-way 32 B lines; L2 unified 96 KB 6-way 64 B write-back;
+# L3 unified 4 MB 4-way 64 B (245473-002 sec 4.1-4.4, 248701-002 sec 2.5.4).
+# Integer load latencies: L1 2, L2 6, L3 21 (245473-002 sec 4.1, 4.3, 4.4).
+PAL_CACHE_INFO_MERCED_L0_I_1 = ((4 << 8) | (5 << 16) |
+                                (5 << 24) | (0xff << 32) | (1 << 40))
+PAL_CACHE_INFO_MERCED_L0_I_2 = (16384 | (5 << 32) | (12 << 40) |
+                                (IA64_IMPL_PA_BITS - 1 << 48))
+PAL_CACHE_INFO_MERCED_L0_D_1 = ((4 << 8) | (5 << 16) |
+                                (5 << 24) | (1 << 32) | (2 << 40))
+PAL_CACHE_INFO_MERCED_L1_U_1 = (1 | (1 << 1) | (6 << 8) | (6 << 16) |
+                                (6 << 24) | (1 << 32) | (6 << 40))
+PAL_CACHE_INFO_MERCED_L1_U_2 = (96 * 1024 | (6 << 32) | (14 << 40) |
+                                (IA64_IMPL_PA_BITS - 1 << 48))
+PAL_CACHE_INFO_MERCED_L2_U_1 = (1 | (1 << 1) | (4 << 8) | (6 << 16) |
+                                (6 << 24) | (1 << 32) | (21 << 40))
+PAL_CACHE_INFO_MERCED_L2_U_2 = (4 * 1024 * 1024 | (6 << 32) | (20 << 40) |
+                                (IA64_IMPL_PA_BITS - 1 << 48))
+# ITLB 64 entries holding the instruction TRs; DTLB1 32 entries holding none;
+# DTLB2 96 entries holding the data TRs (248701-002 sec 2.5.6).  All levels
+# hold every architected page size (245473-002 sec 4.7).
+PAL_VM_INFO_MERCED_L0_I = (1 | (64 << 8) | (64 << 16) | (1 << 34))
+PAL_VM_INFO_MERCED_L0_D = (1 | (32 << 8) | (32 << 16))
+PAL_VM_INFO_MERCED_L1_D = (1 | (96 << 8) | (96 << 16) |
+                           (1 << 32) | (1 << 34))
+# PAL 8.8.30, the C2 stepping's firmware (249720-009).  PAL_A_version{7:0}
+# must be at least 0x23 or XP's EFI loader refuses to boot.
+PAL_VERSION_VALUE_MERCED = ((8 << 40) | (0x30 << 32) | (1 << 24) |
+                            (8 << 8) | 0x30)
 PAL_CACHE_PROT_DATA_NONE = 64
 PAL_CACHE_PROT_TAG_NONE_L0 = (1 << 30) | (12 << 8) | (49 << 14)
 PAL_PLATFORM_INTERRUPT_BLOCK = 0
@@ -464,6 +499,7 @@ __all__ = (
     'PAL_VM_SUMMARY_INFO_1',
     'PAL_VM_SUMMARY_INFO_1_MERCED',
     'PAL_VM_SUMMARY_INFO_2',
+    'IA64_MERCED_UNIQUE_TCS',
     'IA64_MERCED_ITR_COUNT',
     'IA64_MERCED_DTR_COUNT',
     'PAL_RATIO_16_1',
@@ -472,7 +508,7 @@ __all__ = (
     'PAL_RATIO_4_3',
     'PAL_RATIO_8_1',
     'PAL_RATIO_2_1',
-    'PAL_MEM_ATTRIB_WB_UC',
+    'PAL_MEM_ATTRIB_WB_UC_UCE_WC',
     'PAL_CACHE_INFO_L0_I_1',
     'PAL_CACHE_INFO_L0_D_1',
     'PAL_CACHE_INFO_L0_2',
@@ -482,6 +518,17 @@ __all__ = (
     'PAL_CACHE_INFO_L1_D_2',
     'PAL_CACHE_INFO_L2_U_1',
     'PAL_CACHE_INFO_L2_U_2',
+    'PAL_CACHE_INFO_MERCED_L0_I_1',
+    'PAL_CACHE_INFO_MERCED_L0_I_2',
+    'PAL_CACHE_INFO_MERCED_L0_D_1',
+    'PAL_CACHE_INFO_MERCED_L1_U_1',
+    'PAL_CACHE_INFO_MERCED_L1_U_2',
+    'PAL_CACHE_INFO_MERCED_L2_U_1',
+    'PAL_CACHE_INFO_MERCED_L2_U_2',
+    'PAL_VM_INFO_MERCED_L0_I',
+    'PAL_VM_INFO_MERCED_L0_D',
+    'PAL_VM_INFO_MERCED_L1_D',
+    'PAL_VERSION_VALUE_MERCED',
     'PAL_VM_INFO_L0',
     'PAL_VM_INFO_L1',
     'PAL_CACHE_PROT_DATA_NONE',

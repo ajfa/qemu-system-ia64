@@ -64,7 +64,18 @@ from .encoding import (
     PAL_MC_REGISTER_MEM,
     PAL_MC_RESUME,
     PAL_MEM_ATTRIB,
-    PAL_MEM_ATTRIB_WB_UC,
+    PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    PAL_CACHE_INFO_MERCED_L0_D_1,
+    PAL_CACHE_INFO_MERCED_L0_I_1,
+    PAL_CACHE_INFO_MERCED_L0_I_2,
+    PAL_CACHE_INFO_MERCED_L1_U_1,
+    PAL_CACHE_INFO_MERCED_L1_U_2,
+    PAL_CACHE_INFO_MERCED_L2_U_1,
+    PAL_CACHE_INFO_MERCED_L2_U_2,
+    PAL_VERSION_VALUE_MERCED,
+    PAL_VM_INFO_MERCED_L0_D,
+    PAL_VM_INFO_MERCED_L0_I,
+    PAL_VM_INFO_MERCED_L1_D,
     PAL_MEM_FOR_TEST,
     PAL_PERF_BUFFER,
     PAL_PERF_MON_INFO,
@@ -459,6 +470,83 @@ test_pal_vm_tr_read_merced_dtr_limit = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="merced")
 
+# Merced cache hierarchy: 16 KB 4-way 32 B L1I/L1D, 96 KB 6-way 64 B unified
+# write-back L2, 4 MB 4-way 64 B unified L3 (245473-002 sec 4.1-4.4,
+# 248701-002 sec 2.5.4).  The unified levels are reported on the data type
+# only; the instruction type is an invalid argument there.
+test_pal_cache_info_merced_l0_i = require_registers(
+    "pal_cache_info_merced_l0_i",
+    pal_call_program(PAL_CACHE_INFO, [(29, 0), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
+     "r9": PAL_CACHE_INFO_MERCED_L0_I_1,
+     "r10": PAL_CACHE_INFO_MERCED_L0_I_2}, entry=0x10, cpu="merced")
+
+test_pal_cache_info_merced_l0_d = require_registers(
+    "pal_cache_info_merced_l0_d",
+    pal_call_program(PAL_CACHE_INFO, [(29, 0), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
+     "r9": PAL_CACHE_INFO_MERCED_L0_D_1,
+     "r10": PAL_CACHE_INFO_MERCED_L0_I_2}, entry=0x10, cpu="merced")
+
+test_pal_cache_info_merced_l1_unified = require_registers(
+    "pal_cache_info_merced_l1_unified",
+    pal_call_program(PAL_CACHE_INFO, [(29, 1), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
+     "r9": PAL_CACHE_INFO_MERCED_L1_U_1,
+     "r10": PAL_CACHE_INFO_MERCED_L1_U_2}, entry=0x10, cpu="merced")
+
+test_pal_cache_info_merced_l1_instruction_invalid = require_registers(
+    "pal_cache_info_merced_l1_instruction_invalid",
+    pal_call_program(PAL_CACHE_INFO, [(29, 1), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_cache_info_merced_l2_unified = require_registers(
+    "pal_cache_info_merced_l2_unified",
+    pal_call_program(PAL_CACHE_INFO, [(29, 2), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
+     "r9": PAL_CACHE_INFO_MERCED_L2_U_1,
+     "r10": PAL_CACHE_INFO_MERCED_L2_U_2}, entry=0x10, cpu="merced")
+
+# Merced TCs: 64-entry ITLB holding the instruction TRs, 32-entry DTLB1 with
+# none, 96-entry DTLB2 holding the data TRs, and no second instruction level
+# (248701-002 sec 2.5.6).
+test_pal_vm_info_merced_l0_instruction = require_registers(
+    "pal_vm_info_merced_l0_instruction",
+    pal_call_program(PAL_VM_INFO, [(29, 0), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
+     "r9": PAL_VM_INFO_MERCED_L0_I,
+     "r10": PAL_INSERTABLE_PAGE_SIZE_MASK}, entry=0x10, cpu="merced")
+
+test_pal_vm_info_merced_l0_data = require_registers(
+    "pal_vm_info_merced_l0_data",
+    pal_call_program(PAL_VM_INFO, [(29, 0), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
+     "r9": PAL_VM_INFO_MERCED_L0_D,
+     "r10": PAL_INSERTABLE_PAGE_SIZE_MASK}, entry=0x10, cpu="merced")
+
+test_pal_vm_info_merced_l1_data = require_registers(
+    "pal_vm_info_merced_l1_data",
+    pal_call_program(PAL_VM_INFO, [(29, 1), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
+     "r9": PAL_VM_INFO_MERCED_L1_D,
+     "r10": PAL_INSERTABLE_PAGE_SIZE_MASK}, entry=0x10, cpu="merced")
+
+test_pal_vm_info_merced_l1_instruction_invalid = require_registers(
+    "pal_vm_info_merced_l1_instruction_invalid",
+    pal_call_program(PAL_VM_INFO, [(29, 1), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_VM_INFO,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+# PAL 8.8.30 is the C2 stepping's firmware version (249720-009).
+test_pal_version_merced = require_registers(
+    "pal_version_merced", pal_call_program(PAL_VERSION),
+    {"ip": 0x30, "r28": PAL_VERSION, "r8": 0,
+     "r9": PAL_VERSION_VALUE_MERCED, "r10": PAL_VERSION_VALUE_MERCED},
+    entry=0x10, cpu="merced")
+
 # Procedures that post-date Merced return NOT_IMPLEMENTED on the merced model.
 test_pal_prefetch_vis_merced_unimplemented = require_registers(
     "pal_prefetch_vis_merced_unimplemented",
@@ -751,7 +839,7 @@ test_pal_cache_prot_info_unified_bad_type = require_registers(
 test_pal_mem_attrib = require_registers("pal_mem_attrib",
     pal_call_program(PAL_MEM_ATTRIB),
     {"ip": 0x30, "r28": PAL_MEM_ATTRIB, "r8": 0,
-     "r9": PAL_MEM_ATTRIB_WB_UC, "r10": 0, "r11": 0}, entry=0x10)
+     "r9": PAL_MEM_ATTRIB_WB_UC_UCE_WC, "r10": 0, "r11": 0}, entry=0x10)
 
 test_pal_mem_attrib_reserved_arg = require_registers(
     "pal_mem_attrib_reserved_arg",
@@ -1412,6 +1500,16 @@ CASE_NAMES = (
     'pal_freq_ratios_merced',
     'pal_freq_base_merced',
     'pal_vm_summary_merced',
+    'pal_cache_info_merced_l0_i',
+    'pal_cache_info_merced_l0_d',
+    'pal_cache_info_merced_l1_unified',
+    'pal_cache_info_merced_l1_instruction_invalid',
+    'pal_cache_info_merced_l2_unified',
+    'pal_vm_info_merced_l0_instruction',
+    'pal_vm_info_merced_l0_data',
+    'pal_vm_info_merced_l1_data',
+    'pal_vm_info_merced_l1_instruction_invalid',
+    'pal_version_merced',
     'pal_vm_tr_read_merced_itr_bound',
     'pal_vm_tr_read_merced_dtr_bound',
     'pal_vm_tr_read_merced_dtr_limit',
