@@ -128,6 +128,15 @@ static volatile UINT64 global_translation_probe[TEST_PROCESSOR_COUNT];
 static volatile UINT64
 translation_write_pages[TEST_PROCESSOR_COUNT][2][1024]
     __attribute__((aligned(8192)));
+/*
+ * Backing store for the hardware page walker exercise: one shared short-format
+ * VHPT page plus a private pair of data pages per processor.
+ */
+static volatile UINT64 vhpt_table[1024] __attribute__((aligned(8192)));
+static volatile UINT64
+vhpt_data_pages[TEST_PROCESSOR_COUNT][2][1024]
+    __attribute__((aligned(8192)));
+static volatile UINT64 vhpt_walker_mismatch[TEST_PROCESSOR_COUNT];
 
 static BOOLEAN translation_cache_churn_check(VOID);
 
@@ -193,6 +202,62 @@ static VOID install_data_tc_at(UINT64 Va, const volatile UINT64 *Page)
 static VOID install_data_tc(const volatile UINT64 *Page)
 {
     install_data_tc_at(TEST_TRANSLATION_VA, Page);
+}
+
+static VOID install_data_tr_mapping(UINT64 Slot, UINT64 Va, UINT64 Pa,
+                                    UINT64 Itir)
+{
+    UINT64 page_shift = (Itir >> 2) & 0x3fULL;
+    UINT64 page_mask = (1ULL << page_shift) - 1ULL;
+    UINT64 pte = (Pa & ~page_mask) | TEST_TRANSLATION_PTE_FLAGS;
+
+    __asm__ volatile ("rsm psr.ic;;\n\t"
+                      "srlz.d;;\n\t"
+                      "mov cr.ifa=%0\n\t"
+                      "mov cr.itir=%1;;\n\t"
+                      "itr.d dtr[%2]=%3;;\n\t"
+                      "srlz.d;;\n\t"
+                      "ssm psr.ic;;\n\t"
+                      "srlz.d;;"
+                      :
+                      : "r"(Va), "r"(Itir), "r"(Slot), "r"(pte)
+                      : "memory");
+}
+
+static VOID purge_data_tr_mapping(UINT64 Va, UINT64 Itir)
+{
+    __asm__ volatile ("ptr.d %0,%1;;\n\t"
+                      "srlz.d;;"
+                      :
+                      : "r"(Va), "r"(Itir)
+                      : "memory");
+}
+
+static UINT64 read_pta(VOID)
+{
+    UINT64 value;
+
+    __asm__ volatile ("mov %0=cr.pta;;" : "=r"(value) : : "memory");
+    return value;
+}
+
+static VOID write_pta(UINT64 Value)
+{
+    __asm__ volatile ("mov cr.pta=%0;;\n\t"
+                      "srlz.d;;"
+                      :
+                      : "r"(Value)
+                      : "memory");
+}
+
+static VOID purge_global_data_tc_at(UINT64 Va)
+{
+    __asm__ volatile ("ptc.ga %0,%1;;\n\t"
+                      "mf;;\n\t"
+                      "srlz.d;;"
+                      :
+                      : "r"(Va), "r"(TEST_TRANSLATION_ITIR)
+                      : "memory");
 }
 
 static VOID purge_data_tc_mapping(UINT64 Va, UINT64 Itir)
@@ -458,6 +523,106 @@ static BOOLEAN partial_translation_purge_check(VOID)
             load_translated_value(TEST_TRANSLATION_HIGH_OFFSET) ==
                 TEST_TRANSLATION_VALUE_B_HIGH;
     purge_data_tc();
+    return valid;
+}
+
+/*
+ * Hardware VHPT walker, short format, under four processors.
+ *
+ * Every other translation in this suite is installed by hand with itc, so the
+ * hardware page walker is never exercised.  An operating system does the
+ * opposite: Windows programs a short-format self-mapped VHPT and lets the
+ * walker fill translations, sizing the table from the implemented virtual
+ * address width as PTA.size = impl_va_msb - PAGE_SHIFT + PTE_SHIFT + 1
+ * (WXPSP1 NT/base/ntos/ke/ia64/initkr.c).  That is 51 on Itanium 2 and 41 on
+ * the original Itanium, whose implemented virtual address width is 54 bits --
+ * 51 offset bits plus 3 region bits, so impl_va_msb is 50 (245320-002 SDM
+ * Vol. 4 sec 3.2) against 60 on Itanium 2 (251110-003 table 6-1).  The walker
+ * is enabled by PTA.ve together with RR.ve for the region (245318-002 SDM
+ * Vol. 2 sec 4.1.4).
+ *
+ * Each processor drives a private virtual address whose short-format hash
+ * (VA{impl_va_msb:0} >> RR.ps) << 3 lands in the first page of the shared
+ * table, so one pinned data translation register covers the walker's own
+ * fetches and it can never recurse.  After the first fill the entry is
+ * repointed at a second page and purged globally, which is exactly the
+ * pattern an operating system produces when it remaps a page: a stale
+ * translation surviving the ptc.ga, or a refill that re-reads the old entry,
+ * shows up as the wrong value.
+ */
+/*
+ * The probe address carries the sign fill an operating system's kernel
+ * addresses have: on the original Itanium an implemented virtual address
+ * either has VA{60:51} clear, or has them all set with VA{50} set
+ * (245320-002 SDM Vol. 4 sec 3.2).  Windows' page-table window is in the
+ * second form, so use that shape rather than a small address whose upper
+ * bits are zero.  The resulting hash offset is large and model-dependent, so
+ * the table page's virtual address is computed at run time.
+ */
+#define TEST_VHPT_VA_BASE         0x3ffffe0000000000ULL
+#define TEST_VHPT_VA_STRIDE       0x10000ULL
+#define TEST_VHPT_DTR_SLOT        3ULL
+#define TEST_VHPT_PAGE_SHIFT      13ULL
+#define TEST_VHPT_PTE_SHIFT       3ULL
+#define TEST_MERCED_IMPL_VA_MSB   50ULL
+#define TEST_ITANIUM2_IMPL_VA_MSB 60ULL
+#define TEST_VHPT_VALUE_A         0x5a5a0000c0de0000ULL
+#define TEST_VHPT_VALUE_B         0xa5a50000feed0000ULL
+
+static UINT64 read_test_region_register(VOID);
+static VOID write_test_region_register(UINT64 Value);
+
+static UINT64 implemented_va_msb(VOID)
+{
+    UINT64 family = (read_cpuid_register(3) >> 24) & 0xffULL;
+
+    return family == TEST_CPUID3_FAMILY_MERCED ? TEST_MERCED_IMPL_VA_MSB :
+                                                 TEST_ITANIUM2_IMPL_VA_MSB;
+}
+
+static BOOLEAN vhpt_walker_check(UINTN Id)
+{
+    UINT64 saved_rr = read_test_region_register();
+    UINT64 saved_pta = read_pta();
+    UINT64 rid = implemented_rid_mask() - 4ULL - (UINT64)Id;
+    UINT64 rr = (rid << 8) | TEST_TRANSLATION_ITIR | 1ULL;
+    UINT64 size = implemented_va_msb() - TEST_VHPT_PAGE_SHIFT +
+                  TEST_VHPT_PTE_SHIFT + 1ULL;
+    UINT64 va = TEST_VHPT_VA_BASE + (UINT64)Id * TEST_VHPT_VA_STRIDE;
+    UINT64 payload = va & ((1ULL << (implemented_va_msb() + 1ULL)) - 1ULL);
+    UINT64 offset = ((payload >> TEST_VHPT_PAGE_SHIFT) << TEST_VHPT_PTE_SHIFT)
+                    & ((1ULL << size) - 1ULL);
+    UINT64 page_mask = (1ULL << TEST_VHPT_PAGE_SHIFT) - 1ULL;
+    /* PTA.base is left zero, so the entry lies at the hash offset. */
+    UINT64 entry_va = (va & (7ULL << 61)) | offset;
+    UINT64 table_va = entry_va & ~page_mask;
+    volatile UINT64 *entry =
+        &vhpt_table[(entry_va & page_mask) / sizeof(UINT64)];
+    volatile UINT64 *page_a = vhpt_data_pages[Id][0];
+    volatile UINT64 *page_b = vhpt_data_pages[Id][1];
+    BOOLEAN valid;
+
+    page_a[0] = TEST_VHPT_VALUE_A + Id;
+    page_b[0] = TEST_VHPT_VALUE_B + Id;
+
+    write_test_region_register(rr);
+    install_data_tr_mapping(TEST_VHPT_DTR_SLOT, table_va,
+                            (UINT64)(UINTN)vhpt_table,
+                            TEST_TRANSLATION_ITIR);
+
+    *entry = ((UINT64)(UINTN)page_a & ~page_mask) | TEST_TRANSLATION_PTE_FLAGS;
+    purge_global_data_tc_at(va);
+    write_pta((size << 2) | 1ULL);
+    valid = load_translated_value_at(va, 0) == page_a[0];
+
+    *entry = ((UINT64)(UINTN)page_b & ~page_mask) | TEST_TRANSLATION_PTE_FLAGS;
+    purge_global_data_tc_at(va);
+    valid = valid && load_translated_value_at(va, 0) == page_b[0];
+
+    write_pta(saved_pta);
+    purge_data_tc_at(va);
+    purge_data_tr_mapping(table_va, TEST_TRANSLATION_ITIR);
+    write_test_region_register(saved_rr);
     return valid;
 }
 
@@ -1317,6 +1482,9 @@ static VOID ap_rendezvous(void)
                 !translation_remap_word_store_check(id)) {
                 translation_write_mismatch[id]++;
             }
+            if (translation_round == 1 && !vhpt_walker_check(id)) {
+                vhpt_walker_mismatch[id]++;
+            }
             if (have_16byte_atomics()) {
                 atomic_increment_batch();
             }
@@ -1451,6 +1619,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     BOOLEAN big_endian_atomic;
 
     (void)ImageHandle;
+    for (id = 0; id < TEST_PROCESSOR_COUNT; id++) {
+        vhpt_walker_mismatch[id] = 0;
+    }
     atomic_pair.Low = 0;
     atomic_pair.High = TEST_ATOMIC_HIGH;
     guarded_lock = 0;
@@ -1508,6 +1679,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             }
             if (!translation_remap_word_store_check(0)) {
                 translation_write_mismatch[0]++;
+            }
+            if (!vhpt_walker_check(0)) {
+                vhpt_walker_mismatch[0]++;
             }
             if (have_16byte_atomics()) {
                 atomic_increment_batch();
@@ -1676,6 +1850,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     ia64_test_check(&context, "rid-translation-switch",
                     rid_translation_switch, EFI_DEVICE_ERROR,
                     "rid-switch-used-stale-translation");
+    translation_semantics = repeat_rounds;
+    for (id = 0; id < TEST_PROCESSOR_COUNT; id++) {
+        translation_semantics = translation_semantics &&
+                                vhpt_walker_mismatch[id] == 0;
+    }
+    ia64_test_check(&context, "vhpt-walker-global-refill",
+                    translation_semantics, EFI_DEVICE_ERROR,
+                    "walker-used-stale-translation");
     translation_semantics = repeat_rounds;
     for (id = 0; id < TEST_PROCESSOR_COUNT; id++) {
         translation_semantics = translation_semantics &&

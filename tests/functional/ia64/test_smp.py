@@ -27,7 +27,7 @@ SMP_CASES = {
     "contended-call-rse-guarded-word",
     "translated-cmpxchg-guarded-word",
     "high-large-page-translated-guarded-word",
-    "big-endian-16-byte-semaphore",
+    "big-endian-16-byte-semaphore", "vhpt-walker-global-refill",
 }
 
 
