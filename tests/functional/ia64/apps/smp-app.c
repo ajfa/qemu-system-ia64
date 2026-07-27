@@ -133,6 +133,10 @@ translation_write_pages[TEST_PROCESSOR_COUNT][2][1024]
  * VHPT page plus a private pair of data pages per processor.
  */
 static volatile UINT64 vhpt_table[1024] __attribute__((aligned(8192)));
+/* Per-processor table pages for the walker table-remap case. */
+static volatile UINT64
+vhpt_tables[TEST_PROCESSOR_COUNT][2][1024] __attribute__((aligned(8192)));
+static volatile UINT64 vhpt_remap_mismatch[TEST_PROCESSOR_COUNT];
 static volatile UINT64
 vhpt_data_pages[TEST_PROCESSOR_COUNT][2][1024]
     __attribute__((aligned(8192)));
@@ -622,6 +626,72 @@ static BOOLEAN vhpt_walker_check(UINTN Id)
     write_pta(saved_pta);
     purge_data_tc_at(va);
     purge_data_tr_mapping(table_va, TEST_TRANSLATION_ITIR);
+    write_test_region_register(saved_rr);
+    return valid;
+}
+
+/*
+ * The walker's own table fetch is an ordinary translated reference, so it has
+ * to see translation-cache updates for the page holding the entry.  An
+ * operating system relies on this: its page-table window is mapped by the
+ * page tables themselves, so the mapping of a table page changes as tables
+ * are built and torn down, and a walk that kept using a stale mapping would
+ * read a stale entry and install a wrong translation with no fault to show
+ * for it.
+ *
+ * Rather than pin the table, map it with a purgeable translation cache entry,
+ * repoint that entry at a second table page whose entry names a different
+ * data page, and re-read.  The walker must fetch through the new mapping.
+ * Each processor keeps its own pair of table pages so the four run
+ * independently.
+ */
+static BOOLEAN vhpt_walker_table_remap_check(UINTN Id)
+{
+    UINT64 saved_rr = read_test_region_register();
+    UINT64 saved_pta = read_pta();
+    UINT64 rid = implemented_rid_mask() - 8ULL - (UINT64)Id;
+    UINT64 rr = (rid << 8) | TEST_TRANSLATION_ITIR | 1ULL;
+    UINT64 size = implemented_va_msb() - TEST_VHPT_PAGE_SHIFT +
+                  TEST_VHPT_PTE_SHIFT + 1ULL;
+    UINT64 va = TEST_VHPT_VA_BASE + (UINT64)Id * TEST_VHPT_VA_STRIDE;
+    UINT64 payload = va & ((1ULL << (implemented_va_msb() + 1ULL)) - 1ULL);
+    UINT64 offset = ((payload >> TEST_VHPT_PAGE_SHIFT) << TEST_VHPT_PTE_SHIFT)
+                    & ((1ULL << size) - 1ULL);
+    UINT64 page_mask = (1ULL << TEST_VHPT_PAGE_SHIFT) - 1ULL;
+    UINT64 entry_va = (va & (7ULL << 61)) | offset;
+    UINT64 table_va = entry_va & ~page_mask;
+    UINTN index = (UINTN)((entry_va & page_mask) / sizeof(UINT64));
+    volatile UINT64 *table_a = vhpt_tables[Id][0];
+    volatile UINT64 *table_b = vhpt_tables[Id][1];
+    volatile UINT64 *page_a = vhpt_data_pages[Id][0];
+    volatile UINT64 *page_b = vhpt_data_pages[Id][1];
+    BOOLEAN valid;
+
+    page_a[0] = TEST_VHPT_VALUE_A + Id;
+    page_b[0] = TEST_VHPT_VALUE_B + Id;
+    table_a[index] =
+        ((UINT64)(UINTN)page_a & ~page_mask) | TEST_TRANSLATION_PTE_FLAGS;
+    table_b[index] =
+        ((UINT64)(UINTN)page_b & ~page_mask) | TEST_TRANSLATION_PTE_FLAGS;
+
+    write_test_region_register(rr);
+    purge_global_data_tc_at(table_va);
+    purge_global_data_tc_at(va);
+    install_data_tc_mapping(table_va, (UINT64)(UINTN)table_a,
+                            TEST_TRANSLATION_ITIR);
+    write_pta((size << 2) | 1ULL);
+    valid = load_translated_value_at(va, 0) == page_a[0];
+
+    /* Repoint the table itself, not just its contents. */
+    purge_global_data_tc_at(table_va);
+    install_data_tc_mapping(table_va, (UINT64)(UINTN)table_b,
+                            TEST_TRANSLATION_ITIR);
+    purge_global_data_tc_at(va);
+    valid = valid && load_translated_value_at(va, 0) == page_b[0];
+
+    write_pta(saved_pta);
+    purge_data_tc_at(va);
+    purge_data_tc_at(table_va);
     write_test_region_register(saved_rr);
     return valid;
 }
@@ -1485,6 +1555,10 @@ static VOID ap_rendezvous(void)
             if (translation_round == 1 && !vhpt_walker_check(id)) {
                 vhpt_walker_mismatch[id]++;
             }
+            if (translation_round == 1 &&
+                !vhpt_walker_table_remap_check(id)) {
+                vhpt_remap_mismatch[id]++;
+            }
             if (have_16byte_atomics()) {
                 atomic_increment_batch();
             }
@@ -1621,6 +1695,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     (void)ImageHandle;
     for (id = 0; id < TEST_PROCESSOR_COUNT; id++) {
         vhpt_walker_mismatch[id] = 0;
+        vhpt_remap_mismatch[id] = 0;
     }
     atomic_pair.Low = 0;
     atomic_pair.High = TEST_ATOMIC_HIGH;
@@ -1682,6 +1757,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             }
             if (!vhpt_walker_check(0)) {
                 vhpt_walker_mismatch[0]++;
+            }
+            if (!vhpt_walker_table_remap_check(0)) {
+                vhpt_remap_mismatch[0]++;
             }
             if (have_16byte_atomics()) {
                 atomic_increment_batch();
@@ -1858,6 +1936,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     ia64_test_check(&context, "vhpt-walker-global-refill",
                     translation_semantics, EFI_DEVICE_ERROR,
                     "walker-used-stale-translation");
+    translation_semantics = repeat_rounds;
+    for (id = 0; id < TEST_PROCESSOR_COUNT; id++) {
+        translation_semantics = translation_semantics &&
+                                vhpt_remap_mismatch[id] == 0;
+    }
+    ia64_test_check(&context, "vhpt-walker-table-remap",
+                    translation_semantics, EFI_DEVICE_ERROR,
+                    "walker-used-stale-table-mapping");
     translation_semantics = repeat_rounds;
     for (id = 0; id < TEST_PROCESSOR_COUNT; id++) {
         translation_semantics = translation_semantics &&
