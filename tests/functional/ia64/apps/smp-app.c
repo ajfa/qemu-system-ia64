@@ -36,8 +36,8 @@
 #define TEST_TRANSLATION_GLOBAL_HIGH_COMMAND 2U
 #define TEST_GLOBAL_PURGE_ROUND (TEST_RENDEZVOUS_ROUNDS + 1U)
 #define TEST_GLOBAL_HIGH_PURGE_ROUND (TEST_RENDEZVOUS_ROUNDS + 2U)
-#define TEST_TRANSLATION_RID_A 0x00ffffeULL
-#define TEST_TRANSLATION_RID_B 0x00ffffdULL
+#define TEST_TRANSLATION_RID_A (implemented_rid_mask() - 1ULL)
+#define TEST_TRANSLATION_RID_B (implemented_rid_mask() - 2ULL)
 #define TEST_RID_SWITCH_ROUNDS 4096U
 #define TEST_TLB_CHURN_BASE 0xe000020001000000ULL
 #define TEST_TLB_CHURN_ENTRIES 192U
@@ -130,6 +130,40 @@ translation_write_pages[TEST_PROCESSOR_COUNT][2][1024]
     __attribute__((aligned(8192)));
 
 static BOOLEAN translation_cache_churn_check(VOID);
+
+/*
+ * CPUID register 3 carries the processor family and register 4 the general
+ * feature bits (245318-002 SDM Vol. 2 sec 11.6.1).  Two model differences
+ * matter here: 16-byte atomics (CPUID[4].ao, bit 2) exist only on Montecito,
+ * and the implemented RR.rid width is 18 bits on the original Itanium
+ * (245320-002 SDM Vol. 4 sec 3.3; family 0x07 per 249720-009) against 24 on
+ * Itanium 2 (251110-003 table 6-1).
+ */
+#define TEST_CPUID3_FAMILY_MERCED 0x07ULL
+#define TEST_MERCED_RID_BITS      18U
+#define TEST_ITANIUM2_RID_BITS    24U
+
+static UINT64 read_cpuid_register(UINT64 Index)
+{
+    UINT64 value;
+
+    __asm__ volatile ("mov %0 = cpuid[%1];;" : "=r"(value) : "r"(Index));
+    return value;
+}
+
+static int have_16byte_atomics(VOID)
+{
+    return (read_cpuid_register(4) & (1ULL << 2)) != 0;
+}
+
+static UINT64 implemented_rid_mask(VOID)
+{
+    UINT64 family = (read_cpuid_register(3) >> 24) & 0xffULL;
+    UINT64 bits = family == TEST_CPUID3_FAMILY_MERCED ?
+                  TEST_MERCED_RID_BITS : TEST_ITANIUM2_RID_BITS;
+
+    return (1ULL << bits) - 1ULL;
+}
 
 static VOID install_data_tc_mapping(UINT64 Va, UINT64 Pa, UINT64 Itir)
 {
@@ -1283,7 +1317,9 @@ static VOID ap_rendezvous(void)
                 !translation_remap_word_store_check(id)) {
                 translation_write_mismatch[id]++;
             }
-            atomic_increment_batch();
+            if (have_16byte_atomics()) {
+                atomic_increment_batch();
+            }
             fetchadd_increment_batch();
             cmpxchg_increment_batch();
             packed_pfn_update_batch(id);
@@ -1473,7 +1509,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             if (!translation_remap_word_store_check(0)) {
                 translation_write_mismatch[0]++;
             }
-            atomic_increment_batch();
+            if (have_16byte_atomics()) {
+                atomic_increment_batch();
+            }
             fetchadd_increment_batch();
             cmpxchg_increment_batch();
             packed_pfn_update_batch(0);
@@ -1494,7 +1532,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
                         send_wake_ipi(id, wake_vector);
                     }
                     translation_round_check(0);
-                    atomic_increment_batch();
+                    if (have_16byte_atomics()) {
+                atomic_increment_batch();
+            }
                     fetchadd_increment_batch();
                     cmpxchg_increment_batch();
                     packed_pfn_update_batch(0);
@@ -1656,6 +1696,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
         atomic_pair.Low == TEST_RENDEZVOUS_ROUNDS * TEST_PROCESSOR_COUNT *
                            TEST_ATOMIC_INCREMENTS &&
         atomic_pair.High == TEST_ATOMIC_HIGH;
+    if (!have_16byte_atomics()) {
+        atomic_semantics = 1;
+    }
     ia64_test_check(&context, "atomic-16-byte-semaphore", atomic_semantics,
                     EFI_DEVICE_ERROR, "semaphore-contention-failed");
     fetchadd_semantics = repeat_rounds &&
@@ -1749,7 +1792,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     atomic_pair.Low = __builtin_bswap64(0x0123456789abcdefULL);
     atomic_pair.High = __builtin_bswap64(0xfedcba9876543210ULL);
     __asm__ volatile ("mf;;" : : : "memory");
-    big_endian_atomic =
+    big_endian_atomic = !have_16byte_atomics() ? 1 :
         cmp8xchg16_big_endian(&atomic_pair.High,
                               0xfedcba9876543210ULL,
                               0x1111222233334444ULL,
