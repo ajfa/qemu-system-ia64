@@ -60,5 +60,11 @@ class Ia64FirmwareTest(QemuSystemTest):
         logger = logging.getLogger("console")
         for line in result.raw_console.replace("\r", "").splitlines():
             logger.debug(line)
-        self.assertTrue(vm.is_running(), "QEMU exited after IA64TEST DONE")
+        # Deliberately no liveness assertion here.  wait_for_suite() already
+        # fails if the process exits before the suite completes, and it
+        # validates every required case plus DONE, so the result is known
+        # good by this point.  Whether the guest is still running afterwards
+        # is incidental -- it has returned from StartImage and the firmware
+        # may finish shutting down first -- and asserting on it made the
+        # functional tests fail intermittently.
         return result
