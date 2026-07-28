@@ -940,8 +940,9 @@ test_fetchadd4_nat_base_sets_read_write_isr = require_registers(
         "ip": 0x5620,
         "exception": IA64_EXCP_NONE,
         "r14": 0,
-        "r15": IA64_ISR_CODE_REG_NAT | IA64_ISR_NA |
-               IA64_ISR_R | IA64_ISR_W,
+        # fetchadd is an access instruction: ISR.na stays 0
+        # (SDM Vol.2 rev 1.1 Table 5-1).
+        "r15": IA64_ISR_CODE_REG_NAT | IA64_ISR_R | IA64_ISR_W,
     }, entry=0x10)
 
 NORMAL_LOAD_DATA = bundle_words(0x00, 0xdead, 0, 0)[0]
@@ -1084,7 +1085,9 @@ test_nat_consumption_sets_ifa_isr = require_registers(
         (0x200, 0x00, 0, 0,
          0),
     ], {"ip": 0x5620, "exception": IA64_EXCP_NONE, "r14": 0,
-        "r15": IA64_ISR_CODE_REG_NAT | IA64_ISR_NA | IA64_ISR_R},
+        # A load is an access instruction: ISR.na is reserved for
+        # fc/lfetch/probe/tpa/tak (SDM Vol.2 rev 1.1 Table 5-1).
+        "r15": IA64_ISR_CODE_REG_NAT | IA64_ISR_R},
     entry=0x10)
 
 test_nat_store_data_consumption_is_access = require_registers(
