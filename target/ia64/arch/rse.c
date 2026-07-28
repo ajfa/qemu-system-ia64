@@ -1194,12 +1194,17 @@ void ia64_rse_load(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
                            (env->cfm_sof + env->rse.rse_dirty);
     }
     /*
-     * SDM Vol.2 6.5.4: loadrs causes the contents of the RNAT register
-     * to become undefined; invalidate it so stale collection bits are
-     * not applied to later mandatory loads.  (Software reloads RNAT
-     * after loadrs when switching backing stores.)
+     * SDM Vol.2 6.5.4 leaves AR.RNAT undefined after loadrs; the Itanium
+     * processor preserves it and Windows depends on that: KiFlushRse
+     * (WSRV03 miscs.s, flushrs; loadrs with RSC.loadrs = 0; br.ret)
+     * neither saves nor restores RNAT, yet the mandatory reloads after
+     * the invalidation take the top partial collection group's NaT bits
+     * from the accumulation flushrs left in AR.RNAT.  Zeroing it here
+     * destroyed those NaT bits (and applied stale ones after later
+     * accumulation), which surfaced in SMP Windows guests as spurious
+     * register NaT consumption in registry code (REGISTRY_ERROR 0x51
+     * with STATUS_REG_NAT_CONSUMPTION) and random access violations.
      */
-    env->ar_rnat = 0;
     ia64_rse_check(env, "loadrs");
     IA64_TRACE_RSE_STATE(env, "loadrs");
 }

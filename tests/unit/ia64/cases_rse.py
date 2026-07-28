@@ -63,6 +63,7 @@ from .encoding import (
     ld8_a,
     ld8_c_nc,
     ld8_fill_postinc,
+    st8_spill_postinc,
     ld8_postinc,
     ld8_s_postinc,
     lfetch_postinc,
@@ -530,6 +531,132 @@ test_rse_loadrs_bspstore_return_uses_covered_frame = require_registers(
         "r8": 0x123456789abcdef0,
         "cfm_sof": 8,
         "cfm_sol": 6,
+    }, entry=0x10)
+
+
+# NT kernel entry/exit backing-store switch (WSRV03 trap.s KiSaveTrapFrame /
+# RETURN_FROM_INTERRUPTION "loadrs approach", ctxswap.s SWAP_CONTEXT): rebase
+# AR.BSPSTORE onto a phase-aligned second backing store with the dirty
+# partition in the file, preserve AR.RNAT across the rebase, spill across a
+# NaT-collection boundary, loadrs the frames back, rebase to the original
+# store and return.  A NaT bit and a value in the caller frame must survive
+# the round trip (SDM Vol.2 6.5.3/6.5.4, 245318-002 sec 6).
+test_rse_nt_bstore_switch_nat_roundtrip = require_registers(
+    "rse_nt_bstore_switch_nat_roundtrip", [
+        (0x10, *movl_mlx(3, 0x1001d0)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, nop_m(), alloc(32, 8, 8, 0, 0),
+         nop_i()),
+        (0x40, *movl_mlx(9, 1 << 32)),
+        (0x50, 0x00, mov_m_gr_ar(9, 36), addl(3, 0x300, 0),
+         nop_i()),
+        (0x60, 0x08, ld8_fill_postinc(35, 3, 0), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(34, 0x123456789abcdef0)),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x80, 0x400)),
+        # back from the "kernel": prove the frame survived
+        (0x90, 0x00, mov_m_imm_ar(36, 0), addl(3, 0x500, 0),
+         nop_i()),
+        (0xa0, 0x08, st8_spill_postinc(3, 35, 0), nop_i(),
+         nop_i()),
+        (0xb0, 0x00, mov_m_ar_gr(10, 36), adds(8, 0, 34),
+         nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(),
+         br_cond(0xc0, 0xc0)),
+
+        # "kernel": save RNAT/BSPSTORE, rebase to the kernel store (same
+        # BSPSTORE{8:3} phase), spill, loadrs back, rebase, return.
+        (0x400, 0x00, nop_m(), alloc(33, 2, 0, 0, 0),
+         nop_i()),
+        (0x410, 0x00, mov_m_ar_gr(20, 19), nop_i(),
+         nop_i()),
+        (0x420, 0x00, mov_m_ar_gr(21, 18), nop_i(),
+         nop_i()),
+        (0x430, *movl_mlx(22, 0x2001d0)),
+        (0x440, 0x00, mov_m_gr_ar(22, 18), nop_i(),
+         nop_i()),
+        (0x450, 0x00, mov_m_gr_ar(20, 19), nop_i(),
+         nop_i()),
+        (0x460, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (0x470, 0x00, mov_m_ar_gr(23, 19), nop_i(),
+         nop_i()),
+        (0x480, *movl_mlx(24, 0x48 << 16)),
+        (0x490, 0x00, mov_m_gr_ar(24, 16), nop_i(),
+         nop_i()),
+        # NT: "alloc rTH1 = 0,0,0,0 ;; loadrs" -- loadrs needs sof == 0
+        (0x4a0, 0x00, nop_m(), alloc(2, 0, 0, 0, 0),
+         nop_i()),
+        (0x4b0, 0x00, loadrs_enc(), nop_i(),
+         nop_i()),
+        (0x4c0, 0x00, mov_m_gr_ar(21, 18), nop_i(),
+         nop_i()),
+        (0x4d0, 0x00, mov_m_gr_ar(20, 19), nop_i(),
+         nop_i()),
+        (0x4e0, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ], {
+        "ip": 0xc0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x123456789abcdef0,
+        "r10": 1 << 32,
+        "r35_nat": 1,
+        "r34_nat": 0,
+        "cfm_sof": 8,
+        "cfm_sol": 8,
+    }, entry=0x10)
+
+
+# KiFlushRse (WSRV03 miscs.s ~867): flushrs; loadrs (RSC.loadrs = 0);
+# br.ret -- with NO AR.RNAT save/restore.  The mandatory reloads after the
+# invalidation take the top partial collection group's NaT bits from
+# AR.RNAT, so the accumulation flushrs left there must survive loadrs
+# (SDM Vol.2 6.5.4 leaves RNAT undefined; real Itanium preserves it and
+# Windows depends on that).
+test_rse_flushrs_loadrs_invalidate_preserves_rnat = require_registers(
+    "rse_flushrs_loadrs_invalidate_preserves_rnat", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, nop_m(), alloc(32, 3, 3, 0, 0),
+         nop_i()),
+        (0x40, *movl_mlx(9, 1 << 32)),
+        (0x50, 0x00, mov_m_gr_ar(9, 36), addl(3, 0x300, 0),
+         nop_i()),
+        (0x60, 0x08, ld8_fill_postinc(33, 3, 0), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(34, 0x123456789abcdef0)),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x80, 0x200)),
+        (0x90, 0x00, mov_m_imm_ar(36, 0), addl(3, 0x500, 0),
+         nop_i()),
+        (0xa0, 0x08, st8_spill_postinc(3, 33, 0), nop_i(),
+         nop_i()),
+        (0xb0, 0x00, mov_m_ar_gr(10, 36), adds(8, 0, 34),
+         nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(),
+         br_cond(0xc0, 0xc0)),
+
+        # KiFlushRse body: leaf, sof == 0 (caller has no outs)
+        (0x200, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (0x210, 0x00, mov_m_imm_ar(16, 0), nop_i(),
+         nop_i()),
+        (0x220, 0x00, loadrs_enc(), nop_i(),
+         nop_i()),
+        (0x230, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ], {
+        "ip": 0xc0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x123456789abcdef0,
+        "r10": 1 << 32,
+        "r33_nat": 1,
+        "r34_nat": 0,
+        "cfm_sof": 3,
+        "cfm_sol": 3,
     }, entry=0x10)
 
 test_rse_loadrs_zero_current_frame_invalidates_parents = require_registers(
@@ -3420,6 +3547,12 @@ test_rse_loadrs_preserves_clean_partial_rnat_collection = require_registers(
         "cfm_sol": 16,
     }, entry=0x10)
 
+# Mandatory loads after loadrs take NaT bits for slots whose collection
+# word was never read from the AR.RNAT contents software established
+# before loadrs: the register at 0x100120 (collection bit 36) picks up
+# the bit deliberately planted in AR.RNAT.  loadrs preserves RNAT (SDM
+# Vol.2 6.5.4 leaves it undefined; the Itanium processor preserves it,
+# and Windows' KiFlushRse depends on the accumulation surviving).
 test_rse_loadrs_reloads_same_collection_rnat = require_registers(
     "rse_loadrs_reloads_same_collection_rnat", [
         (0x10, *movl_mlx(3, 0x100120)),
@@ -3458,7 +3591,7 @@ test_rse_loadrs_reloads_same_collection_rnat = require_registers(
         "ip": 0x150,
         "exception": IA64_EXCP_NONE,
         "r10": 0xe000000087654321,
-        "r35_nat": 0,
+        "r35_nat": 1,
         "cfm_sof": 16,
         "cfm_sol": 16,
     }, entry=0x10)
@@ -4149,7 +4282,9 @@ CASE_NAMES = (
     'rse_loadrs_preserves_clean_partial_rnat_collection',
     'rse_loadrs_reloads_same_collection_rnat',
     'rse_loadrs_sets_tear_point',
+    'rse_flushrs_loadrs_invalidate_preserves_rnat',
     'rse_loadrs_zero_current_frame_invalidates_parents',
+    'rse_nt_bstore_switch_nat_roundtrip',
     'rse_loadrs_zero_sol_return_keeps_bsp_without_cover',
     'rse_manual_rfi_loadrs_restores_current_frame_base',
     'rse_manual_rfi_smaller_frame_restores_current_frame_base',
