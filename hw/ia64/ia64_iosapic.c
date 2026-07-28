@@ -120,6 +120,20 @@ static void iosapic_eoi(IA64IOSapicState *s, uint8_t vector)
 {
     unsigned pin;
 
+    /*
+     * An EOI write clears Remote IRR on *every* redirection entry whose
+     * vector matches, not just the first: "The PID will compare this vector
+     * value with the vector field of each entry in the RT.  When a match is
+     * found, the RIRR bit for that entry will be cleared... If multiple
+     * redirection entries assign the same vector for more than one interrupt
+     * pin, each of those pins will be resampled and new interrupt messages
+     * issued for those that are still asserted" (Intel 460GX Chipset System
+     * Software Developer's Manual, 248704-001, sec 2.6.2.2, (x)APIC EOI
+     * Register).
+     *
+     * Stopping at the first match strands the other entries with Remote IRR
+     * set, which silences those pins permanently.
+     */
     for (pin = 0; pin < IA64_IOSAPIC_NUM_PINS; pin++) {
         if ((s->rte[pin] & RTE_VECTOR_MASK) != vector ||
             !(s->rte[pin] & RTE_TRIGGER_LEVEL)) {
@@ -130,7 +144,6 @@ static void iosapic_eoi(IA64IOSapicState *s, uint8_t vector)
         }
         s->rte[pin] &= ~RTE_REMOTE_IRR;
         iosapic_update(s, pin);
-        return;
     }
 }
 
