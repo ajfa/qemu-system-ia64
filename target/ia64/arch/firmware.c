@@ -254,6 +254,7 @@ static void ia64_rse_state_save(CPUIA64State *env,
     state->bsp = env->ar_bsp;
     state->bspstore = env->ar_bspstore;
     state->rnat = env->ar_rnat;
+    state->rnat_low = env->rse.rse_rnat_low;
     state->bol = env->rse.rse_bol;
     state->dirty = env->rse.rse_dirty;
     state->dirty_nat = env->rse.rse_dirty_nat;
@@ -278,6 +279,7 @@ static void ia64_rse_state_restore(CPUIA64State *env,
     env->ar_bsp = state->bsp;
     env->ar_bspstore = state->bspstore;
     env->ar_rnat = state->rnat;
+    env->rse.rse_rnat_low = state->rnat_low;
     env->rse.rse_bol = state->bol;
     env->rse.rse_dirty = state->dirty;
     env->rse.rse_dirty_nat = state->dirty_nat;
@@ -916,6 +918,7 @@ uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
     env->ar_bspstore = bstore;
     env->ar_bsp = bstore;
     env->ar_rnat = 0;
+    env->rse.rse_rnat_low = bstore;
     env->rse.rse_dirty = 0;
     env->rse.rse_dirty_nat = 0;
     env->rse.rse_clean = 0;

@@ -659,6 +659,100 @@ test_rse_flushrs_loadrs_invalidate_preserves_rnat = require_registers(
         "cfm_sol": 3,
     }, entry=0x10)
 
+
+# A spill episode that begins in the middle of a NaT collection group must
+# not destroy the committed collection bits of the group's lower slots when
+# it crosses the boundary.  Mirrors the Windows idle/dispatch sequence: a
+# deep flush commits a NaT bit and crosses the boundary; br.ret consumption
+# moves BSPSTORE back inside the group; a partial re-spill crosses the
+# boundary again (rewriting the collection word); a KiFlushRse-style
+# invalidation forces the reloads, which take the lower slot's NaT bit from
+# the collection word read back from memory (SDM Vol.2 6.5.2/6.5.4).
+test_rse_boundary_rewrite_preserves_committed_bits = require_registers(
+    "rse_boundary_rewrite_preserves_committed_bits", [
+        (0x10, *movl_mlx(3, 0x100188)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, nop_m(), alloc(32, 8, 8, 0, 0),
+         nop_i()),
+        (0x40, *movl_mlx(9, 1 << 0)),
+        (0x50, 0x00, mov_m_gr_ar(9, 36), addl(3, 0x800, 0),
+         nop_i()),
+        (0x60, 0x08, ld8_fill_postinc(33, 3, 0), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(34, 0x123456789abcdef0)),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x80, 0x200)),
+        (0x90, 0x00, mov_m_imm_ar(36, 0), addl(3, 0x900, 0),
+         nop_i()),
+        (0xa0, 0x08, st8_spill_postinc(3, 33, 0), nop_i(),
+         nop_i()),
+        (0xb0, 0x00, mov_m_ar_gr(10, 36), adds(8, 0, 34),
+         nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(),
+         br_cond(0xc0, 0xc0)),
+
+        # S: 4-register frame, calls T (deep flush) then U (re-spill +
+        # invalidate), then returns.
+        (0x200, 0x00, nop_m(), alloc(35, 4, 4, 0, 0),
+         nop_i()),
+        (0x210, 0x00, nop_m(), mov_gr_b(34, 0),
+         nop_i()),
+        (0x220, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x220, 0x280)),
+        (0x230, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x230, 0x380)),
+        (0x240, 0x00, mov_m_gr_ar(35, 64), nop_i(),
+         nop_i()),
+        (0x250, 0x09, nop_m(), nop_m(),
+         mov_b_gr(0, 34)),
+        (0x260, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+
+        # T: another 4-register frame; T2 flushes everything past the
+        # collection boundary, committing the NaT bit; T's return then
+        # moves BSPSTORE back inside the group.
+        (0x280, 0x00, nop_m(), alloc(35, 4, 4, 0, 0),
+         nop_i()),
+        (0x290, 0x00, nop_m(), mov_gr_b(34, 0),
+         nop_i()),
+        (0x2a0, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x2a0, 0x300)),
+        (0x2b0, 0x00, mov_m_gr_ar(35, 64), nop_i(),
+         nop_i()),
+        (0x2c0, 0x09, nop_m(), nop_m(),
+         mov_b_gr(0, 34)),
+        (0x2d0, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+
+        # T2: leaf, deep flush (crosses the boundary, commits the bit).
+        (0x300, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (0x310, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+
+        # U: leaf KiFlushRse shape -- the flush re-spills S's frame from
+        # inside the group (rewriting the collection word), loadrs then
+        # invalidates the file so the returns must reload from memory.
+        (0x380, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (0x390, 0x00, mov_m_imm_ar(16, 0), nop_i(),
+         nop_i()),
+        (0x3a0, 0x00, loadrs_enc(), nop_i(),
+         nop_i()),
+        (0x3b0, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ], {
+        "ip": 0xc0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x123456789abcdef0,
+        "r10": 1 << 32,
+        "r33_nat": 1,
+        "r34_nat": 0,
+        "cfm_sof": 8,
+        "cfm_sol": 8,
+    }, entry=0x10)
+
 test_rse_loadrs_zero_current_frame_invalidates_parents = require_registers(
     "rse_loadrs_zero_current_frame_invalidates_parents", [
         (0x10, *movl_mlx(3, 0x100000)),
@@ -4282,6 +4376,7 @@ CASE_NAMES = (
     'rse_loadrs_preserves_clean_partial_rnat_collection',
     'rse_loadrs_reloads_same_collection_rnat',
     'rse_loadrs_sets_tear_point',
+    'rse_boundary_rewrite_preserves_committed_bits',
     'rse_flushrs_loadrs_invalidate_preserves_rnat',
     'rse_loadrs_zero_current_frame_invalidates_parents',
     'rse_nt_bstore_switch_nat_roundtrip',

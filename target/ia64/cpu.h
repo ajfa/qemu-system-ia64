@@ -755,6 +755,7 @@ typedef struct IA64FirmwareDebugRseState {
     uint64_t bsp;
     uint64_t bspstore;
     uint64_t rnat;
+    uint64_t rnat_low;
     uint32_t bol;
     int32_t dirty;
     int32_t dirty_nat;

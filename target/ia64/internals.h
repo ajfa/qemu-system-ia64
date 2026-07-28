@@ -94,6 +94,17 @@ typedef struct IA64RSEState {
     int32_t rse_clean_nat;
     int32_t rse_invalid;
     bool rse_cfle;
+    /*
+     * Lowest backing-store address whose NaT collection bit is represented
+     * in AR.RNAT.  Consecutive stores extend it downward; a collection-word
+     * load or a software AR.RNAT write makes the whole current group
+     * authoritative; a software BSPSTORE write resets it (RNAT is undefined
+     * then until software rewrites it).  Boundary stores merge the word in
+     * memory below this floor, and mandatory loads below it take their NaT
+     * bit from the collection word in memory (see ia64_rse_store_one and
+     * ia64_rse_load_one).
+     */
+    uint64_t rse_rnat_low;
 } IA64RSEState;
 
 typedef struct IA64AlatState {

@@ -369,9 +369,30 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
          * SDM Vol.2 6.5: whenever BSPSTORE{8:3} are all ones the RSE
          * stores RNAT; bit 63 is always written as zero, and the spill
          * leaves RNAT undefined (cleared here).
+         *
+         * AR.RNAT only carries collection bits for the slots stored since
+         * it last became authoritative (rse_rnat_low).  When a spill
+         * episode begins in the middle of a collection group -- BSPSTORE
+         * descends arithmetically as br.ret consumes registers, then a
+         * later call re-spills only the upper slots -- writing AR.RNAT
+         * verbatim would destroy the committed bits of the untouched
+         * lower slots, which their eventual mandatory reloads still need.
+         * Merge the bits below the authoritative floor from the word in
+         * memory.
          */
-        ia64_rse_write_u64(env, bspstore, env->ar_rnat & INT64_MAX, ra);
+        uint64_t word = env->ar_rnat & INT64_MAX;
+        uint64_t group_base = bspstore - 0x1f8;
+
+        if (env->rse.rse_rnat_low > group_base) {
+            uint64_t keep =
+                (1ULL << ia64_rse_collect_bit(env->rse.rse_rnat_low)) - 1;
+
+            word = (ia64_rse_read_u64(env, bspstore, ra) & keep) |
+                   (word & ~keep);
+        }
+        ia64_rse_write_u64(env, bspstore, word & INT64_MAX, ra);
         env->ar_rnat = 0;
+        env->rse.rse_rnat_low = bspstore + 8;
         env->ar_bspstore = bspstore + 8;
         env->rse.rse_dirty_nat--;
         env->rse.rse_clean_nat++;
@@ -382,6 +403,9 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
                                         env->rse.rse_dirty);
 
         ia64_rse_write_u64(env, bspstore, env->rse.rse_pgr[p], ra);
+        if (env->rse.rse_rnat_low > bspstore) {
+            env->rse.rse_rnat_low = bspstore;
+        }
         if (ia64_rse_pgr_nat_get(env, p)) {
             env->ar_rnat |= 1ULL << ncb;
         } else {
@@ -414,6 +438,7 @@ static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
 
     if (ncb == 63) {
         env->ar_rnat = ia64_rse_read_u64(env, bspload, ra) & INT64_MAX;
+        env->rse.rse_rnat_low = bspload - 0x1f8;
         env->rse.rse_clean_nat++;
         env->psr &= ~(IA64_PSR_DA | IA64_PSR_DD);
         return 0;
@@ -423,9 +448,25 @@ static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
             (int32_t)env->rse.rse_bol -
             (env->rse.rse_clean + env->rse.rse_dirty + 1));
         uint32_t v;
+        bool nat;
 
+        /*
+         * AR.RNAT only represents the collection bits of slots at or
+         * above rse_rnat_low.  A mandatory load below that (the reload
+         * range is truncated to the missing registers, so the descent
+         * never passes the slot's collection word) must take the bit from
+         * the collection word in memory, exactly where the spill
+         * committed it.
+         */
+        if (bspload < env->rse.rse_rnat_low) {
+            uint64_t word = ia64_rse_read_u64(env, bspload | 0x1f8, ra);
+
+            nat = (word >> ncb) & 1;
+        } else {
+            nat = (env->ar_rnat >> ncb) & 1;
+        }
         env->rse.rse_pgr[p] = value;
-        ia64_rse_pgr_nat_set(env, p, (env->ar_rnat >> ncb) & 1);
+        ia64_rse_pgr_nat_set(env, p, nat);
         env->rse.rse_clean++;
         env->rse.rse_invalid--;
 

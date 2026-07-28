@@ -250,8 +250,20 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
     }
     if (ar_num == 19) {
         value &= INT64_MAX;
+        /*
+         * A software AR.RNAT write supplies the collection bits for the
+         * whole group BSPSTORE currently sits in (Windows restores the
+         * value it saved after flushing this group).
+         */
+        env->rse.rse_rnat_low = env->ar_bspstore & ~0x1ffULL;
     } else if (ar_num == 18) {
         value &= ~7ULL;
+        /*
+         * AR.RNAT is undefined after a BSPSTORE write: nothing below the
+         * new location is represented until software rewrites AR.RNAT or
+         * stores extend the accumulation.
+         */
+        env->rse.rse_rnat_low = value;
     } else if (ar_num == 66) {
         value &= 0x3f;
     }
