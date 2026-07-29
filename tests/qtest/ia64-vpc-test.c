@@ -46,7 +46,8 @@
 #define IA64_INT10_ROM_BASE          0x000c0000ULL
 #define IA64_INT10_ROM_SIZE          0x00000200U
 #define IA64_INT10_VECTOR_ADDR       0x00000040ULL
-#define IA64_INT10_ROM_PCIR_OFFSET   0x0020U
+#define IA64_INT10_ROM_PCIR_OFFSET   0x00e0U
+#define IA64_INT10_ROM_ATI_SIG_OFFSET 0x0030U
 #define IA64_INT10_ROM_ATI_HEADER_OFFSET 0x0080U
 #define IA64_INT10_ROM_ATI_PLL_OFFSET 0x00c0U
 #define IA64_INT10_ROM_HANDLER_OFFSET 0x0100U
@@ -320,15 +321,28 @@ static void test_int10_rom(void)
     g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 6),
                     ==, 0x5046);
     g_assert_cmpmem(rom + 0x60, 19, "QEMU IA64 VBE INT10", 19);
+    /*
+     * ATI's drivers validate the ROM by its signature at 30h before following
+     * the pointer chain at 48h; PCIR must therefore stay clear of both.
+     */
+    g_assert_cmpmem(rom + IA64_INT10_ROM_ATI_SIG_OFFSET, 10,
+                    " 761295520", 10);
+    g_assert_cmpint(IA64_INT10_ROM_ATI_SIG_OFFSET + 10, <=, 0x48);
+    g_assert_cmpint(IA64_INT10_ROM_PCIR_OFFSET, >=, 0x4a);
     ati_header = lduw_le_p(rom + 0x48);
     g_assert_cmphex(ati_header, ==, IA64_INT10_ROM_ATI_HEADER_OFFSET);
     ati_pll = lduw_le_p(rom + ati_header + 0x30);
     g_assert_cmphex(ati_pll, ==, IA64_INT10_ROM_ATI_PLL_OFFSET);
-    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x08), ==, 23000);
-    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x0e), ==, 2700);
-    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x10), ==, 4);
-    g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x12), ==, 12000);
-    g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x16), ==, 35000);
+    /*
+     * PLL values as published by real Rage 128 Pro BIOSes (identical in the
+     * XPERT128 retail, Connect3D AGP and generic PCI dumps): XCLK 120.00 MHz,
+     * 29.50 MHz reference with divider 65, 125-400 MHz VCO range.
+     */
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x08), ==, 12000);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x0e), ==, 2950);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x10), ==, 65);
+    g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x12), ==, 12500);
+    g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x16), ==, 40000);
     g_assert_cmpmem(rom + IA64_INT10_ROM_OEM_OFFSET, 13,
                     "QEMU IA64 VBE", 13);
     g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET),

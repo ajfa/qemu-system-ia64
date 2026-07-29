@@ -100,7 +100,14 @@
 #ifdef CONFIG_IA64_VPC_GRAPHICS
 #define IA64_INT10_ROM_BASE     0x000c0000U
 #define IA64_INT10_ROM_SIZE     0x00000200U
-#define IA64_INT10_ROM_PCIR_OFFSET    0x0020U
+/*
+ * PCIR sits above the ATI data blocks.  A real Rage 128 Pro BIOS keeps it
+ * at 16Ch, well clear of both the ATI ROM signature at 30h and the legacy
+ * ATI BIOS pointer at 48h (verified against three retail Rage 128 Pro
+ * dumps).  At 20h its 18h-byte data structure would straddle 30h.
+ */
+#define IA64_INT10_ROM_PCIR_OFFSET    0x00e0U
+#define IA64_INT10_ROM_ATI_SIG_OFFSET 0x0030U
 #define IA64_INT10_ROM_ATI_HEADER_OFFSET 0x0080U
 #define IA64_INT10_ROM_ATI_PLL_OFFSET 0x00c0U
 #define IA64_INT10_ROM_HANDLER_OFFSET 0x0100U
@@ -131,11 +138,11 @@
 #define IA64_BDA_VIDEO_SWITCHES  0x00000488U
 #define IA64_ATI_VENDOR_ID        0x1002U
 #define IA64_ATI_RAGE128_PF_ID    0x5046U
-#define IA64_ATI_PLL_XCLK         23000U
-#define IA64_ATI_PLL_REFERENCE_FREQ 2700U
-#define IA64_ATI_PLL_REFERENCE_DIV  4U
-#define IA64_ATI_PLL_MIN_FREQ     12000U
-#define IA64_ATI_PLL_MAX_FREQ     35000U
+#define IA64_ATI_PLL_XCLK         12000U
+#define IA64_ATI_PLL_REFERENCE_FREQ 2950U
+#define IA64_ATI_PLL_REFERENCE_DIV  65U
+#define IA64_ATI_PLL_MIN_FREQ     12500U
+#define IA64_ATI_PLL_MAX_FREQ     40000U
 #endif
 #define IA64_IOSAPIC_BASE       0x0000000080110000ULL
 #define IA64_IOSAPIC_SIZE       0x0000000000002000ULL
@@ -1151,6 +1158,15 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
      * are in 10 kHz units.  They match the range supported by QEMU's
      * Rage128-compatible display model and its existing VGA BIOS.
      */
+    /*
+     * ATI's drivers locate and validate the video BIOS by the ROM signature
+     * " 761295520" at 30h before following the pointer chain at 48h.  All
+     * three retail Rage 128 Pro dumps carry it there.  Windows Whistler
+     * build 2462's miniport (ati2mpaa.sys, "RAGE128/128PRO Miniport Driver
+     * VersionR128.121") embeds the string and bugchecks 0x1E dereferencing
+     * the NULL table pointer it is left with when the signature is absent.
+     */
+    memcpy(rom + IA64_INT10_ROM_ATI_SIG_OFFSET, " 761295520", 10);
     stw_le_p(rom + 0x48, IA64_INT10_ROM_ATI_HEADER_OFFSET);
     stw_le_p(rom + IA64_INT10_ROM_ATI_HEADER_OFFSET + 0x30,
              IA64_INT10_ROM_ATI_PLL_OFFSET);
@@ -1175,6 +1191,11 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
     uint16_t device = pci_get_word(s->vga_dev->config + PCI_DEVICE_ID);
     size_t i;
 
+    g_assert(IA64_INT10_ROM_ATI_SIG_OFFSET + 10 <= 0x48);
+    g_assert(IA64_INT10_ROM_ATI_PLL_OFFSET + 0x20 <=
+             IA64_INT10_ROM_PCIR_OFFSET);
+    g_assert(IA64_INT10_ROM_PCIR_OFFSET + 0x18 <=
+             IA64_INT10_ROM_HANDLER_OFFSET);
     g_assert(IA64_INT10_ROM_HANDLER_OFFSET +
              sizeof(ia64_int10_handler) <= IA64_INT10_ROM_OEM_OFFSET);
     g_assert(IA64_INT10_ROM_OEM_OFFSET + sizeof(ia64_vbe_oem) <=
