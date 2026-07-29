@@ -151,8 +151,14 @@
  * descriptor for the loader's systemblock split.
  */
 #define FW_LOADER_HEAP_SPLIT_SIZE 0x0000000000002000ULL
+/*
+ * d30791f moved the split page from 48 MB to 32 MB in the map builder but left
+ * this macro (and uefi_memory_map_selftest, which is written in terms of it) on
+ * the old 48 MB placement, so the memory-map self-test has been reporting
+ * FAILED ever since.  Track the builder.
+ */
 #define FW_LOADER_HEAP_SPLIT_BASE \
-    (FW_LOW_LEGACY_IMAGE_BASE - FW_LOADER_HEAP_SPLIT_SIZE)
+    (FW_LOW_IMAGE_BASE - FW_LOADER_HEAP_SPLIT_SIZE)
 #define FW_BOOTSTRAP_STACK_TOP 0x0000000008000000ULL
 #define FW_BOOT_STACK_SIZE     0x0000000000400000ULL
 #define IA64_EFI_MEMORY_ALIGN 0x0000000000002000ULL
@@ -12767,20 +12773,13 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     ordinary_next = ordinary;
     ordinary_next.PhysicalStart = FW_LOW_RAM_STAGING_BASE + 0x1000ULL;
 
-    if (!efi_memory_map_has_descriptor(EfiConventionalMemory,
+    if (!efi_memory_map_has_descriptor(EfiReservedMemoryType,
+                                       FW_LOADER_HEAP_SPLIT_BASE,
                                        FW_LOW_IMAGE_BASE,
-                                       FW_LOADER_HEAP_SPLIT_BASE,
                                        EFI_MEMORY_WB) ||
-        !efi_memory_map_has_descriptor(EfiReservedMemoryType,
-                                       FW_LOADER_HEAP_SPLIT_BASE,
-                                       FW_LOW_LEGACY_IMAGE_BASE,
-                                       EFI_MEMORY_WB) ||
+        /* [32MB,80MB) is deliberately left as a SINGLE free run (d30791f). */
         !efi_memory_map_has_descriptor(EfiConventionalMemory,
-                                       FW_LOW_LEGACY_IMAGE_BASE,
-                                       FW_LOW_IMAGE_ALIGNED_END,
-                                       EFI_MEMORY_WB) ||
-        !efi_memory_map_has_descriptor(EfiConventionalMemory,
-                                       FW_LOW_IMAGE_ALIGNED_END,
+                                       FW_LOW_IMAGE_BASE,
                                        FW_LOW_IMAGE_END, EFI_MEMORY_WB) ||
         /* The SAL-style loader-staging guard sits at the 80 MB line; usable
          * conventional RAM begins just above it. */
@@ -13304,8 +13303,17 @@ static void efi_init_memory_map(void)
 {
     UINTN firmware_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
     UINTN runtime_code_start = (UINTN)&__runtime_code_start;
-    UINTN pal_start = (UINTN)pal_proc_entry & ~0xFFFULL;
-    UINTN pal_end = pal_start + 0x1000U;
+    /*
+     * Describe PAL code as a whole 8 KB OS page.  The Windows IA-64 loader
+     * stores its descriptors in 4 KB units and, in InsertDescriptor
+     * (WXPSP1 base/boot/efi/sumain.c), sets MustCoellesce whenever an entry's
+     * 4 KB base is odd or the PREVIOUS entry's 4 KB page count is odd -- and
+     * for MemoryFirmwarePermanent it then resolves that by "stealing" a page
+     * from the prior (free) entry.  A 4 KB PAL descriptor makes the run odd and
+     * perturbs every boundary after it.
+     */
+    UINTN pal_start = (UINTN)pal_proc_entry & ~0x1FFFULL;
+    UINTN pal_end = pal_start + 0x2000U;
     UINT64 ram_size = fw_guest_ram_size();
     UINT64 low_ram_end = fw_guest_low_ram_end();
     UINTN index = 0;
@@ -13383,7 +13391,7 @@ static void efi_init_memory_map(void)
     efi_add_memory_range(&index, EfiConventionalMemory, ACPI_RECLAIM_END,
                          FW_LOW_FREE_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_FREE_BASE,
-                         FW_LOW_IMAGE_BASE - FW_LOADER_HEAP_SPLIT_SIZE,
+                         FW_LOADER_HEAP_SPLIT_BASE,
                          EFI_MEMORY_WB);
     /*
      * The non-free split page sits just below 32 MB, and [32MB,80MB) is left
@@ -13402,7 +13410,7 @@ static void efi_init_memory_map(void)
      * image so the kernel allocates page tables over itself.
      */
     efi_add_memory_range(&index, EfiReservedMemoryType,
-                         FW_LOW_IMAGE_BASE - FW_LOADER_HEAP_SPLIT_SIZE,
+                         FW_LOADER_HEAP_SPLIT_BASE,
                          FW_LOW_IMAGE_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_BASE,
                          FW_LOW_IMAGE_END, EFI_MEMORY_WB);
