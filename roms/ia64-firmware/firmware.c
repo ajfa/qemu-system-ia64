@@ -13383,18 +13383,28 @@ static void efi_init_memory_map(void)
     efi_add_memory_range(&index, EfiConventionalMemory, ACPI_RECLAIM_END,
                          FW_LOW_FREE_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_FREE_BASE,
+                         FW_LOW_IMAGE_BASE - FW_LOADER_HEAP_SPLIT_SIZE,
+                         EFI_MEMORY_WB);
+    /*
+     * The non-free split page sits just below 32 MB, and [32MB,80MB) is left
+     * as a single free run.
+     *
+     * blmemory.c:BlMemoryInitialize (WXPSP1 base/boot/lib/blmemory.c:341-370)
+     * takes the FIRST free descriptor whose BasePage lies in [16MB,48MB) and
+     * carves heap+stack from that descriptor's END, and only 16-80 MB is
+     * TR-mapped.  Bounding the [17MB,..) run at 32 MB keeps that carve in
+     * range, which is the job the 48 MB page was doing.
+     *
+     * Leaving [32MB,80MB) unsplit then gives the loader the "existing (much
+     * larger) descriptor" its MempAllocDescriptor(_48MB,_80MB) systemblock
+     * split expects (efi/ia64/memory.c:236-247); pre-splitting it at 48 MB
+     * defeats that split, and the Whistler 2462 loader then loses the kernel
+     * image so the kernel allocates page tables over itself.
+     */
+    efi_add_memory_range(&index, EfiReservedMemoryType,
+                         FW_LOW_IMAGE_BASE - FW_LOADER_HEAP_SPLIT_SIZE,
                          FW_LOW_IMAGE_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_BASE,
-                         FW_LOADER_HEAP_SPLIT_BASE, EFI_MEMORY_WB);
-    /* Non-free split page ending at 48 MB (see FW_LOADER_HEAP_SPLIT_BASE). */
-    efi_add_memory_range(&index, EfiReservedMemoryType,
-                         FW_LOADER_HEAP_SPLIT_BASE,
-                         FW_LOW_LEGACY_IMAGE_BASE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiConventionalMemory,
-                         FW_LOW_LEGACY_IMAGE_BASE,
-                         FW_LOW_IMAGE_ALIGNED_END, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiConventionalMemory,
-                         FW_LOW_IMAGE_ALIGNED_END,
                          FW_LOW_IMAGE_END, EFI_MEMORY_WB);
     /*
      * SAL-style reserved guard at the 80 MB TR-staging line.  The Windows
