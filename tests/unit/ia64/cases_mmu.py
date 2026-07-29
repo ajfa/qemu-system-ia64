@@ -229,6 +229,43 @@ test_speculative_recovery_dcr_dm_defers_tlb_miss = require_registers(
         "r31_nat": 1,
     }, entry=0x10)
 
+# A control-speculative load whose address is misaligned must defer the
+# Unaligned Data Reference condition when PSR.it and the code page's ITLB.ed
+# are both set (SDM Vol.2 rev 1.1, Table 5-4: "Unaligned Data Reference ...
+# deferred if !PSR.ic || (PSR.it && ITLB.ed)").  Note this needs no DCR bit,
+# unlike every other deferrable data condition.  Windows IA-64 relies on it:
+# it runs with PSR.ac set and maps kernel code with ED, so ld.s off a wild
+# (and therefore possibly misaligned) pointer must NaT rather than fault.
+# Data translation is left off so the misalignment is the only condition.
+test_speculative_unaligned_itlb_ed_defers = require_registers(
+    "speculative_unaligned_itlb_ed_defers", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | PTE_ED)),
+        (0x20, *movl_mlx(19, (1 << 13) | (1 << 36) | IA64_PSR_AC)),
+        (0x30, 0x00, adds(2, 0x431, 0), adds(5, 5, 0),
+         nop_i()),
+        (0x40, 0x00, adds(7, LOW_VECTOR_ITIR, 0), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x60, 0x00, itr_i(5, 18), nop_i(),
+         nop_i()),
+        (0x70, 0x00, srlz_i(), nop_i(),
+         nop_i()),
+        (0x80, 0x00, srlz_d(), adds(31, 0x430, 0),
+         nop_i()),
+        *rfi_to_gr(0x90, 19, 31),
+        (0x4000430, 0x00, ld8_s(31, 2), nop_i(),
+         nop_i()),
+        (0x4000440, 0x00, nop_m(), nop_i(), nop_i()),
+        (0x4000450, 0x00, nop_m(), nop_i(), nop_i()),
+        (0x4000460, 0x10, nop_m(), nop_i(),
+         br_cond(0x4000460, 0x460)),
+    ], {
+        "ip": 0x460,
+        "exception": IA64_EXCP_NONE,
+        "r31_nat": 1,
+    }, entry=0x10)
+
 test_speculative_recovery_dcr_da_defers_access_bit = require_registers(
     "speculative_recovery_dcr_da_defers_access_bit", [
         (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | PTE_ED)),
@@ -6314,6 +6351,7 @@ CASE_NAMES = (
     'natpage_load_raises_nat_consumption',
     'natpage_short_vhpt_load_raises_nat_consumption',
     'natpage_speculative_load_defers',
+    'speculative_unaligned_itlb_ed_defers',
     'natpage_store_raises_nat_consumption',
     'natpage_unaligned_store_outranks_unaligned',
     'natpage_xchg_raises_nat_consumption',

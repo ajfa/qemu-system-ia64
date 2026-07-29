@@ -18,6 +18,8 @@
 #include "exec/tlb-flags.h"
 #include "trace.h"
 
+static bool ia64_code_tlb_ed(CPUIA64State *env);
+
 #define IA64_PTE_PL_SHIFT 7
 #define IA64_PTE_PL_MASK  (3ULL << IA64_PTE_PL_SHIFT)
 #define IA64_PTE_AR_SHIFT 9
@@ -234,7 +236,7 @@ void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
 
     if ((env->psr & IA64_PSR_DT) && !ia64_va_is_implemented(env, addr)) {
         ia64_raise_unimplemented_data_address(
-            env, addr, IA64_ISR_R, true, false, ia64_current_code_tlb_ed(env));
+            env, addr, IA64_ISR_R, true, false, ia64_code_tlb_ed(env));
     }
 
     if (ia64_data_address_to_phys(env, addr, &pa)) {
@@ -647,7 +649,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
 
     if (!ia64_va_is_implemented(env, env->cr_ifa)) {
         ia64_raise_unimplemented_data_address(
-            env, env->cr_ifa, 0, true, false, ia64_current_code_tlb_ed(env));
+            env, env->cr_ifa, 0, true, false, ia64_code_tlb_ed(env));
     }
 
     if ((pte & IA64_PTE_PRESENT) && perm == 0) {
@@ -717,7 +719,7 @@ void ia64_mmu_ptr_purge(CPUIA64State *env, uint64_t ifa, uint64_t size_reg,
 
     if (!ia64_va_is_implemented(env, ifa)) {
         ia64_raise_unimplemented_data_address(
-            env, ifa, 0, true, false, ia64_current_code_tlb_ed(env));
+            env, ifa, 0, true, false, ia64_code_tlb_ed(env));
     }
 
     if (is_data) {
@@ -794,7 +796,7 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
 
     if (!ia64_va_is_implemented(env, va)) {
         ia64_raise_unimplemented_data_address(
-            env, va, 0, true, false, ia64_current_code_tlb_ed(env));
+            env, va, 0, true, false, ia64_code_tlb_ed(env));
     }
 
     trace_ia64_mmu_purge(env_cpu(env)->cpu_index, "ptc", va, ps, rid, mode);
@@ -1122,6 +1124,53 @@ bool ia64_translate_data_access(CPUIA64State *env, uint64_t va,
     return true;
 }
 
+static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
+                                 bool is_ifetch, bool is_rse, uint64_t *pte,
+                                 uint64_t *entry_va);
+
+/*
+ * The ED bit of the code page the CPU is currently executing from.
+ *
+ * ia64_current_code_tlb_ed() answers this from the modelled ITLB alone, which
+ * is not sufficient here.  With PSR.it set, real hardware cannot execute an
+ * instruction unless a valid ITLB entry for its page exists - an evicted or
+ * purged entry is re-inserted by the very next instruction fetch, so ITLB.ed
+ * is always well defined at execution time.  We can lose it: QEMU executes a
+ * cached translation block without re-consulting the guest ITLB, so our
+ * round-robin replacement (IA64_TLB_MAX entries) can drop the entry for code
+ * that is still running.  Reporting ED as 0 in that state is a pure emulation
+ * artifact, and it is not harmless: SDM Vol.2 rev 1.1 Table 5-4 defers an
+ * Unaligned Data Reference on a speculative load iff
+ * "!PSR.ic || (PSR.it && ITLB.ed)" - with no DCR bit involved - so a lost
+ * entry turns a deferral into a fault.  Windows IA-64 runs with PSR.ac set and
+ * maps kernel code with ED, and its compiler hoists ld.s off pointers that may
+ * be wild; build 2462 bugchecks 0x1E in Npfs.SYS when one of those faults
+ * instead of NaTing.
+ *
+ * Recover the architected bit from the VHPT when the entry is missing.
+ */
+static bool ia64_code_tlb_ed(CPUIA64State *env)
+{
+    const IA64TlbEntry *entry;
+    uint64_t pte, entry_va;
+
+    if (!(env->psr & IA64_PSR_IT)) {
+        return false;
+    }
+
+    entry = ia64_tlb_find_cached(env, env->ip,
+                                 ia64_region_rid(env, env->ip), true);
+    if (entry) {
+        return (entry->pte & IA64_PTE_ED) != 0;
+    }
+
+    if (ia64_vhpt_lookup_pte(env, env->ip, true, false, &pte, &entry_va)) {
+        return (pte & IA64_PTE_ED) != 0;
+    }
+
+    return false;
+}
+
 static uint64_t ia64_speculative_deferral_dcr_mask(IA64Exception excp)
 {
     switch (excp) {
@@ -1303,7 +1352,7 @@ static uint64_t ia64_probe_grant(CPUIA64State *env, uint64_t va,
     default:
         ia64_raise_data_reference_exception(
             env, va, is_write, false, true, 2, excp, false,
-            ia64_current_code_tlb_ed(env));
+            ia64_code_tlb_ed(env));
         g_assert_not_reached();
     }
 }
@@ -1336,7 +1385,7 @@ static uint64_t ia64_probe_dt_disabled(CPUIA64State *env, uint64_t va,
 
         ia64_raise_data_reference_exception(
             env, va, is_write, false, true, 2, miss_excp, false,
-            ia64_current_code_tlb_ed(env));
+            ia64_code_tlb_ed(env));
         g_assert_not_reached();
     }
 
@@ -1400,7 +1449,7 @@ static void ia64_raise_data_reference_fault_if_needed(CPUIA64State *env,
     ia64_raise_data_reference_exception(env, va, is_write, is_rw,
                                         is_non_access, non_access_code,
                                         excp, false,
-                                        ia64_current_code_tlb_ed(env));
+                                        ia64_code_tlb_ed(env));
 }
 
 void ia64_raise_pre_unaligned_data_fault(CPUIA64State *env,
@@ -1418,7 +1467,7 @@ void ia64_raise_pre_unaligned_data_fault(CPUIA64State *env,
     }
     ia64_raise_data_reference_exception_at(
         env, va, is_write, is_rw, false, 0, excp, false,
-        ia64_current_code_tlb_ed(env), fault_ip, fault_slot);
+        ia64_code_tlb_ed(env), fault_ip, fault_slot);
 }
 
 void ia64_mmu_probe_fault(CPUIA64State *env, uint64_t va, uint32_t is_write,
@@ -1441,7 +1490,7 @@ void ia64_mmu_lfetch_fault(CPUIA64State *env, uint64_t va,
     }
     ia64_raise_data_reference_exception_at(
         env, va, false, false, true, 4, excp, false,
-        ia64_current_code_tlb_ed(env), fault_ip, fault_slot);
+        ia64_code_tlb_ed(env), fault_ip, fault_slot);
 }
 
 void ia64_mmu_check_semaphore_access(CPUIA64State *env, uint64_t va)
@@ -1454,13 +1503,13 @@ void ia64_mmu_check_semaphore_access(CPUIA64State *env, uint64_t va)
     if (excp != IA64_EXCP_NONE) {
         ia64_raise_data_reference_exception(
             env, va, true, true, false, 0, excp, false,
-            ia64_current_code_tlb_ed(env));
+            ia64_code_tlb_ed(env));
     }
     if (translation.memory_attribute != IA64_PTE_MA_WB) {
         ia64_raise_data_reference_exception(
             env, va, true, true, false, 0,
             IA64_EXCP_UNSUPPORTED_DATA_REFERENCE, false,
-            ia64_current_code_tlb_ed(env));
+            ia64_code_tlb_ed(env));
     }
 }
 
@@ -1481,13 +1530,13 @@ void ia64_mmu_check_montecito_16byte_access(CPUIA64State *env, uint64_t va,
     if (excp != IA64_EXCP_NONE) {
         ia64_raise_data_reference_exception(
             env, va, is_write, false, false, 0, excp, false,
-            ia64_current_code_tlb_ed(env));
+            ia64_code_tlb_ed(env));
     }
     if (translation.memory_attribute != IA64_PTE_MA_WB) {
         ia64_raise_data_reference_exception(
             env, va, is_write, false, false, 0,
             IA64_EXCP_UNSUPPORTED_DATA_REFERENCE, false,
-            ia64_current_code_tlb_ed(env));
+            ia64_code_tlb_ed(env));
     }
 }
 
@@ -1504,7 +1553,7 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
         return 0;
     }
 
-    itlb_ed = ia64_current_code_tlb_ed(env);
+    itlb_ed = ia64_code_tlb_ed(env);
     alignment_fault = ia64_speculative_alignment_fault(env, va, size);
     if (is_ifetch) {
         if (alignment_fault) {
@@ -2228,7 +2277,7 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
 
     if (!ia64_va_is_implemented(env, env->cr_ifa)) {
         ia64_raise_unimplemented_data_address(
-            env, env->cr_ifa, 0, true, false, ia64_current_code_tlb_ed(env));
+            env, env->cr_ifa, 0, true, false, ia64_code_tlb_ed(env));
     }
 
     if ((pte & IA64_PTE_PRESENT) && perm == 0) {
