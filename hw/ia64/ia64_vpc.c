@@ -141,6 +141,8 @@
 #define IA64_IOSAPIC_SIZE       0x0000000000002000ULL
 #define IA64_ACPI_PM_IO_BASE    0x00002000U
 #define IA64_ACPI_PM_IO_SIZE    0x00000010U
+#define IA64_LEGACY_COM1_IO_BASE 0x000003f8U
+#define IA64_LEGACY_COM1_IO_SIZE 0x00000008U
 #define IA64_ACPI_PM_RESET_OFFSET 0x0000000cU
 #define IA64_ACPI_PM_RESET_VALUE  0x01U
 #define IA64_ACPI_SCI_IRQ       9
@@ -386,6 +388,8 @@ struct IA64VpcMachineState {
     MemoryRegion nvram_mmio;
     MemoryRegion acpi_pm;
     MemoryRegion acpi_reset;
+    MemoryRegion debug_uart_legacy_io;
+    SerialMM *debug_uart;
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     MemoryRegion int10_pci_io;
     IA64Int10Registers int10_request;
@@ -2606,10 +2610,11 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
                    qdev_get_gpio_in(iosapic, 4),
                    115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
     if (debug_port_get_chardev()) {
-        serial_mm_init(get_system_memory(), IA64_DEBUG_UART_BASE, 0,
-                       qdev_get_gpio_in(iosapic, 3),
-                       115200, debug_port_get_chardev(),
-                       DEVICE_LITTLE_ENDIAN);
+        s->debug_uart = serial_mm_init(get_system_memory(),
+                                       IA64_DEBUG_UART_BASE, 0,
+                                       qdev_get_gpio_in(iosapic, 3),
+                                       115200, debug_port_get_chardev(),
+                                       DEVICE_LITTLE_ENDIAN);
     }
 
     if (!ia64_vpc_load_firmware(s, machine, errp)) {
@@ -2645,6 +2650,24 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     pci_bus_set_slot_reserved_mask(pci_bus, 1U << 0);
     pci_io = pci_bus->address_space_io;
     ia64_vpc_init_acpi_pm(s, iosapic, pci_io);
+
+    /*
+     * Early IA-64 kernel debuggers predate the ACPI DBGP table and drive a
+     * fixed legacy COM1 at I/O port 0x3f8 (Windows Whistler build 2462's
+     * kdcom.dll hardcodes 0x3f8/0x2f8/0x3e8/0x2e8 and reaches them through
+     * HAL's READ_PORT_UCHAR/WRITE_PORT_UCHAR).  Real Merced platforms carry a
+     * Super I/O UART there, so alias the debug port's register window into
+     * the legacy I/O range as well.  Aliasing rather than instantiating a
+     * second UART keeps one device, one chardev and one interrupt line.
+     */
+    if (s->debug_uart != NULL) {
+        memory_region_init_alias(&s->debug_uart_legacy_io, OBJECT(s),
+                                 "ia64-vpc.debug-uart-legacy-io",
+                                 &s->debug_uart->serial.io, 0,
+                                 IA64_LEGACY_COM1_IO_SIZE);
+        memory_region_add_subregion(pci_io, IA64_LEGACY_COM1_IO_BASE,
+                                    &s->debug_uart_legacy_io);
+    }
 
     /* Leave ISA/SCI lines in the legacy range and route PCI INTx above 15. */
     for (i = 0; i < IA64_PCI_INTX_LINES; i++) {
