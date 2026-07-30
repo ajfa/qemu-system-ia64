@@ -1149,11 +1149,12 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
  *
  * Recover the architected bit from the VHPT when the entry is missing.
  */
-static bool ia64_code_tlb_ed(CPUIA64State *env)
+static bool ia64_code_tlb_ed_lookup(CPUIA64State *env, bool *known)
 {
     const IA64TlbEntry *entry;
     uint64_t pte, entry_va;
 
+    *known = true;
     if (!(env->psr & IA64_PSR_IT)) {
         return false;
     }
@@ -1168,7 +1169,21 @@ static bool ia64_code_tlb_ed(CPUIA64State *env)
         return (pte & IA64_PTE_ED) != 0;
     }
 
+    /*
+     * Neither source can answer.  The VHPT is only a best-effort fallback:
+     * the walker may be disabled for the region (RR.ve), and a short-format
+     * VHPT holds one entry per hash bucket, so a colliding page routinely
+     * displaces the one we want.
+     */
+    *known = false;
     return false;
+}
+
+static bool ia64_code_tlb_ed(CPUIA64State *env)
+{
+    bool known;
+
+    return ia64_code_tlb_ed_lookup(env, &known);
 }
 
 static uint64_t ia64_speculative_deferral_dcr_mask(IA64Exception excp)
@@ -1197,7 +1212,8 @@ static uint64_t ia64_speculative_deferral_dcr_mask(IA64Exception excp)
 
 static bool ia64_speculative_exception_deferrable(CPUIA64State *env,
                                                   IA64Exception excp,
-                                                  bool itlb_ed)
+                                                  bool itlb_ed,
+                                                  bool itlb_ed_unknown)
 {
     uint64_t dcr_mask;
 
@@ -1210,7 +1226,22 @@ static bool ia64_speculative_exception_deferrable(CPUIA64State *env,
     }
 
     if (excp == IA64_EXCP_UNALIGNED) {
-        return (env->psr & IA64_PSR_IT) && itlb_ed;
+        /*
+         * SDM Vol.2 rev 1.1 Table 5-4: deferred iff
+         * "!PSR.ic || (PSR.it && ITLB.ed)" - no DCR bit is involved, so
+         * ITLB.ed alone decides it.
+         *
+         * When we cannot determine ITLB.ed at all, defer.  Executing here
+         * with PSR.it set means real hardware necessarily holds a valid
+         * ITLB entry for this page, so "no entry" is an emulation artifact
+         * (QEMU runs a cached translation block without re-consulting the
+         * guest ITLB, and our replacement can drop the entry for code that
+         * is still running).  Of the two answers we could guess, deferring
+         * is the one that cannot turn a recoverable control speculation
+         * into a bugcheck - the ld.s already has a chk.s recovery path by
+         * construction, which is why the compiler emitted it.
+         */
+        return (env->psr & IA64_PSR_IT) && (itlb_ed || itlb_ed_unknown);
     }
 
     dcr_mask = ia64_speculative_deferral_dcr_mask(excp);
@@ -1546,6 +1577,7 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
 {
     bool alignment_fault;
     bool itlb_ed;
+    bool itlb_ed_known;
     IA64Exception excp;
     IA64DataReferenceResult translation;
 
@@ -1553,7 +1585,7 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
         return 0;
     }
 
-    itlb_ed = ia64_code_tlb_ed(env);
+    itlb_ed = ia64_code_tlb_ed_lookup(env, &itlb_ed_known);
     alignment_fault = ia64_speculative_alignment_fault(env, va, size);
     if (is_ifetch) {
         if (alignment_fault) {
@@ -1580,13 +1612,14 @@ qualify:
         alignment_fault = false;
     }
     if (excp != IA64_EXCP_NONE &&
-        !ia64_speculative_exception_deferrable(env, excp, itlb_ed)) {
+        !ia64_speculative_exception_deferrable(env, excp, itlb_ed,
+                                               !itlb_ed_known)) {
         ia64_raise_data_reference_exception(
             env, va, is_write, false, false, 0, excp, true, itlb_ed);
     }
     if (alignment_fault &&
         !ia64_speculative_exception_deferrable(
-            env, IA64_EXCP_UNALIGNED, itlb_ed)) {
+            env, IA64_EXCP_UNALIGNED, itlb_ed, !itlb_ed_known)) {
         ia64_raise_data_reference_exception(
             env, va, is_write, false, false, 0, IA64_EXCP_UNALIGNED, true,
             itlb_ed);
