@@ -95,6 +95,7 @@
 #define IA64_NIC_IO_STRIDE      0x00000100U
 #define IA64_VGA_FB_PCI_BASE    0x00000000c4000000ULL
 #define IA64_VGA_MMIO_PCI_BASE  0x00000000c8000000ULL
+#define IA64_VGA_ROM_PCI_BASE   0x00000000c9000000ULL
 #define IA64_VGA_LEGACY_BASE   0x000a0000U
 #define IA64_VGA_LEGACY_SIZE   0x00020000U
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -2143,6 +2144,20 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
     }
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0 + 8,
                              IA64_VGA_MMIO_PCI_BASE, 4);
+    /*
+     * Assign and enable the expansion ROM.  IA-64 has no architectural legacy
+     * video BIOS shadow at 0xC0000, so Windows' videoprt reads the image
+     * through the PCI ROM BAR (VideoPortGetRomImage).  Leaving BAR6
+     * unassigned means a native display driver never sees a video BIOS at
+     * all: Windows Whistler build 2462's Rage 128 miniport then leaves its
+     * BIOS table pointer NULL and bugchecks 0x1E dereferencing it.  Every
+     * other BAR on this machine is assigned by the machine model too.
+     */
+    if (pci_dev->io_regions[PCI_ROM_SLOT].size != 0) {
+        pci_default_write_config(pci_dev, PCI_ROM_ADDRESS,
+                                 IA64_VGA_ROM_PCI_BASE |
+                                 PCI_ROM_ADDRESS_ENABLE, 4);
+    }
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY, 2);
 
