@@ -2130,6 +2130,105 @@ static void ia64_vpc_configure_lsi(PCIDevice *pci_dev)
                              PCI_COMMAND_MASTER, 2);
 }
 
+/*
+ * Give the stock VGA BIOS the ATI data blocks a native Rage 128 driver looks
+ * for.  Windows' videoprt reads the image through the PCI ROM BAR, and the
+ * shipped vgabios-ati.bin is a SeaVGABIOS build with none of ATI's tables:
+ * the signature " 761295520" that ATI drivers validate the ROM by occurs
+ * nowhere in it, so Whistler build 2462's miniport leaves its BIOS table
+ * pointer NULL and bugchecks 0x1E dereferencing it.
+ *
+ * The blocks written here are ours, not ATI's - the layout is the documented
+ * one (signature at 30h, header pointer at 48h, PLL pointer at header+30h)
+ * and the clock parameters are the Rage 128 Pro's published values, which is
+ * also what the synthesised INT 10h ROM publishes.  Nothing is copied out of
+ * a retail BIOS image.
+ *
+ * A user-supplied romfile that already carries the signature is left strictly
+ * alone.
+ */
+static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
+{
+    static const char ati_signature[] = " 761295520";
+    uint8_t *rom;
+    uint64_t rom_size;
+    uint32_t declared;
+    uint32_t hdr;
+    uint32_t pll;
+    uint32_t pcir;
+    uint32_t i;
+    uint8_t checksum = 0;
+
+    if (pci_get_word(pci_dev->config + PCI_VENDOR_ID) !=
+            IA64_ATI_VENDOR_ID ||
+        pci_get_word(pci_dev->config + PCI_DEVICE_ID) !=
+            IA64_ATI_RAGE128_PF_ID) {
+        return;
+    }
+    if (pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
+        return;
+    }
+
+    rom = memory_region_get_ram_ptr(&pci_dev->rom);
+    rom_size = memory_region_size(&pci_dev->rom);
+    if (rom == NULL || rom_size < 0x400 || rom[0] != 0x55 || rom[1] != 0xaa) {
+        return;
+    }
+
+    declared = (uint32_t)rom[2] * 512U;
+    if (declared == 0 || declared > rom_size) {
+        return;
+    }
+
+    /* A real ATI image already has everything; do not touch it. */
+    for (i = 0; i + sizeof(ati_signature) - 1 <= declared; i++) {
+        if (memcmp(rom + i, ati_signature,
+                   sizeof(ati_signature) - 1) == 0) {
+            return;
+        }
+    }
+
+    /* 30h..47h is padding in the shipped image; refuse if that changes. */
+    for (i = 0x30; i < 0x48; i++) {
+        if (rom[i] != 0) {
+            return;
+        }
+    }
+
+    hdr = declared;
+    pll = hdr + 0x40U;
+    if (pll + 0x20U > rom_size) {
+        return;
+    }
+
+    memcpy(rom + 0x30, ati_signature, sizeof(ati_signature) - 1);
+    stw_le_p(rom + 0x48, hdr);
+    memset(rom + hdr, 0, 0x60);
+    stw_le_p(rom + hdr + 0x30, pll);
+    stw_le_p(rom + pll + 0x08, IA64_ATI_PLL_XCLK);
+    stw_le_p(rom + pll + 0x0e, IA64_ATI_PLL_REFERENCE_FREQ);
+    stw_le_p(rom + pll + 0x10, IA64_ATI_PLL_REFERENCE_DIV);
+    stl_le_p(rom + pll + 0x12, IA64_ATI_PLL_MIN_FREQ);
+    stl_le_p(rom + pll + 0x16, IA64_ATI_PLL_MAX_FREQ);
+
+    /* Grow the declared image so a bounds-checking parser sees the tables. */
+    declared = ROUND_UP(pll + 0x20U, 512U);
+    if (declared > rom_size || declared / 512U > 0xffU) {
+        return;
+    }
+    rom[2] = (uint8_t)(declared / 512U);
+    pcir = lduw_le_p(rom + 0x18);
+    if (pcir != 0 && pcir + 0x18U <= declared &&
+        memcmp(rom + pcir, "PCIR", 4) == 0) {
+        stw_le_p(rom + pcir + 0x10, declared / 512U);
+    }
+    rom[declared - 1] = 0;
+    for (i = 0; i < declared - 1U; i++) {
+        checksum += rom[i];
+    }
+    rom[declared - 1] = (uint8_t)(-checksum);
+}
+
 static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
@@ -2154,6 +2253,7 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
      * other BAR on this machine is assigned by the machine model too.
      */
     if (pci_dev->io_regions[PCI_ROM_SLOT].size != 0) {
+        ia64_vpc_install_ati_rom_tables(pci_dev);
         pci_default_write_config(pci_dev, PCI_ROM_ADDRESS,
                                  IA64_VGA_ROM_PCI_BASE |
                                  PCI_ROM_ADDRESS_ENABLE, 4);
