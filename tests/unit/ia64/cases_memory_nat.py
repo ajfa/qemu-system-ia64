@@ -12,6 +12,7 @@ from .encoding import (
     DTR_PTE_UC,
     HIGH_TR_BASE,
     IA64_ALT_DTLB_VECTOR,
+    IA64_BREAK_VECTOR,
     IA64_EXCP_ILLEGAL,
     IA64_EXCP_NAT_CONSUMPTION,
     IA64_DCR_DM,
@@ -46,9 +47,12 @@ from .encoding import (
     alloc,
     alloc_m,
     bitfield,
+    br_call,
     br_cloop,
     br_cond,
     br_ctop_many,
+    br_ret,
+    break_m,
     bsw0,
     bsw1,
     bundle_words,
@@ -57,6 +61,7 @@ from .encoding import (
     chk_s_i,
     chk_s_m,
     cmp4_eq_imm,
+    cover_b,
     cmp4_eq_unc_imm,
     cmp8xchg16_acq,
     cmp8xchg16_rel,
@@ -68,6 +73,7 @@ from .encoding import (
     czx1_r,
     dtr_setup_bundles,
     fc_i,
+    flushrs_enc,
     fetchadd4_acq,
     fetchadd4_rel,
     invala,
@@ -102,6 +108,7 @@ from .encoding import (
     ld8_s_postinc,
     ld8_sa,
     lfetch,
+    loadrs_enc,
     lfetch_postinc,
     lfetch_reg_postinc,
     load_mem,
@@ -2576,7 +2583,130 @@ test_speculative_load_defers_via_dcr_without_ed = require_registers(
         "r4_nat": 1,
     }, entry=0x10)
 
-CASE_NAMES = (
+
+# --- Speculative stacked-register NaT survival sweeps -----------------------
+#
+# A control-speculative NaT in a stacked register must survive being spilled
+# to and refilled from the backing store.  BSPSTORE is swept across all 63
+# slot positions of a 512-byte NaT collection group, so every alignment of
+# the NaT bit inside AR.RNAT and of the collection-word boundary relative to
+# the spill/reload window is exercised.  The first variant forces the
+# physical-file wrap with two deep calls; the second interposes the
+# KiFlushRse shape (cover; flushrs; loadrs; rfi) inside a break handler,
+# the exact sequence whose AR.RNAT handling caused the 2003 SMP
+# c00002c9 crashes (dbb19b4, 2a2e9aa).  Expectations are
+# implementation-neutral: they assert only that chk.s still branches.
+
+def _spec_nat_call_return_case(collect_bit):
+    bspstore = 0x100000 + collect_bit * 8
+    name = f"spec_stacked_nat_survives_call_return_bit_{collect_bit:02d}"
+    return require_registers(name, [
+        (0x10, *movl_mlx(2, bspstore)),
+        (0x20, 0x01, mov_m_gr_ar(2, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, alloc_m(43, 20, 13, 0, 0), nop_i(),
+         nop_i()),
+        (0x40, *movl_mlx(9, 1)),
+        (0x50, 0x00, mov_m_gr_ar(9, 36), addl(3, 0x300, 0),
+         nop_i()),
+        (0x60, 0x08, ld8_fill_postinc(40, 3, 0), nop_i(),
+         nop_i()),
+        (0x70, 0x00, ld8_s_postinc(32, 40, 8), nop_i(),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x80, 0x200)),
+        (0x90, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x90, 0x200)),
+        (0xa0, 0x08, nop_m(), chk_s_m(32, 0xa0, 0xc0),
+         nop_i()),
+        (0xb0, 0x10, nop_m(), adds(8, 1, 0),
+         br_cond(0xb0, 0xd0)),
+        (0xc0, 0x10, nop_m(), adds(10, 1, 0),
+         br_cond(0xc0, 0xd0)),
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_cond(0xd0, 0xd0)),
+        (0x200, 0x00, alloc_m(34, 96, 88, 0, 0), nop_i(),
+         nop_i()),
+        (0x210, 0x00, mov_m_gr_ar(34, 64), nop_i(),
+         nop_i()),
+        (0x220, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+        (0x300, 0x00, 0x400, 0,
+         0),
+    ], {
+        "ip": 0xd0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+        "r10": 1,
+        "r32_nat": 1,
+    }, entry=0x10)
+
+
+def _spec_nat_interrupt_flush_case(collect_bit):
+    bspstore = 0x100000 + collect_bit * 8
+    name = f"spec_stacked_nat_survives_interrupt_flush_bit_{collect_bit:02d}"
+    return require_registers(name, [
+        (0x10, *movl_mlx(2, bspstore)),
+        (0x20, 0x01, mov_m_gr_ar(2, 18), nop_i(),
+         nop_i()),
+        (0x30, *movl_mlx(19, IA64_PSR_IC)),
+        (0x40, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0x40, 0x50)),
+        (0x50, 0x00, alloc_m(43, 20, 13, 0, 0), nop_i(),
+         nop_i()),
+        (0x60, 0x00, addl(3, 0x300, 0), nop_i(),
+         nop_i()),
+        (0x70, 0x08, ld8_fill_postinc(40, 3, 0), nop_i(),
+         nop_i()),
+        (0x80, 0x00, ld8_s_postinc(32, 40, 8), nop_i(),
+         nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x90, 0x200)),
+        (0xa0, 0x08, nop_m(), chk_s_m(32, 0xa0, 0xc0),
+         nop_i()),
+        (0xb0, 0x10, nop_m(), adds(8, 1, 0),
+         br_cond(0xb0, 0xd0)),
+        (0xc0, 0x10, nop_m(), adds(10, 1, 0),
+         br_cond(0xc0, 0xd0)),
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_cond(0xd0, 0xd0)),
+        (0x200, 0x00, alloc_m(34, 96, 88, 0, 0), nop_i(),
+         nop_i()),
+        (0x210, 0x00, break_m(0x42), nop_i(),
+         nop_i()),
+        (0x220, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+        (IA64_BREAK_VECTOR, 0x18, nop_m(), nop_m(),
+         cover_b()),
+        (IA64_BREAK_VECTOR + 0x10, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR + 0x20, 0x00, loadrs_enc(), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR + 0x30, *movl_mlx(20, 0x220)),
+        (IA64_BREAK_VECTOR + 0x40, 0x00,
+         mov_m_gr_cr(20, 19), nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x50, 0x10, nop_m(), nop_i(),
+         rfi_b()),
+        (0x300, 0x00, 0x400, 0,
+         0),
+    ], {
+        "ip": 0xd0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+        "r10": 1,
+        "r32_nat": 1,
+    }, entry=0x10)
+
+
+_SPEC_NAT_SWEEP_NAMES = []
+for _bit in range(63):
+    for _builder in (_spec_nat_call_return_case, _spec_nat_interrupt_flush_case):
+        _case = _builder(_bit)
+        globals()["test_" + _case.name] = _case
+        _SPEC_NAT_SWEEP_NAMES.append(_case.name)
+
+CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
+
 
     'alat_reloading_register_does_not_leave_duplicate',
     'alloc_clears_destination_nat',

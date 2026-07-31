@@ -438,6 +438,9 @@ static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
 
     if (ncb == 63) {
         env->ar_rnat = ia64_rse_read_u64(env, bspload, ra) & INT64_MAX;
+        trace_ia64_rse_rnat_floor(env_cpu(env)->cpu_index, "collection-load",
+                                  env->rse.rse_rnat_low, bspload - 0x1f8,
+                                  env->ar_bspstore, env->ar_rnat);
         env->rse.rse_rnat_low = bspload - 0x1f8;
         env->rse.rse_clean_nat++;
         env->psr &= ~(IA64_PSR_DA | IA64_PSR_DD);
@@ -765,6 +768,17 @@ void ia64_rse_check(CPUIA64State *env, const char *site)
                (int32_t)((int64_t)(env->ar_bspstore >> 9) -
                          (int64_t)(bspload >> 9));
     }
+
+    /*
+     * AR.RNAT floor invariants (see the comments in ia64_rse_store_one):
+     * the floor is a slot address, so 8-byte aligned; every update path
+     * bounds it by the highest committed store, so it can exceed AR.BSP by
+     * at most the one-word advance of a boundary store; and AR.RNAT's
+     * bit 63 is unrepresentable and masked on every write path.
+     */
+    bad |= (env->rse.rse_rnat_low & 7) != 0;
+    bad |= env->rse.rse_rnat_low > env->ar_bsp + 8;
+    bad |= (env->ar_rnat >> 63) != 0;
 
     if (bad && qatomic_fetch_inc(&reported) < 8) {
         qemu_log_mask(LOG_GUEST_ERROR,
