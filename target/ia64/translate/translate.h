@@ -64,6 +64,16 @@ typedef struct DisasContext {
     IA64TranslationMemoryState memory;
     IA64TranslationRestartState restart;
     IA64TranslationBranchState branch;
+    /*
+     * PSR.cpl is part of the TB flags (it selects the mmu index), so a TB
+     * only ever executes at the privilege level it was translated for and
+     * privilege checks can be resolved at translation time.  The single
+     * instruction that can change CPL without leaving the TB is a
+     * predicated epc (the unpredicated form exits); it clears cpl_known
+     * for the rest of the TB.
+     */
+    uint8_t cpl;
+    bool cpl_known;
 } DisasContext;
 
 typedef enum IA64GenResult {
@@ -194,7 +204,8 @@ void ia64_update_nat_known(DisasContext *ctx,
                            const Ia64Instruction *insn);
 bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
                    bool record_iipa);
-void ia64_gen_check_privileged(const Ia64Instruction *insn);
+void ia64_gen_check_privileged(DisasContext *ctx,
+                               const Ia64Instruction *insn);
 void ia64_gen_check_branch(DisasContext *ctx, TCGv_i64 failed,
                            uint64_t target, uint64_t completed_ip,
                            bool record_iipa,

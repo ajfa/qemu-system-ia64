@@ -1794,11 +1794,17 @@ static void ia64_gen_check_gr_in_frame(const Ia64Instruction *insn,
     }
 }
 
-void ia64_gen_check_privileged(const Ia64Instruction *insn)
+void ia64_gen_check_privileged(DisasContext *ctx,
+                               const Ia64Instruction *insn)
 {
-    TCGv_i64 cpl = tcg_temp_new_i64();
-    TCGLabel *allowed = gen_new_label();
+    TCGv_i64 cpl;
+    TCGLabel *allowed;
     uint64_t isr = 0x10;
+
+    if (ctx->cpl_known && ctx->cpl == 0) {
+        /* Kernel-mode TB: the check can never fail. */
+        return;
+    }
 
     if (insn->opcode == IA64_OP_TAK) {
         isr |= IA64_ISR_NA | 3;
@@ -1806,6 +1812,8 @@ void ia64_gen_check_privileged(const Ia64Instruction *insn)
         isr |= IA64_ISR_NA;
     }
 
+    cpl = tcg_temp_new_i64();
+    allowed = gen_new_label();
     tcg_gen_andi_i64(cpl, cpu_psr, IA64_PSR_CPL_MASK);
     tcg_gen_brcondi_i64(TCG_COND_EQ, cpl, 0, allowed);
     tcg_gen_st_i64(tcg_constant_i64(isr), tcg_env,
@@ -2480,7 +2488,7 @@ static IA64PrepareResult ia64_gen_prepare_insn(
         ia64_gen_check_gr_in_frame(insn, insn->operands.common.source2);
     }
     if (ia64_insn_is_privileged(insn)) {
-        ia64_gen_check_privileged(insn);
+        ia64_gen_check_privileged(ctx, insn);
     }
     if (ia64_load_base_update_has_same_target(insn)) {
         ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
@@ -2557,6 +2565,8 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
         MMU_IDX_VIRT_CPL((flags & IA64_TB_FLAG_CPL_MASK) >>
                          IA64_TB_FLAG_CPL_SHIFT) :
         MMU_PHYS_IDX;
+    ctx->cpl = (flags & IA64_TB_FLAG_CPL_MASK) >> IA64_TB_FLAG_CPL_SHIFT;
+    ctx->cpl_known = true;
     ctx->restart.start_slot = (ctx->base.tb->flags & IA64_TB_FLAG_RI_MASK) >>
                       IA64_TB_FLAG_RI_SHIFT;
     if (ctx->restart.start_slot > 2) {

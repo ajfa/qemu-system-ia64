@@ -603,7 +603,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
          * virtual-machine environment.
          */
         if (ia64_env_cpu_class(ctx->env)->has_virtualization) {
-            ia64_gen_check_privileged(insn);
+            ia64_gen_check_privileged(ctx, insn);
             ia64_gen_raise_exception(IA64_EXCP_VIRTUALIZATION,
                                       insn->address, insn->raw, insn->slot);
         } else {
@@ -736,6 +736,11 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         gen_helper_epc(tcg_env, tcg_constant_i64(insn->address),
                        tcg_constant_i64(insn->raw),
                        tcg_constant_i32(insn->slot));
+        /*
+         * A predicated epc continues this TB with a possibly-raised CPL,
+         * so translation-time privilege elision must stop here.
+         */
+        ctx->cpl_known = false;
         if (skip == NULL) {
             ia64_gen_exit_to_completed(ctx, next_ip, insn->address,
                                        record_iipa,
