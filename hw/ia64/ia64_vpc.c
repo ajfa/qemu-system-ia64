@@ -2947,12 +2947,14 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
 #endif
 #ifdef CONFIG_IA64_VPC_NETWORK
     /*
-     * Default to the Intel PRO/100 (i82557b): Windows XP / Server 2003 IA-64
-     * ship an inbox driver for it (NET557.IN_ / DEV_1229), whereas QEMU's
-     * e1000 identifies as the 82540EM (DEV_100E) for which no inbox IA-64
-     * driver exists.  e1000 remains available via -nic model=e1000.
+     * Default to the 82543GC: XP IA-64's inbox e1000 INF matches exactly
+     * PCI\VEN_8086&DEV_1004&REV_02 (e1000w64.sys), giving the guests an
+     * inbox *gigabit* adapter -- verified working in XP 2002 and Whistler
+     * 2462.  The previous default, the 100 Mbit PRO/100 (i82557b,
+     * NET557.IN_ / DEV_1229), remains available via -nic model=i82557b;
+     * the plain e1000 (82540EM, DEV_100E) has no inbox IA-64 driver.
      */
-    mc->default_nic = "i82557b";
+    mc->default_nic = "e1000-82543gc";
 #endif
 #ifdef CONFIG_IA64_VPC_STORAGE
     mc->block_default_type = IF_SCSI;

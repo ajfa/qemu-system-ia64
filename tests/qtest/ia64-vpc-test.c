@@ -148,22 +148,21 @@ static const ExpectedPCIDevice expected_e1000 = {
 };
 
 /*
- * The default adapter is the Intel PRO/100 (i82557b), the model Windows
- * IA-64 ships an inbox driver for.  It exposes a 4 KiB prefetchable CSR BAR,
- * a 64-byte I/O BAR, and a flash BAR, all placed by the machine's generic
- * per-BAR NIC allocator inside the NIC memory / I/O windows.
+ * The default adapter is the 82543GC, the device XP IA-64's inbox e1000
+ * INF matches (DEV_1004 rev 02, e1000w64.sys).  Same e1000 core as the
+ * 82540EM: a 128 KiB CSR memory BAR and a 64-byte I/O BAR, placed by the
+ * machine's generic per-BAR NIC allocator inside the NIC windows.
  */
-static const ExpectedPCIDevice expected_i82557b = {
+static const ExpectedPCIDevice expected_e1000_82543gc = {
     .slot = IA64_E1000_SLOT,
     .vendor = PCI_VENDOR_ID_INTEL,
-    .device = 0x1229,
+    .device = E1000_DEV_ID_82543GC_COPPER,
     .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
     .irq_line = IA64_E1000_GSI,
     .irq_pin = 1,
     .bars = {
-        [0] = IA64_E1000_MMIO_BASE | PCI_BASE_ADDRESS_MEM_PREFETCH,
+        [0] = IA64_E1000_MMIO_BASE,
         [1] = IA64_E1000_IO_BASE | PCI_BASE_ADDRESS_SPACE_IO,
-        [2] = 0xc1060000,
     },
 };
 
@@ -974,7 +973,7 @@ static void test_pci_default_layout(void)
                         PCI_VENDOR_ID_LSI_LOGIC);
         g_free(lsi);
     }
-    assert_pci_device(&gbus.bus, &expected_i82557b);
+    assert_pci_device(&gbus.bus, &expected_e1000_82543gc);
     qtest_quit(qts);
 }
 
