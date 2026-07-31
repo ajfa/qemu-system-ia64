@@ -13,6 +13,51 @@
 
 #include "target/ia64/translate/translate.h"
 
+/*
+ * CR numbers whose write behaviour in ia64_write_cr is a plain store into
+ * env->cr[] -- no timer rearm, no TLB/TB flush, no SAPIC re-evaluation, no
+ * atomics -- and whose value nothing consumes at translation time.  These
+ * can be written inline and, critically, do not need to end the
+ * translation block: they are the interruption resources every handler
+ * prologue and epilogue writes (IIP/IPSR/IFS/IFA/ISR/IIM/ITIR/IIPA/IHA),
+ * plus DCR and the plain-stored vector registers.
+ */
+static bool ia64_cr_write_is_plain_store(uint32_t cr_num)
+{
+    switch (cr_num) {
+    case IA64_CR_DCR:
+    case IA64_CR_IPSR:
+    case IA64_CR_ISR:
+    case IA64_CR_IIP:
+    case IA64_CR_IFA:
+    case IA64_CR_ITIR:
+    case IA64_CR_IIPA:
+    case IA64_CR_IFS:
+    case IA64_CR_IIM:
+    case IA64_CR_IHA:
+    case IA64_CR_PMV:
+    case IA64_CR_CMCV:
+    case IA64_CR_LRR0:
+    case IA64_CR_LRR1:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * CR numbers ia64_system_read_cr serves straight from env->cr[]: the plain
+ * set above plus ITM/IVA/PTA/TPR, whose special behaviour is write-only.
+ * LID (atomic), IVR (acknowledge side effect) and IRR0-3 (live interrupt
+ * state) must keep going through the helper.
+ */
+static bool ia64_cr_read_is_plain_load(uint32_t cr_num)
+{
+    return ia64_cr_write_is_plain_store(cr_num) ||
+           cr_num == IA64_CR_ITM || cr_num == IA64_CR_IVA ||
+           cr_num == IA64_CR_PTA || cr_num == IA64_CR_SAPIC_TPR;
+}
+
 IA64GenResult ia64_gen_system(DisasContext *ctx,
                               const Ia64Instruction *insn,
                               TCGLabel *skip, bool record_iipa,
@@ -111,7 +156,14 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
 
             ia64_gen_validate_cr_access(checked, insn,
                                         tcg_constant_i64(0), false);
-            gen_helper_read_cr(val, tcg_env, tcg_constant_i32(op->source));
+            if (ia64_cr_read_is_plain_load(op->source)) {
+                tcg_gen_ld_i64(val, tcg_env,
+                               offsetof(CPUIA64State, cr) +
+                               op->source * sizeof(uint64_t));
+            } else {
+                gen_helper_read_cr(val, tcg_env,
+                                   tcg_constant_i32(op->source));
+            }
             ia64_gen_gr_write_nat_clear(op->destination, val);
         }
         break;
@@ -130,12 +182,33 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         ia64_gen_check_nat_register(insn, op->destination);
         ia64_gen_validate_cr_access(checked, insn,
                                     ia64_gr_src(op->destination), true);
-        if (ia64_cr_write_reads_clock(op->source)) {
-            translator_io_start(&ctx->base);
+        if (ia64_cr_write_is_plain_store(op->source)) {
+            /*
+             * validate_cr_access already faulted or masked the value, so
+             * the store is all that remains of ia64_write_cr's default
+             * case.  Not ending the TB here removes a translation break
+             * from every interruption prologue and epilogue.
+             */
+            tcg_gen_st_i64(checked, tcg_env,
+                           offsetof(CPUIA64State, cr) +
+                           op->source * sizeof(uint64_t));
+        } else if (op->source == IA64_CR_SAPIC_LID) {
+            /* Atomic store for cross-CPU readers; no translation effect. */
+            gen_helper_write_cr(tcg_env, tcg_constant_i32(op->source),
+                                checked);
+        } else {
+            /*
+             * ITM/IVA/PTA/TPR/EOI/ITV and any unlisted number: timer
+             * rearm, TLB/TB flush or interrupt re-evaluation -- keep the
+             * helper and end the TB so the pending-interrupt check runs.
+             */
+            if (ia64_cr_write_reads_clock(op->source)) {
+                translator_io_start(&ctx->base);
+            }
+            gen_helper_write_cr(tcg_env, tcg_constant_i32(op->source),
+                                checked);
+            ctx->restart.exit_after_bundle = true;
         }
-        gen_helper_write_cr(tcg_env, tcg_constant_i32(op->source),
-                            checked);
-        ctx->restart.exit_after_bundle = true;
         break;
     }
     case IA64_OP_MOV_RRGR: {
@@ -372,9 +445,12 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
     case IA64_OP_MOV_GRMSR:
         ia64_gen_check_nat_register(insn, op->register_index);
         ia64_gen_check_nat_register(insn, op->destination);
+        /*
+         * MSR writes are plain stores into env->msr[]; nothing reads them
+         * at translation time, so no TB exit is needed.
+         */
         gen_helper_write_msr(tcg_env, ia64_gr_src(op->register_index),
                              ia64_gr_src(op->destination));
-        ctx->restart.exit_after_bundle = true;
         break;
     case IA64_OP_MOV_IP:
     case IA64_OP_MOV_CURRENT_IP:
