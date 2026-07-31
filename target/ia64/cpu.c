@@ -1153,6 +1153,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
      */
     icc->cpuid_version = 0x000000001f010504ULL;
     icc->cpuid_features = IA64_CPUID4_LB;
+    icc->ia32_cpuid_version = 0x00000673;
     icc->itr_count = 64;
     icc->dtr_count = 64;
     icc->insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK;
@@ -1171,6 +1172,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
 typedef struct IA64CPUModelDef {
     uint64_t cpuid_version;
     uint64_t cpuid_features;
+    uint32_t ia32_cpuid_version;
     uint8_t itr_count;
     uint8_t dtr_count;
     uint64_t insertable_page_mask;
@@ -1193,6 +1195,7 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
 
     icc->cpuid_version = model->cpuid_version;
     icc->cpuid_features = model->cpuid_features;
+    icc->ia32_cpuid_version = model->ia32_cpuid_version;
     icc->itr_count = model->itr_count;
     icc->dtr_count = model->dtr_count;
     icc->insertable_page_mask = model->insertable_page_mask;
@@ -1223,6 +1226,8 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
      * own ld.s deferral is DCR-gated -- the behaviour of an sd=0 processor.
      */
     .cpuid_features = IA64_CPUID4_LB,
+    /* P6-class IA-32 engine identity: family 6, model 7, stepping 3. */
+    .ia32_cpuid_version = 0x00000673,
     .itr_count = 64,
     .dtr_count = 64,
     .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
@@ -1242,6 +1247,7 @@ static const IA64CPUModelDef ia64_cpu_model_montecito = {
     .cpuid_version = 0x0000000020000704ULL,
     /* brl and 16-byte atomics; spontaneous deferral stays unimplemented. */
     .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_AO,
+    .ia32_cpuid_version = 0x00000673,
     .itr_count = 64,
     .dtr_count = 64,
     .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
@@ -1273,6 +1279,13 @@ static const IA64CPUModelDef ia64_cpu_model_montecito = {
 static const IA64CPUModelDef ia64_cpu_model_merced = {
     .cpuid_version = 0x0000000007000804ULL,
     .cpuid_features = 0,
+    /*
+     * x86 family 7 is the AP-485 assignment for the original Itanium's
+     * IA-32 engine.  Model/stepping mirror the chosen native C2 identity
+     * (model 0, revision 8); no public document pins them, so replace
+     * with a hardware dump value if one ever surfaces.
+     */
+    .ia32_cpuid_version = 0x00000708,
     .itr_count = 8,
     .dtr_count = 48,
     .insertable_page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK,

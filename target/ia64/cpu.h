@@ -1602,6 +1602,13 @@ struct IA64CPUClass {
     uint64_t cpuid_version;
     uint64_t cpuid_features;
     /*
+     * IA-32 CPUID(1) EAX reported by the hardware IA-32 engine.  x86
+     * family 7 is the assignment for the original Itanium's engine (Intel
+     * AP-485 processor-identification tables); the Itanium 2 generation
+     * reports a P6-class identity instead.
+     */
+    uint32_t ia32_cpuid_version;
+    /*
      * Translation-register file sizes.  These are asymmetric on the original
      * Itanium (8 ITR / 48 DTR, 248701-002 §2.5.6); Madison/Montecito use 64 of
      * each in this model.  Bounds-checked separately for itr.i vs itr.d.

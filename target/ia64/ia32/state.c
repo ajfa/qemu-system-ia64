@@ -195,15 +195,17 @@ static void ia32_store_fp(CPUIA64State *env)
     }
 }
 
-static void ia32_init_features(CPUX86State *xenv)
+static void ia32_init_features(CPUIA64State *env, CPUX86State *xenv)
 {
     /*
-     * Madison identifies its IA-32 engine as family 6, model 7, stepping 3.
-     * Its feature word follows the corresponding Pentium III value, with PAE
-     * omitted because IA-32 paging is not available, and IA64 added to report
-     * that JMPE can return to the Itanium instruction set.  Other IA-32
-     * paging/system bits may still be set even though the IA-64 System
-     * Environment does not make the corresponding facility usable.
+     * The CPUID(1) EAX identity is per-model: Merced's engine reports x86
+     * family 7 (the AP-485 assignment for the Itanium), Madison's reports
+     * family 6, model 7, stepping 3.  The feature word follows the
+     * Pentium III value for both, with PAE omitted because IA-32 paging is
+     * not available, and IA64 added to report that JMPE can return to the
+     * Itanium instruction set.  Other IA-32 paging/system bits may still be
+     * set even though the IA-64 System Environment does not make the
+     * corresponding facility usable.
      */
     xenv->features[FEAT_1_EDX] =
         CPUID_FP87 | CPUID_VME | CPUID_DE | CPUID_PSE | CPUID_TSC |
@@ -212,7 +214,7 @@ static void ia32_init_features(CPUX86State *xenv)
         CPUID_PSE36 | CPUID_MMX | CPUID_FXSR | CPUID_SSE | CPUID_IA64;
     xenv->features[FEAT_1_ECX] = 0;
     xenv->cpuid_level = 2;
-    xenv->cpuid_version = 0x00000673;
+    xenv->cpuid_version = ia64_env_cpu_class(env)->ia32_cpuid_version;
     xenv->cpuid_vendor1 = CPUID_VENDOR_INTEL_1;
     xenv->cpuid_vendor2 = CPUID_VENDOR_INTEL_2;
     xenv->cpuid_vendor3 = CPUID_VENDOR_INTEL_3;
@@ -259,7 +261,7 @@ void ia64_ia32_enter(CPUIA64State *env)
     xenv->a20_mask = -1;
     xenv->hflags2 = HF2_GIF_MASK;
     xenv->xcr0 = XSTATE_FP_MASK | XSTATE_SSE_MASK;
-    ia32_init_features(xenv);
+    ia32_init_features(env, xenv);
 
     /*
      * SDM vol. 1 section 6.4.3 makes entry with a NaT in any register

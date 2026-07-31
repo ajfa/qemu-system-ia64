@@ -2208,6 +2208,28 @@ test_ia32_cpuid_leaf1_reports_madison_feature_word = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
 
+# Merced's IA-32 engine identifies as x86 family 7 (AP-485's assignment for
+# the original Itanium); model/stepping mirror the native C2 identity.
+test_ia32_cpuid_leaf1_reports_merced_signature = require_registers(
+    "ia32_cpuid_leaf1_reports_merced_signature", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "66 b8 01 00 00 00 "  # mov eax,1
+            "0f a2 "              # cpuid: signature and feature word
+            "0f b8 00 02")),      # jmpe 0x200
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+    ], {
+        "ip": 0x200,
+        "r8": 0x708,
+        "r9": 0,
+        "r10": 0x4383fbbf,
+        "r11": 0,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="merced")
+
 test_ia32_x87_top_round_trips_through_fsr = require_registers(
     "ia32_x87_top_round_trips_through_fsr", [
         *ia32_environment_bundles(0x700, 0x10),
@@ -2894,6 +2916,7 @@ CASE_NAMES = (
     'tf_upper_cpuid_feature_bits',
     'br_call_indirect_prefetch_hint_bit_ignored',
     'br_call_indirect_prefetch_hint_bit_ignored_madison',
+    'ia32_cpuid_leaf1_reports_merced_signature',
     'cpuid_merced',
     'unpack2_l_decode',
     'vmsw0_madison_illegal_operation',
