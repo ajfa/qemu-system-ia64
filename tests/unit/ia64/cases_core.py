@@ -614,7 +614,8 @@ test_tf_upper_cpuid_feature_bits = require_registers(
         "r5": 0,
         "r6": 1,
         "r7": 0,
-        "r29": 0x0000000000000007,
+        # CPUID[4] = lb|ao: spontaneous deferral is not implemented (sd=0).
+        "r29": 0x0000000000000005,
     }, entry=0x10)
 
 test_tf_same_pred_illegal = require_exception(
@@ -1140,7 +1141,8 @@ test_mov_cpuid_indexed_decode = require_registers("mov_cpuid_indexed_decode", [
      br_cond(0x60, 0x60)),
 ], {
     "ip": 0x60,
-    "r28": 0x0000000000000007,
+    # CPUID[4] = lb|ao: spontaneous deferral is not implemented (sd=0).
+    "r28": 0x0000000000000005,
     "r29": 0x0000000020000704,
     "r30": 0x49656e69756e6547,
 }, entry=0x10)
@@ -1153,7 +1155,9 @@ test_mov_cpuid_madison_model = require_registers(
         (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
     ], {
         "ip": 0x40,
-        "r28": 0x0000000000000003,
+        # lb only: no Itanium 2 implements spontaneous deferral, and this
+        # model's ld.s deferral is DCR-gated (the behaviour of sd=0).
+        "r28": 0x0000000000000001,
         "r29": 0x000000001f010504,
     }, entry=0x10, cpu="madison")
 

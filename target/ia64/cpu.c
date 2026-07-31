@@ -1152,7 +1152,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
      * Keep direct instantiation of the base type aligned with the legacy model.
      */
     icc->cpuid_version = 0x000000001f010504ULL;
-    icc->cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD;
+    icc->cpuid_features = IA64_CPUID4_LB;
     icc->itr_count = 64;
     icc->dtr_count = 64;
     icc->insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK;
@@ -1216,8 +1216,13 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
 static const IA64CPUModelDef ia64_cpu_model_madison = {
     /* Family 0x1f, model 1, revision 5, CPUID[4] is the last register. */
     .cpuid_version = 0x000000001f010504ULL,
-    /* No 16-byte atomics and no virtualization: both post-date Madison. */
-    .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD,
+    /*
+     * brl only.  No 16-byte atomics and no virtualization (both post-date
+     * Madison), and no spontaneous deferral either: no Itanium 2 implements
+     * it (era /proc/cpuinfo dumps show only "branchlong"), and this model's
+     * own ld.s deferral is DCR-gated -- the behaviour of an sd=0 processor.
+     */
+    .cpuid_features = IA64_CPUID4_LB,
     .itr_count = 64,
     .dtr_count = 64,
     .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
@@ -1235,7 +1240,8 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
 static const IA64CPUModelDef ia64_cpu_model_montecito = {
     /* Family 0x20, model 0, C2 revision 7, CPUID[4] is the last register. */
     .cpuid_version = 0x0000000020000704ULL,
-    .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD | IA64_CPUID4_AO,
+    /* brl and 16-byte atomics; spontaneous deferral stays unimplemented. */
+    .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_AO,
     .itr_count = 64,
     .dtr_count = 64,
     .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
