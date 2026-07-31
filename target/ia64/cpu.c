@@ -764,8 +764,15 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
     env->ip = info->firmware_entry;
     env->br[IA64_BR_RETURN_LINK] = info->firmware_entry;
     env->cr_iva = info->iva;
-    /* Preserve the platform's historical boot-time PTA value. */
-    env->cr_pta = 0x0000000000000030ULL;
+    /*
+     * VHPT disabled (ve=0), size field at its architectural minimum.
+     * The minimum VHPT size is 32 KB, i.e. PTA.size{7:2} below 15 is a
+     * reserved encoding (SDM Vol.2 rev 1.1 Table 3-6), so even a
+     * dont-care reset value must encode 15.  The firmware rewrites PTA
+     * to SAL_PTA_DISABLED_VALUE (the same encoding) before any OS code
+     * runs.
+     */
+    env->cr_pta = 15ULL << 2;
     env->cr_dcr = IA64_DCR_DM | IA64_DCR_DP;
     env->ar_kr0 = info->firmware_base;
     env->ar_kr7 = 0;
