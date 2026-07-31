@@ -4311,7 +4311,76 @@ test_br_ctop_strcpy_pipeline_survives_cover_rfi = require_registers(
         "r30": 129}, entry=0x10)
 
 GROUP = 'rse'
+
+# loadrs that lands AR.BSPSTORE exactly on a NaT collection word must leave
+# AR.RNAT authoritative for that word's group: the final mandatory load of
+# the loadrs descent is the collection word itself, so the immediately
+# following spill episode's boundary store round-trips the committed bits.
+# Guards the ia64_rse_store_one keep-mask logic (including the hardened
+# floor-above-the-word case) and the collection-load floor reset against
+# regressions of the 1b35c22/loadrs-zeroing family: any bug that takes the
+# re-store from the wrong source corrupts the committed NaT bit below.
+test_rse_loadrs_reestablishes_rnat_authority_at_boundary = require_registers(
+    "rse_loadrs_reestablishes_rnat_authority_at_boundary", [
+        # F1: bspstore = 1 MB, frame of 63 locals, r34 made NaT via
+        # UNAT-driven ld8.fill (backing slot B+0x10 -> collection bit 2).
+        (0x10, *movl_mlx(2, 0x100000)),
+        (0x20, 0x01, mov_m_gr_ar(2, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, alloc_m(43, 63, 63, 0, 0), nop_i(),
+         nop_i()),
+        (0x40, *movl_mlx(9, 1 << 32)),
+        (0x50, 0x00, mov_m_gr_ar(9, 36), addl(3, 0x300, 0),
+         nop_i()),
+        (0x60, 0x08, ld8_fill_postinc(34, 3, 0), nop_i(),
+         nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x70, 0x200)),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+        # F2: another 63-local frame; its alloc spills 30 of F1's slots.
+        # Deterministically clear the low group-2 locals.
+        (0x200, 0x00, alloc_m(43, 63, 63, 0, 0), nop_i(),
+         nop_i()),
+        (0x210, 0x00, adds(32, 0, 0), adds(33, 0, 0),
+         adds(34, 0, 0)),
+        (0x220, 0x00, adds(35, 0, 0), nop_i(),
+         nop_i()),
+        (0x230, 0x10, nop_m(), nop_i(),
+         br_call(1, 0x230, 0x400)),
+        # F3: alloc 90 forces the spill across the collection word at
+        # B+0x1f8 (committing bit 2), ending at bspstore = B+0x3c8.  Then
+        # shrink to sof 0 and loadrs 65 words: the descent's final load is
+        # the collection word itself, and BSPSTORE comes to rest on it.
+        (0x400, 0x01, alloc_m(75, 90, 0, 0, 0), nop_i(),
+         nop_i()),
+        (0x410, 0x01, alloc_m(8, 0, 0, 0, 0), nop_i(),
+         nop_i()),
+        (0x420, *movl_mlx(10, (65 * 8) << 16)),
+        (0x430, 0x01, mov_m_gr_ar(10, 16), nop_i(),
+         nop_i()),
+        (0x440, 0x01, loadrs_enc(), nop_i(),
+         nop_i()),
+        (0x450, 0x10, nop_m(), nop_i(),
+         br_call(2, 0x450, 0x600)),
+        # F4: the alloc's first mandatory store is the boundary store at
+        # B+0x1f8.  The committed word must survive the round trip.
+        (0x600, 0x01, alloc_m(75, 90, 0, 0, 0), nop_i(),
+         nop_i()),
+        (0x610, *movl_mlx(5, 0x1001f8)),
+        (0x620, 0x00, ld8(6, 5), nop_i(),
+         nop_i()),
+        (0x630, 0x10, nop_m(), nop_i(),
+         br_cond(0x630, 0x630)),
+    ], {
+        "ip": 0x630,
+        "exception": IA64_EXCP_NONE,
+        "r6": 1 << 2,
+    }, entry=0x10)
+
 CASE_NAMES = (
+
+    'rse_loadrs_reestablishes_rnat_authority_at_boundary',
 
     'alloc_m34_ignored_bits_decode',
     'alloc_predicated_illegal',

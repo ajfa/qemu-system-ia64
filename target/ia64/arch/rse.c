@@ -384,14 +384,41 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
         uint64_t group_base = bspstore - 0x1f8;
 
         if (env->rse.rse_rnat_low > group_base) {
-            uint64_t keep =
-                (1ULL << ia64_rse_collect_bit(env->rse.rse_rnat_low)) - 1;
+            uint64_t keep;
+
+            if (env->rse.rse_rnat_low > bspstore) {
+                /*
+                 * The floor sits above this collection word -- possible
+                 * when br.ret rebases BSPSTORE arithmetically down to
+                 * exactly a collection-word address without any register
+                 * store in between.  AR.RNAT then says nothing about this
+                 * group at all, and collect_bit() of an address in a
+                 * *different* group is a meaningless index (it used to
+                 * yield keep = 0 here, overwriting the whole committed
+                 * word with stale AR.RNAT content).  Preserve the word.
+                 */
+                keep = INT64_MAX;
+            } else {
+                /*
+                 * group_base < rse_rnat_low <= bspstore: the episode
+                 * began mid-group, the index is in-group by construction.
+                 */
+                keep = (1ULL << ia64_rse_collect_bit(
+                            env->rse.rse_rnat_low)) - 1;
+            }
 
             word = (ia64_rse_read_u64(env, bspstore, ra) & keep) |
                    (word & ~keep);
+            trace_ia64_rse_rnat_boundary_store(env_cpu(env)->cpu_index,
+                                               bspstore, word & INT64_MAX,
+                                               keep, env->ar_rnat,
+                                               env->rse.rse_rnat_low);
         }
         ia64_rse_write_u64(env, bspstore, word & INT64_MAX, ra);
         env->ar_rnat = 0;
+        trace_ia64_rse_rnat_floor(env_cpu(env)->cpu_index, "boundary-store",
+                                  env->rse.rse_rnat_low, bspstore + 8,
+                                  bspstore, 0);
         env->rse.rse_rnat_low = bspstore + 8;
         env->ar_bspstore = bspstore + 8;
         env->rse.rse_dirty_nat--;
