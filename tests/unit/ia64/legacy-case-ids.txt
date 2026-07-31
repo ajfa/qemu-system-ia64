@@ -820,6 +820,7 @@ pshr_nat_propagates
 pshradd2_decode
 psr_high_mask_and_um_decode
 psub1_uuu_decode
+padd1_r0_destination_illegal
 ptc_e_nat_addr_consumes
 ptc_e_purges_data_tc_on_srlz_i
 ptc_l_4g_page_size_is_purgeable

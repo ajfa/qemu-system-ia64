@@ -1505,6 +1505,19 @@ test_padd1_decode = require_registers("padd1_decode", [
      br_cond(0x30, 0x30)),
 ], {"ip": 0x30, "r5": 0x020304}, entry=0x10)
 
+# A multimedia instruction with r0 as destination raises Illegal Operation
+# (writing GR0 is architecturally illegal), same as every other GR writer.
+# Pinned because another branch's SIMD rework silently *ignored* r0
+# destinations after its env-writing helpers had corrupted the r0 global --
+# neither behaviour is this one.
+test_padd1_r0_destination_illegal = require_exception(
+    "padd1_r0_destination_illegal", [
+        (0x10, 0x00, addl(3, 0x010203, 0), addl(4, 0x010101, 0),
+         nop_i()),
+        (0x20, 0x02, nop_m(), padd1(0, 3, 4),
+         nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x20)
+
 test_psub1_uuu_decode = require_registers("psub1_uuu_decode", [
     (0x10, *movl_mlx(3, 0x000102ff000102ff)),
     (0x20, *movl_mlx(4, 0x0101010101010101)),
@@ -2892,6 +2905,7 @@ CASE_NAMES = (
     'pshradd2_decode',
     'psr_high_mask_and_um_decode',
     'psub1_uuu_decode',
+    'padd1_r0_destination_illegal',
     'reserved_a1_x4_5_x2b_1_illegal',
     'reserved_application_register_is_illegal',
     'reserved_indirect_branch_btype_illegal',

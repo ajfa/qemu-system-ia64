@@ -161,27 +161,5 @@ uint64_t ia64_alat_check_load_fp_addr(CPUIA64State *env, uint32_t reg,
                                       uint64_t addr, uint32_t size,
                                       uint32_t clear);
 
-void ia64_simd_pavg(CPUIA64State *env, uint32_t op_sel, uint32_t r1,
-                    uint32_t r2, uint32_t r3);
-void ia64_simd_pcmp(CPUIA64State *env, uint32_t op_sel, uint32_t r1,
-                    uint32_t r2, uint32_t r3);
-void ia64_simd_pminmax(CPUIA64State *env, uint32_t op_sel, uint32_t r1,
-                       uint32_t r2, uint32_t r3);
-void ia64_simd_pmpy(CPUIA64State *env, uint32_t op_sel, uint32_t r1,
-                    uint32_t r2, uint32_t r3, uint32_t shift);
-void ia64_simd_psad1(CPUIA64State *env, uint32_t r1, uint32_t r2,
-                     uint32_t r3);
-void ia64_simd_mux(CPUIA64State *env, uint32_t op_sel, uint32_t r1,
-                   uint32_t r2, uint32_t imm);
-void ia64_simd_mix(CPUIA64State *env, uint32_t op_sel, uint32_t r1,
-                   uint32_t r2, uint32_t r3);
-void ia64_simd_unpack(CPUIA64State *env, uint32_t op_sel, uint32_t r1,
-                      uint32_t r2, uint32_t r3);
-void ia64_simd_pack(CPUIA64State *env, uint32_t op_sel, uint32_t r1,
-                    uint32_t r2, uint32_t r3);
-void ia64_simd_czx(CPUIA64State *env, uint32_t op_sel, uint32_t r1,
-                   uint32_t r2, uint32_t r3);
-void ia64_simd_sum(CPUIA64State *env, uint32_t r1, uint32_t r2,
-                   uint32_t r3);
 
 #endif /* TARGET_IA64_ARCH_ARCH_H */

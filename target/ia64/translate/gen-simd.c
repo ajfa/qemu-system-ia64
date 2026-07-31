@@ -81,6 +81,20 @@ static void ia64_simd_insert_lane(TCGv_i64 result, TCGv_i64 value,
     tcg_gen_or_i64(result, result, value);
 }
 
+/*
+ * Write a SIMD result through the normal GR path.  An r0 destination is
+ * ignored here (matching every other GR writer in this translator); the
+ * old env-writing helpers stored to env->gr[0] and corrupted the r0
+ * global.  The stacked-register dirty note is taken care of by the
+ * ia64_gen_gr_nat_from_* call that every site emits afterwards.
+ */
+static void ia64_simd_write_gr(uint8_t reg, TCGv_i64 value)
+{
+    if (reg != 0) {
+        tcg_gen_mov_i64(cpu_gr[reg], value);
+    }
+}
+
 static void ia64_gen_pshr(const Ia64Instruction *insn, int lane_bits,
                           bool unsigned_shift)
 {
@@ -175,6 +189,7 @@ IA64GenResult ia64_gen_simd(DisasContext *ctx,
                             const Ia64Instruction *insn)
 {
     const IA64SimdOperands *op = &insn->operands.simd;
+    TCGv_i64 helper_result;
 
     (void)ctx;
 
@@ -313,10 +328,11 @@ IA64GenResult ia64_gen_simd(DisasContext *ctx,
         } else {
             sel = 3;
         }
-        gen_helper_simd_pavg(tcg_env, tcg_constant_i32(sel),
-                              tcg_constant_i32(op->destination),
-                              tcg_constant_i32(op->source1),
-                              tcg_constant_i32(op->source2));
+        helper_result = tcg_temp_new_i64();
+        gen_helper_simd_pavg(helper_result, tcg_constant_i32(sel),
+                               ia64_gr_src(op->source1),
+                               ia64_gr_src(op->source2));
+        ia64_simd_write_gr(op->destination, helper_result);
         ia64_gen_gr_nat_from_2(op->destination, op->source1, op->source2);
         break;
     }
@@ -341,10 +357,11 @@ IA64GenResult ia64_gen_simd(DisasContext *ctx,
         } else {
             sel = 5;
         }
-        gen_helper_simd_pcmp(tcg_env, tcg_constant_i32(sel),
-                              tcg_constant_i32(op->destination),
-                              tcg_constant_i32(op->source1),
-                              tcg_constant_i32(op->source2));
+        helper_result = tcg_temp_new_i64();
+        gen_helper_simd_pcmp(helper_result, tcg_constant_i32(sel),
+                               ia64_gr_src(op->source1),
+                               ia64_gr_src(op->source2));
+        ia64_simd_write_gr(op->destination, helper_result);
         ia64_gen_gr_nat_from_2(op->destination, op->source1, op->source2);
         break;
     }
@@ -363,10 +380,11 @@ IA64GenResult ia64_gen_simd(DisasContext *ctx,
         } else {
             sel = 3;
         }
-        gen_helper_simd_pminmax(tcg_env, tcg_constant_i32(sel),
-                                 tcg_constant_i32(op->destination),
-                                 tcg_constant_i32(op->source1),
-                                 tcg_constant_i32(op->source2));
+        helper_result = tcg_temp_new_i64();
+        gen_helper_simd_pminmax(helper_result, tcg_constant_i32(sel),
+                               ia64_gr_src(op->source1),
+                               ia64_gr_src(op->source2));
+        ia64_simd_write_gr(op->destination, helper_result);
         ia64_gen_gr_nat_from_2(op->destination, op->source1, op->source2);
         break;
     }
@@ -385,11 +403,12 @@ IA64GenResult ia64_gen_simd(DisasContext *ctx,
         } else {
             sel = 3;
         }
-        gen_helper_simd_pmpy(tcg_env, tcg_constant_i32(sel),
-                              tcg_constant_i32(op->destination),
-                              tcg_constant_i32(op->source1),
-                              tcg_constant_i32(op->source2),
-                              tcg_constant_i32(op->immediate));
+        helper_result = tcg_temp_new_i64();
+        gen_helper_simd_pmpy(helper_result, tcg_constant_i32(sel),
+                             ia64_gr_src(op->source1),
+                             ia64_gr_src(op->source2),
+                             tcg_constant_i32(op->immediate));
+        ia64_simd_write_gr(op->destination, helper_result);
         ia64_gen_gr_nat_from_2(op->destination, op->source1, op->source2);
         break;
     }
@@ -400,20 +419,22 @@ IA64GenResult ia64_gen_simd(DisasContext *ctx,
         ia64_gen_pshl(insn, 32);
         break;
     case IA64_OP_PSAD1:
-        gen_helper_simd_psad1(tcg_env,
-                               tcg_constant_i32(op->destination),
-                               tcg_constant_i32(op->source1),
-                               tcg_constant_i32(op->source2));
+        helper_result = tcg_temp_new_i64();
+        gen_helper_simd_psad1(helper_result,
+                              ia64_gr_src(op->source1),
+                              ia64_gr_src(op->source2));
+        ia64_simd_write_gr(op->destination, helper_result);
         ia64_gen_gr_nat_from_2(op->destination, op->source1, op->source2);
         break;
     case IA64_OP_MUX1:
     case IA64_OP_MUX2:
-        gen_helper_simd_mux(tcg_env,
-                             tcg_constant_i32(
-                                 insn->opcode == IA64_OP_MUX1 ? 0 : 1),
-                             tcg_constant_i32(op->destination),
-                             tcg_constant_i32(op->source1),
-                             tcg_constant_i32(op->immediate));
+        helper_result = tcg_temp_new_i64();
+        gen_helper_simd_mux(helper_result,
+                            tcg_constant_i32(
+                                insn->opcode == IA64_OP_MUX1 ? 0 : 1),
+                            ia64_gr_src(op->source1),
+                            tcg_constant_i32(op->immediate));
+        ia64_simd_write_gr(op->destination, helper_result);
         ia64_gen_gr_nat_from_1(op->destination, op->source1);
         break;
     case IA64_OP_MIX1_L:
@@ -437,10 +458,11 @@ IA64GenResult ia64_gen_simd(DisasContext *ctx,
         } else {
             sel = 5;
         }
-        gen_helper_simd_mix(tcg_env, tcg_constant_i32(sel),
-                             tcg_constant_i32(op->destination),
-                             tcg_constant_i32(op->source1),
-                             tcg_constant_i32(op->source2));
+        helper_result = tcg_temp_new_i64();
+        gen_helper_simd_mix(helper_result, tcg_constant_i32(sel),
+                               ia64_gr_src(op->source1),
+                               ia64_gr_src(op->source2));
+        ia64_simd_write_gr(op->destination, helper_result);
         ia64_gen_gr_nat_from_2(op->destination, op->source1, op->source2);
         break;
     }
@@ -456,10 +478,11 @@ IA64GenResult ia64_gen_simd(DisasContext *ctx,
         } else {
             sel = 2;
         }
-        gen_helper_simd_pack(tcg_env, tcg_constant_i32(sel),
-                              tcg_constant_i32(op->destination),
-                              tcg_constant_i32(op->source1),
-                              tcg_constant_i32(op->source2));
+        helper_result = tcg_temp_new_i64();
+        gen_helper_simd_pack(helper_result, tcg_constant_i32(sel),
+                               ia64_gr_src(op->source1),
+                               ia64_gr_src(op->source2));
+        ia64_simd_write_gr(op->destination, helper_result);
         ia64_gen_gr_nat_from_2(op->destination, op->source1, op->source2);
         break;
     }
@@ -484,18 +507,20 @@ IA64GenResult ia64_gen_simd(DisasContext *ctx,
         } else {
             sel = 5;
         }
-        gen_helper_simd_unpack(tcg_env, tcg_constant_i32(sel),
-                                tcg_constant_i32(op->destination),
-                                tcg_constant_i32(op->source1),
-                                tcg_constant_i32(op->source2));
+        helper_result = tcg_temp_new_i64();
+        gen_helper_simd_unpack(helper_result, tcg_constant_i32(sel),
+                               ia64_gr_src(op->source1),
+                               ia64_gr_src(op->source2));
+        ia64_simd_write_gr(op->destination, helper_result);
         ia64_gen_gr_nat_from_2(op->destination, op->source1, op->source2);
         break;
     }
     case IA64_OP_SUM:
-        gen_helper_simd_sum(tcg_env,
-                             tcg_constant_i32(op->destination),
-                             tcg_constant_i32(op->source1),
-                             tcg_constant_i32(op->source2));
+        helper_result = tcg_temp_new_i64();
+        gen_helper_simd_sum(helper_result,
+                            ia64_gr_src(op->source1),
+                            ia64_gr_src(op->source2));
+        ia64_simd_write_gr(op->destination, helper_result);
         ia64_gen_gr_nat_from_2(op->destination, op->source1, op->source2);
         break;
     case IA64_OP_CZX1_L:
@@ -513,10 +538,10 @@ IA64GenResult ia64_gen_simd(DisasContext *ctx,
         } else {
             sel = 3;
         }
-        gen_helper_simd_czx(tcg_env, tcg_constant_i32(sel),
-                             tcg_constant_i32(op->destination),
-                             tcg_constant_i32(op->source2),
-                             tcg_constant_i32(0));
+        helper_result = tcg_temp_new_i64();
+        gen_helper_simd_czx(helper_result, tcg_constant_i32(sel),
+                            ia64_gr_src(op->source2));
+        ia64_simd_write_gr(op->destination, helper_result);
         ia64_gen_gr_nat_from_1(op->destination, op->source2);
         break;
     }
