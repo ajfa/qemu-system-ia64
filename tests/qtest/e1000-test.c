@@ -23,6 +23,7 @@ struct QE1000 {
 static const char *models[] = {
     "e1000",
     "e1000-82540em",
+    "e1000-82543gc",
     "e1000-82544gc",
     "e1000-82545em",
 };

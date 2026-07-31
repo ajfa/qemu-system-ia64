@@ -1733,6 +1733,19 @@ static const E1000Info e1000_devices[] = {
         .phy_id2   = E1000_PHY_ID2_8254xx_DEFAULT,
     },
     {
+        /*
+         * Matches the generic line of Windows XP IA-64's inbox INF
+         * (PCI\VEN_8086&DEV_1004&REV_02, e1000w64.sys): XP's 2001-era e1000
+         * driver stops at the 82543, so the 82540EM above binds no inbox
+         * driver there.  Rev 0x02 is what the INF's most specific match
+         * keys on.
+         */
+        .name      = "e1000-82543gc",
+        .device_id = E1000_DEV_ID_82543GC_COPPER,
+        .revision  = 0x02,
+        .phy_id2   = E1000_PHY_ID2_82544x,
+    },
+    {
         .name      = "e1000-82544gc",
         .device_id = E1000_DEV_ID_82544GC_COPPER,
         .revision  = 0x03,
