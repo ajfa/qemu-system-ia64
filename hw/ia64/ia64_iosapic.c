@@ -113,7 +113,18 @@ static void iosapic_rte_write(IA64IOSapicState *s, int pin, uint32_t val,
 
     s->rte[pin] = (s->rte[pin] & ~RTE_RO_BITS) | ro_bits;
     iosapic_fix_edge_remote_irr(s, pin);
-    iosapic_update(s, pin);
+    /*
+     * A redirection-table write is not an interrupt request.  A level
+     * route must be re-evaluated -- unmasking or rerouting an entry whose
+     * input is asserted delivers it -- but an edge route requests service
+     * only on an inactive-to-active transition of the input (460GX SSDM
+     * 248704-001 sec 2.6.2, redirection table).  Windows rewrites RTEs
+     * continually during PnP; delivering a vector for each rewrite of an
+     * unmasked edge entry injected interrupts no device had raised.
+     */
+    if (s->rte[pin] & RTE_TRIGGER_LEVEL) {
+        iosapic_update(s, pin);
+    }
 }
 
 static void iosapic_eoi(IA64IOSapicState *s, uint8_t vector)
@@ -155,8 +166,17 @@ static void iosapic_irq_handler(void *opaque, int pin, int level)
         return;
     }
 
+    /*
+     * Deliver level routes while the input is asserted, edge routes only
+     * on the 0->1 transition: a redundant assert of an already-high line
+     * is not a new edge.
+     */
+    bool old_level = s->irq_level[pin] != 0;
+
+    level = level != 0;
     s->irq_level[pin] = (uint8_t)level;
-    if (level) {
+    if (level &&
+        ((s->rte[pin] & RTE_TRIGGER_LEVEL) != 0 || !old_level)) {
         iosapic_update(s, pin);
     }
 }

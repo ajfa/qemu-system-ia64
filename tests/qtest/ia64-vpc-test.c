@@ -1368,6 +1368,58 @@ static void test_iosapic_level_remote_irr(void)
     qtest_quit(qts);
 }
 
+static uint64_t cpu_sapic_irr_word(QTestState *qts, unsigned word)
+{
+    g_autofree char *out = qtest_hmp(qts, "info registers");
+    char *line = strstr(out, "SAPIC IRR:");
+    uint64_t w[4];
+
+    g_assert_nonnull(line);
+    g_assert_cmpint(sscanf(line, "SAPIC IRR: %" SCNx64 " %" SCNx64
+                           " %" SCNx64 " %" SCNx64,
+                           &w[0], &w[1], &w[2], &w[3]), ==, 4);
+    g_assert_cmpuint(word, <, 4);
+    return w[word];
+}
+
+/*
+ * A redirection-table write is not an interrupt request, and a redundant
+ * assert of an already-high input is not a new edge: an edge-triggered
+ * entry delivers only on a 0->1 input transition (460GX SSDM 248704-001
+ * sec 2.6.2).  Windows rewrites RTEs continually during PnP enumeration,
+ * so delivering on RTE writes injected interrupts no device had raised.
+ */
+static void test_iosapic_edge_rte_write_is_not_a_request(void)
+{
+    const unsigned pin = 21;
+    const uint8_t vector = 0x53;
+    const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + pin * 2;
+    const unsigned word = vector / 64;
+    const uint64_t bit = 1ULL << (vector % 64);
+    QTestState *qts = ia64_vpc_start(NULL);
+    g_autofree char *iosapic_path =
+        find_unattached_child(qts, "ia64-iosapic");
+
+    /* Input already asserted before the route is programmed. */
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    iosapic_write(qts, rte_low, vector);
+    g_assert_cmphex(cpu_sapic_irr_word(qts, word) & bit, ==, 0);
+
+    /* Rewriting the entry is not a request either. */
+    iosapic_write(qts, rte_low, vector);
+    g_assert_cmphex(cpu_sapic_irr_word(qts, word) & bit, ==, 0);
+
+    /* Nor is a redundant assert of the already-high input. */
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    g_assert_cmphex(cpu_sapic_irr_word(qts, word) & bit, ==, 0);
+
+    /* The 0->1 transition is. */
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 0);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    g_assert_cmphex(cpu_sapic_irr_word(qts, word) & bit, !=, 0);
+    qtest_quit(qts);
+}
+
 static void test_iosapic_lowest_priority(void)
 {
     const unsigned pin = 22;
@@ -1462,6 +1514,8 @@ int main(int argc, char **argv)
                    test_iosapic_level_remote_irr);
     qtest_add_func("/ia64-vpc/iosapic/lowest-priority",
                    test_iosapic_lowest_priority);
+    qtest_add_func("/ia64-vpc/iosapic/edge-rte-write-not-a-request",
+                   test_iosapic_edge_rte_write_is_not_a_request);
     qtest_add_func("/ia64-vpc/sparse-io/pm-register",
                    test_sparse_io_pm_register);
 
