@@ -24,6 +24,7 @@ void ia64_mmu_ptr_purge(CPUIA64State *env, uint64_t ifa,
 void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va,
                         uint64_t size_reg, uint32_t mode);
 uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va);
+bool ia64_mmu_translate_debug(CPUIA64State *env, uint64_t va, uint64_t *pa);
 uint64_t ia64_mmu_probe(CPUIA64State *env, uint64_t va, uint32_t is_write,
                         uint64_t access_level);
 void ia64_mmu_probe_fault(CPUIA64State *env, uint64_t va,

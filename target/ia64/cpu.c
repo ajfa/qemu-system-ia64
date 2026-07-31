@@ -350,35 +350,12 @@ static void ia64_tlb_set_entry_page(CPUState *cs, vaddr addr, hwaddr pa,
 static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
-    const IA64TlbEntry *entry;
     uint64_t pa;
-    uint8_t perm;
-    uint32_t rid;
 
-    if (!(cpu->env.psr & IA64_PSR_IT)) {
-        return addr;
+    if (!ia64_mmu_translate_debug(&cpu->env, addr, &pa)) {
+        return -1;
     }
-
-    if (ia64_firmware_identity_pa(cpu->env.cr_iva, addr, cpu->env.psr,
-                                  addr, &pa)) {
-        return pa & TARGET_PAGE_MASK;
-    }
-
-    if (ia64_sal_boot_virtual_pa(&cpu->env, addr, &pa)) {
-        return pa & TARGET_PAGE_MASK;
-    }
-
-    rid = ia64_region_rid(&cpu->env, addr);
-    entry = ia64_tlb_find_cached(&cpu->env, addr, rid, true);
-    if (entry) {
-        ia64_tlb_entry_translate(entry, addr, ia64_psr_cpl(cpu->env.psr),
-                                 &pa, &perm);
-        return pa & TARGET_PAGE_MASK;
-    }
-    if (ia64_sal_boot_identity_pa(&cpu->env, addr, &pa)) {
-        return pa & TARGET_PAGE_MASK;
-    }
-    return addr;
+    return pa & TARGET_PAGE_MASK;
 }
 
 static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,

@@ -1126,7 +1126,7 @@ bool ia64_translate_data_access(CPUIA64State *env, uint64_t va,
 
 static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
                                  bool is_ifetch, bool is_rse, uint64_t *pte,
-                                 uint64_t *entry_va);
+                                 uint64_t *entry_va, uint8_t *page_shift);
 
 /*
  * The ED bit of the code page the CPU is currently executing from.
@@ -1165,7 +1165,8 @@ static bool ia64_code_tlb_ed_lookup(CPUIA64State *env, bool *known)
         return (entry->pte & IA64_PTE_ED) != 0;
     }
 
-    if (ia64_vhpt_lookup_pte(env, env->ip, true, false, &pte, &entry_va)) {
+    if (ia64_vhpt_lookup_pte(env, env->ip, true, false, &pte, &entry_va,
+                             NULL)) {
         return (pte & IA64_PTE_ED) != 0;
     }
 
@@ -1921,7 +1922,7 @@ static bool ia64_vhpt_itir_valid(const CPUIA64State *env,
 
 static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
                                  bool is_ifetch, bool is_rse, uint64_t *pte,
-                                 uint64_t *entry_va)
+                                 uint64_t *entry_va, uint8_t *page_shift)
 {
     uint8_t size;
     bool long_format;
@@ -1942,6 +1943,9 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
             return false;
         }
         *pte = ia64_vhpt_load_u64(env, entry_pa);
+        if (page_shift) {
+            *page_shift = ia64_region_preferred_ps(env, va);
+        }
         return ia64_vhpt_pte_valid(*pte);
     }
 
@@ -1958,6 +1962,9 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
         ia64_vhpt_load_long_entry(env, entry_pa, pte, &itir, &tag);
         if ((tag & (1ULL << 63)) || tag != expected_tag) {
             return false;
+        }
+        if (page_shift) {
+            *page_shift = (itir >> IA64_ITIR_PS_SHIFT) & IA64_ITIR_PS_MASK;
         }
         return ia64_vhpt_pte_valid(*pte) &&
                ia64_vhpt_itir_valid(env, *pte, itir);
@@ -1976,8 +1983,65 @@ bool ia64_vhpt_pte_not_present(CPUIA64State *env, uint64_t va,
     }
 
     return ia64_vhpt_lookup_pte(env, va, is_ifetch, is_rse,
-                                &pte, entry_va) &&
+                                &pte, entry_va, NULL) &&
            !(pte & IA64_PTE_PRESENT);
+}
+
+/*
+ * Side-effect-free translation for the monitor, the gdbstub and guest-memory
+ * dumps.  Consults, in order: physical addressing, the firmware/SAL boot
+ * identity windows, the data then instruction TLBs, and finally the VHPT
+ * through the no-insert lookup (nothing is installed into the TC and no
+ * fault is raised).  Returns false when no source can translate: reporting
+ * failure is strictly better for a debugger than the old fallback of
+ * handing back the virtual address, which silently read whatever physical
+ * page happened to share the low bits.
+ */
+bool ia64_mmu_translate_debug(CPUIA64State *env, uint64_t va, uint64_t *pa)
+{
+    const IA64TlbEntry *entry;
+    uint64_t pte;
+    uint64_t entry_va;
+    uint8_t page_shift;
+    uint8_t perm;
+    uint32_t rid;
+
+    if (!(env->psr & IA64_PSR_IT)) {
+        *pa = va;
+        return true;
+    }
+
+    if (ia64_firmware_identity_pa(env->cr_iva, va, env->psr, va, pa)) {
+        return true;
+    }
+    if (ia64_sal_boot_virtual_pa(env, va, pa)) {
+        return true;
+    }
+
+    rid = ia64_region_rid(env, va);
+    entry = ia64_tlb_find_cached(env, va, rid, false);
+    if (!entry) {
+        entry = ia64_tlb_find_cached(env, va, rid, true);
+    }
+    if (entry) {
+        ia64_tlb_entry_translate(entry, va, ia64_psr_cpl(env->psr),
+                                 pa, &perm);
+        return true;
+    }
+
+    if ((ia64_vhpt_lookup_pte(env, va, false, false, &pte, &entry_va,
+                              &page_shift) ||
+         ia64_vhpt_lookup_pte(env, va, true, false, &pte, &entry_va,
+                              &page_shift)) &&
+        (pte & IA64_PTE_PRESENT)) {
+        uint64_t page_mask = (1ULL << page_shift) - 1;
+
+        *pa = ((pte & ia64_pte_ppn_mask(env)) & ~page_mask) |
+              (va & page_mask);
+        return true;
+    }
+
+    return ia64_sal_boot_identity_pa(env, va, pa);
 }
 
 static IA64TlbEntry *
