@@ -49,6 +49,11 @@ tests = {
   'test-qapi-util': [],
   'test-interval-tree': [],
   'test-fifo': [],
+  'test-hid-keyboard': [
+    meson.project_source_root() / 'hw/input/hid.c',
+    migration,
+    pixman,
+  ],
 }
 
 if have_system or have_tools
