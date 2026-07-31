@@ -141,7 +141,13 @@ static void pal_rse_info(CPUIA64State *env)
     if (pal_reserved_args_are_zero(env)) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
         env->gr[IA64_PAL_GR_RESULT1] = 96;
-        env->gr[IA64_PAL_GR_RESULT2] = 16;
+        /*
+         * hints is a 2-bit field ({1:0} = si/li, SDM Vol.2 rev 1.1
+         * Fig. 11-36); everything above it is reserved.  Neither supported
+         * generation implements the eager RSE modes, so the answer is 0.
+         * (The previous value, 16, sat entirely in reserved bits.)
+         */
+        env->gr[IA64_PAL_GR_RESULT2] = 0;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
@@ -949,8 +955,16 @@ static void pal_cache_info(CPUIA64State *env)
                  ((uint64_t)info->stride_shift << 24) |
                  ((uint64_t)info->store_latency << 32) |
                  ((uint64_t)info->load_latency << 40);
+    /*
+     * config_info_2{39:32} is alias_boundary: the binary log of the minimum
+     * separation of aliased addresses for best performance (SDM Vol.2
+     * rev 1.1 Fig. 11-18) -- i.e. the way span, log2(size/associativity),
+     * which is by construction the same quantity as tag_lsb for every
+     * modelled cache.  It previously carried the line size, which belongs
+     * only in config_info_1.
+     */
     env->gr[IA64_PAL_GR_RESULT2] = info->size |
-                  ((uint64_t)info->line_shift << 32) |
+                  ((uint64_t)info->tag_lsb << 32) |
                   ((uint64_t)info->tag_lsb << 40) |
                   ((uint64_t)pal_cache_tag_msb(env) << 48);
     env->gr[IA64_PAL_GR_RESULT3] = 0;

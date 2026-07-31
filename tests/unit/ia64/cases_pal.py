@@ -291,7 +291,8 @@ test_pal_version_reserved_arg = require_registers("pal_version_reserved_arg",
 
 test_pal_rse_info = require_registers("pal_rse_info",
     pal_call_program(PAL_RSE_INFO),
-    {"ip": 0x30, "r28": PAL_RSE_INFO, "r8": 0, "r9": 96, "r10": 16},
+    # hints{1:0} = 0: neither modelled generation implements eager RSE modes.
+    {"ip": 0x30, "r28": PAL_RSE_INFO, "r8": 0, "r9": 96, "r10": 0},
     entry=0x10)
 
 test_pal_rse_info_reserved_arg = require_registers("pal_rse_info_reserved_arg",

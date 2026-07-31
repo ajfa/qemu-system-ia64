@@ -240,20 +240,22 @@ PAL_RATIO_2_1 = (2 << 32) | 1
 # WB(0), UC(4), UCE(5) and WC(6) are all implemented by both supported
 # generations (251110-003 sec 12.1; 245320-002 ch. 4 for Merced's WC buffer).
 PAL_MEM_ATTRIB_WB_UC_UCE_WC = (1 << 0) | (1 << 4) | (1 << 5) | (1 << 6)
+# config_info_2{39:32} is alias_boundary (SDM Vol.2 rev 1.1 Fig. 11-18):
+# log2 of the way span, which equals tag_lsb for every modelled cache.
 PAL_CACHE_INFO_L0_I_1 = ((4 << 8) | (6 << 16) |
                          (6 << 24) | (0xff << 32) | (1 << 40))
 PAL_CACHE_INFO_L0_D_1 = ((4 << 8) | (6 << 16) |
                          (6 << 24) | (1 << 32) | (1 << 40))
-PAL_CACHE_INFO_L0_2 = 16384 | (6 << 32) | (12 << 40) | (49 << 48)
+PAL_CACHE_INFO_L0_2 = 16384 | (12 << 32) | (12 << 40) | (49 << 48)
 PAL_CACHE_INFO_L1_I_1 = ((8 << 8) | (7 << 16) | (7 << 24) |
                          (0xff << 32) | (7 << 40))
-PAL_CACHE_INFO_L1_I_2 = (1048576 | (7 << 32) | (17 << 40) | (49 << 48))
+PAL_CACHE_INFO_L1_I_2 = (1048576 | (17 << 32) | (17 << 40) | (49 << 48))
 PAL_CACHE_INFO_L1_D_1 = ((1 << 1) | (8 << 8) | (7 << 16) |
                          (7 << 24) | (1 << 32) | (5 << 40))
-PAL_CACHE_INFO_L1_D_2 = (262144 | (7 << 32) | (15 << 40) | (49 << 48))
+PAL_CACHE_INFO_L1_D_2 = (262144 | (15 << 32) | (15 << 40) | (49 << 48))
 PAL_CACHE_INFO_L2_U_1 = (1 | (1 << 1) | (12 << 8) | (7 << 16) |
                          (7 << 24) | (1 << 32) | (14 << 40))
-PAL_CACHE_INFO_L2_U_2 = (12 * 1024 * 1024 | (7 << 32) | (20 << 40) |
+PAL_CACHE_INFO_L2_U_2 = (12 * 1024 * 1024 | (20 << 32) | (20 << 40) |
                          (49 << 48))
 PAL_VM_INFO_L0 = 1 | (32 << 8) | (32 << 16)
 PAL_VM_INFO_L1 = (1 | (128 << 8) | (128 << 16) |
@@ -265,17 +267,17 @@ PAL_VM_INFO_L1 = (1 | (128 << 8) | (128 << 16) |
 # Integer load latencies: L1 2, L2 6, L3 21 (245473-002 sec 4.1, 4.3, 4.4).
 PAL_CACHE_INFO_MERCED_L0_I_1 = ((4 << 8) | (5 << 16) |
                                 (5 << 24) | (0xff << 32) | (1 << 40))
-PAL_CACHE_INFO_MERCED_L0_I_2 = (16384 | (5 << 32) | (12 << 40) |
+PAL_CACHE_INFO_MERCED_L0_I_2 = (16384 | (12 << 32) | (12 << 40) |
                                 (IA64_IMPL_PA_BITS - 1 << 48))
 PAL_CACHE_INFO_MERCED_L0_D_1 = ((4 << 8) | (5 << 16) |
                                 (5 << 24) | (1 << 32) | (2 << 40))
 PAL_CACHE_INFO_MERCED_L1_U_1 = (1 | (1 << 1) | (6 << 8) | (6 << 16) |
                                 (6 << 24) | (1 << 32) | (6 << 40))
-PAL_CACHE_INFO_MERCED_L1_U_2 = (96 * 1024 | (6 << 32) | (14 << 40) |
+PAL_CACHE_INFO_MERCED_L1_U_2 = (96 * 1024 | (14 << 32) | (14 << 40) |
                                 (IA64_IMPL_PA_BITS - 1 << 48))
 PAL_CACHE_INFO_MERCED_L2_U_1 = (1 | (1 << 1) | (4 << 8) | (6 << 16) |
                                 (6 << 24) | (1 << 32) | (21 << 40))
-PAL_CACHE_INFO_MERCED_L2_U_2 = (4 * 1024 * 1024 | (6 << 32) | (20 << 40) |
+PAL_CACHE_INFO_MERCED_L2_U_2 = (4 * 1024 * 1024 | (20 << 32) | (20 << 40) |
                                 (IA64_IMPL_PA_BITS - 1 << 48))
 # ITLB 64 entries holding the instruction TRs; DTLB1 32 entries holding none;
 # DTLB2 96 entries holding the data TRs (248701-002 sec 2.5.6).  All levels
