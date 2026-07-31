@@ -2705,7 +2705,28 @@ for _bit in range(63):
         globals()["test_" + _case.name] = _case
         _SPEC_NAT_SWEEP_NAMES.append(_case.name)
 
+
+# A counted self-loop re-executes its bundle through a TCG back edge inside
+# one translation block.  A base register whose NaT was known clear *above*
+# the loop can be made NaT by the loop body itself, so the body's
+# consumption check must not be elided on the strength of the pre-loop
+# fact: iteration 2 consumes the NaT the body created in iteration 1.
+test_self_loop_nat_consumption_not_elided = require_exception(
+    "self_loop_nat_consumption_not_elided", [
+        (0x10, 0x00, addl(5, 0x300, 0), adds(8, 1, 0),
+         nop_i()),
+        (0x20, *movl_mlx(3, 1 << 61)),
+        (0x30, 0x02, nop_m(), mov_lc_gr(8),
+         nop_i()),
+        # ld8 consumes r5 as a base; ld8.s from an unimplemented address
+        # NaTs r5 for the next iteration.
+        (0x40, 0x18, ld8(7, 5), ld8_s(5, 3),
+         br_cloop(0x40, 0x40)),
+    ], IA64_EXCP_NAT_CONSUMPTION, fault_ip=0x40, entry=0x10)
+
 CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
+
+    'self_loop_nat_consumption_not_elided',
 
 
     'alat_reloading_register_does_not_leave_duplicate',

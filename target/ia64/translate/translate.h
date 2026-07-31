@@ -74,6 +74,13 @@ typedef struct DisasContext {
      */
     uint8_t cpl;
     bool cpl_known;
+    /*
+     * CFM.sof loaded by the most recent stacked-register frame check
+     * whose defining load certainly executed (or installed as a constant
+     * by alloc).  Valid until an instruction that can change the frame.
+     */
+    TCGv_i32 cfm_sof;
+    bool cfm_sof_valid;
 } DisasContext;
 
 typedef enum IA64GenResult {
@@ -181,6 +188,8 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
                                      bool track_psr_suppression);
 void ia64_gen_sync_ip_for_helper(const Ia64Instruction *insn);
 void ia64_gen_note_stacked_gr_write(uint8_t reg);
+void ia64_update_frame_tracking(DisasContext *ctx,
+                                const Ia64Instruction *insn);
 bool ia64_insn_must_start_group(const Ia64Instruction *insn);
 bool ia64_insn_must_end_group(const Ia64Instruction *insn);
 bool ia64_insn_requires_slot2(const Ia64Instruction *insn);

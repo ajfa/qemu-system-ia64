@@ -494,6 +494,44 @@ static bool ia64_nat_result_is_known_clear(const DisasContext *ctx,
     }
 }
 
+static bool ia64_insn_may_modify_cfm_sof(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_ALLOC:
+    case IA64_OP_COVER:
+    case IA64_OP_LOADRS:
+    case IA64_OP_RFI:
+    case IA64_OP_BREAK:
+    case IA64_OP_BR_CALL:
+    case IA64_OP_BRL_CALL:
+    case IA64_OP_BR_CALL_INDIRECT:
+    case IA64_OP_BR_RET:
+    case IA64_OP_BR_IA:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void ia64_update_frame_tracking(DisasContext *ctx,
+                                const Ia64Instruction *insn)
+{
+    if (ia64_insn_may_modify_cfm_sof(insn)) {
+        ctx->cfm_sof_valid = false;
+    }
+
+    /*
+     * alloc is architecturally unpredicated and installs an immediate
+     * SOF, so retain that value instead of reloading it for the next
+     * frame check.
+     */
+    if (insn->opcode == IA64_OP_ALLOC) {
+        ctx->cfm_sof =
+            tcg_constant_i32(insn->operands.common.immediate & 0x7f);
+        ctx->cfm_sof_valid = true;
+    }
+}
+
 void ia64_update_nat_known(DisasContext *ctx,
                            const Ia64Instruction *insn)
 {
@@ -1490,6 +1528,19 @@ void ia64_prepare_self_counted_loop(
         return;
     }
 
+    /*
+     * The counted self-loop places a TCG back edge at the loop label:
+     * everything after it executes again with whatever the loop body
+     * left behind.  Facts cached from code above the label (a CFM.sof
+     * load, NaT-known bits) would be re-consumed on the second
+     * iteration even if the body invalidated them later in translation
+     * order, so drop them before the label is planted.  Facts learned
+     * inside the body are re-established by the re-executed code.
+     */
+    ctx->cfm_sof_valid = false;
+    ctx->memory.nat_known_clear[0] = 1;
+    ctx->memory.nat_known_clear[1] = 0;
+
     ctx->branch.counted_self_label = gen_new_label();
     ctx->branch.counted_self_budget = tcg_temp_new_i64();
     ctx->branch.counted_self_ip = bundle_ip;
@@ -1782,10 +1833,27 @@ static void ia64_gen_check_gr_in_frame(const Ia64Instruction *insn,
     }
 
     if (reg >= IA64_STACKED_GR_BASE) {
-        TCGv_i32 sof = tcg_temp_new_i32();
+        DisasContext *ctx = insn->ctx;
         TCGLabel *valid = gen_new_label();
+        TCGv_i32 sof;
 
-        tcg_gen_ld8u_i32(sof, tcg_env, offsetof(CPUIA64State, cfm_sof));
+        if (ctx && ctx->cfm_sof_valid) {
+            sof = ctx->cfm_sof;
+        } else {
+            sof = tcg_temp_new_i32();
+            tcg_gen_ld8u_i32(sof, tcg_env,
+                             offsetof(CPUIA64State, cfm_sof));
+            /*
+             * A load emitted under an unknown predicate does not dominate
+             * later instructions: the predicated instruction may skip it
+             * at runtime.  Cache only values whose defining load
+             * certainly executes.
+             */
+            if (ctx && insn->qp == 0) {
+                ctx->cfm_sof = sof;
+                ctx->cfm_sof_valid = true;
+            }
+        }
         tcg_gen_brcondi_i32(TCG_COND_GTU, sof,
                             reg - IA64_STACKED_GR_BASE, valid);
         ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
@@ -2567,6 +2635,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
         MMU_PHYS_IDX;
     ctx->cpl = (flags & IA64_TB_FLAG_CPL_MASK) >> IA64_TB_FLAG_CPL_SHIFT;
     ctx->cpl_known = true;
+    ctx->cfm_sof_valid = false;
     ctx->restart.start_slot = (ctx->base.tb->flags & IA64_TB_FLAG_RI_MASK) >>
                       IA64_TB_FLAG_RI_SHIFT;
     if (ctx->restart.start_slot > 2) {
@@ -2699,6 +2768,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         }
         ia64_gen_advance_restart_point(ctx, bundle_ip, slot, skip_x_slot);
         ia64_update_nat_known(ctx, &insn);
+        ia64_update_frame_tracking(ctx, &insn);
         ctx->restart.instruction_group_start =
             ctx->restart.next_instruction_group_start;
         if (ia64_insn_may_modify_psr_ri(&insn)) {

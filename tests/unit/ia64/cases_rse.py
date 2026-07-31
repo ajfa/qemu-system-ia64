@@ -4378,7 +4378,31 @@ test_rse_loadrs_reestablishes_rnat_authority_at_boundary = require_registers(
         "r6": 1 << 2,
     }, entry=0x10)
 
+
+# The CFM.sof value loaded by a frame check under an unknown predicate must
+# not be cached for later checks: the predicated instruction may skip the
+# load at runtime.  Guards the translation-time frame-check cache.
+test_predicated_off_stacked_write_keeps_following_write_valid = \
+    require_registers(
+        "predicated_off_stacked_write_keeps_following_write_valid", [
+            (0x10, 0x00, alloc_m(9, 2, 2, 0, 0), nop_i(), nop_i()),
+            (0x20, 0x01, nop_m(), cmp_eq_imm(6, 7, 0, 0), nop_i()),
+            (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x50)),
+            # The p7 write is the first frame check in this translation
+            # block.  Its false predicate must not affect the next check.
+            (0x50, 0x01, nop_m(), adds(32, 1, 0, qp=7),
+             adds(33, 2, 0)),
+            (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+        ], {
+            "ip": 0x60,
+            "exception": IA64_EXCP_NONE,
+            "r32": 0,
+            "r33": 2,
+        }, entry=0x10)
+
 CASE_NAMES = (
+
+    'predicated_off_stacked_write_keeps_following_write_valid',
 
     'rse_loadrs_reestablishes_rnat_authority_at_boundary',
 
