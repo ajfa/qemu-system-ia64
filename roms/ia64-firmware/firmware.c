@@ -90,6 +90,8 @@
 #define ACPI_PM_RESET_VALUE  0x01U
 #define ACPI_PM1_CNT_SLEEP_ENABLE 0x2000U
 #define ACPI_SCI_IRQ     9U
+/* MADT Flags: the platform carries a PC/AT-compatible legacy interrupt space. */
+#define ACPI_MADT_FLAG_PCAT_COMPAT 0x1U
 #define ACPI_GAS_SYSTEM_MEMORY 0U
 #define ACPI_GAS_SYSTEM_IO     1U
 #define ACPI_DBGP_INTERFACE_16550_FULL 0U
@@ -14566,7 +14568,31 @@ static void efi_init_platform_tables(void)
     init_sdt_header(&mMadt.Hdr, EFI_SIGNATURE_32('A', 'P', 'I', 'C'), sizeof(mMadt));
     mMadt.Hdr.Revision = 2;
     mMadt.LocalApicAddr = 0xfee00000U;
-    mMadt.Flags = 0;
+    /*
+     * PCAT_COMPAT.  This platform presents a PC/AT legacy interrupt space:
+     * the i8042 sits at 0x60/0x64 driving IOSAPIC pins 1 and 12, the UART is
+     * on pin 4, the SCI on pin 9, and pins 0..15 are the ISA IRQ numbers
+     * identity-mapped, exactly as on the Merced-era platforms this machine
+     * models (460GX + PIIX4E, whose south bridge really does carry the 8259
+     * pair an APIC-mode OS is told to mask).
+     *
+     * The bit is what tells an OS that pins 0..15 *are* the ISA IRQs.  Linux
+     * IA-64 keys its entire legacy-IRQ setup off it: iosapic_init()
+     * (arch/ia64/kernel/iosapic.c) programs redirection entries for pins
+     * 0..15 only `if ((base_irq == 0) && pcat_compat)`, and the PS/2 driver
+     * asks for isa_irq_to_vector(1) unconditionally
+     * (include/asm-ia64/keyboard.h).  With the bit clear no ISA pin is ever
+     * routed, pc_keyb's send_data() never sees the ACK its interrupt handler
+     * is supposed to post, and the guest reports
+     * "keyboard: Timeout - AT keyboard not present?(ed)" and takes no input.
+     * The kernel considers firmware that leaves it clear on such a platform
+     * broken and hard-codes 1 for CONFIG_ITANIUM builds; Debian's kernel is
+     * built CONFIG_MCKINLEY, so it believes us.
+     *
+     * Windows does not need it - it routes the i8042 from PS2K/PS2M's ACPI
+     * _CRS instead - and is unaffected either way.
+     */
+    mMadt.Flags = ACPI_MADT_FLAG_PCAT_COMPAT;
     for (i = 0; i < FW_MAX_CPUS; i++) {
         mMadt.Lsapic[i].Type = 7;
         mMadt.Lsapic[i].Length = sizeof(mMadt.Lsapic[i]);
