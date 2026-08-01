@@ -430,6 +430,9 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
                                         env->rse.rse_dirty);
 
         ia64_rse_write_u64(env, bspstore, env->rse.rse_pgr[p], ra);
+        trace_ia64_rse_spill(env_cpu(env)->cpu_index, bspstore,
+                             env->rse.rse_pgr[p],
+                             ia64_rse_pgr_nat_get(env, p));
         if (env->rse.rse_rnat_low > bspstore) {
             env->rse.rse_rnat_low = bspstore;
         }
@@ -495,6 +498,7 @@ static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
         } else {
             nat = (env->ar_rnat >> ncb) & 1;
         }
+        trace_ia64_rse_fill(env_cpu(env)->cpu_index, bspload, value, nat);
         env->rse.rse_pgr[p] = value;
         ia64_rse_pgr_nat_set(env, p, nat);
         env->rse.rse_clean++;
@@ -676,19 +680,34 @@ static void ia64_rse_restore_frame(CPUIA64State *env, uint32_t preserved,
         return;
     }
 
-    if (missing <= env->rse.rse_clean) {
-        env->rse.rse_clean -= missing;
-        env->rse.rse_clean_nat -= missing_nats;
-        env->rse.rse_dirty = 0;
-        env->rse.rse_dirty_nat = 0;
-        env->ar_bspstore = env->ar_bsp;
-        return;
+    /*
+     * The restore extends below AR.BSPSTORE.  Do not satisfy it from the
+     * clean partition: discard the clean registers and reload the whole
+     * range from the backing store with mandatory loads instead.
+     *
+     * The clean partition is only a cache of memory (SDM Vol.2 6.5.2) and
+     * an implementation may drop it at any time, but which copy is used
+     * is observable when software has modified the backing store under
+     * it.  The architected edit sequence (SDM Vol.2 6.10) rewrites
+     * BSPSTORE, which empties the clean partition, so architected guests
+     * see no difference.  gcc 2.96's IA-64 unwinder, however, edits the
+     * flushed backing store *without* the BSPSTORE rewrite (its
+     * ia64_throw_helper carries a literal "TODO, do we need to do
+     * anything to make the values we wrote 'stick'?") and relies on the
+     * edited saved-b0/ar.pfs slots being reloaded: restoring the stale
+     * clean copy makes __throw "return" to its call site instead of the
+     * landing pad, which broke every C++ cleanup unwind on Debian 3.0
+     * (update-menus SIGSEGV, g++ 2.95/2.96 exception tests SIGABRT)
+     * whenever no interruption happened to evict the copies first.
+     */
+    if (env->rse.rse_clean > 0 || env->rse.rse_clean_nat > 0) {
+        env->rse.rse_invalid += env->rse.rse_clean;
+        env->rse.rse_clean = 0;
+        env->rse.rse_clean_nat = 0;
     }
 
-    env->rse.rse_dirty = -(missing - env->rse.rse_clean);
-    env->rse.rse_dirty_nat = -(missing_nats - env->rse.rse_clean_nat);
-    env->rse.rse_clean = 0;
-    env->rse.rse_clean_nat = 0;
+    env->rse.rse_dirty = -missing;
+    env->rse.rse_dirty_nat = -missing_nats;
     env->ar_bspstore = env->ar_bsp -
         (int64_t)(env->rse.rse_dirty + env->rse.rse_dirty_nat) * 8;
 }
@@ -776,51 +795,68 @@ void ia64_rse_check(CPUIA64State *env, const char *site)
                     env->rse.rse_clean + env->rse.rse_invalid;
     uint64_t expected_bspstore = env->ar_bsp -
         (int64_t)(env->rse.rse_dirty + env->rse.rse_dirty_nat) * 8;
-    bool bad = total != IA64_STACKED_GR_COUNT ||
-               env->ar_bspstore != expected_bspstore ||
-               env->rse.rse_clean < 0 || env->rse.rse_invalid < 0 ||
-               env->rse.rse_bol >= IA64_STACKED_GR_COUNT;
+    /*
+     * Each violated invariant sets its own bit so the report names the
+     * failing condition instead of leaving it to be reconstructed from
+     * the printed fields (which historically omitted exactly the fields
+     * the RNAT checks read).
+     */
+    unsigned viol = 0;
+#define RSE_VIOL(cond, bit) do { if (cond) viol |= 1u << (bit); } while (0)
+    RSE_VIOL(total != IA64_STACKED_GR_COUNT, 0);          /* partition sum */
+    RSE_VIOL(env->ar_bspstore != expected_bspstore, 1);   /* bspstore rel. */
+    RSE_VIOL(env->rse.rse_clean < 0, 2);
+    RSE_VIOL(env->rse.rse_invalid < 0, 3);
+    RSE_VIOL(env->rse.rse_bol >= IA64_STACKED_GR_COUNT, 4);
 
-    if (!bad && env->rse.rse_dirty >= 0) {
+    if (!viol && env->rse.rse_dirty >= 0) {
         /* NaT collection words live at addresses 0x1f8 mod 0x200. */
-        bad |= env->rse.rse_dirty_nat !=
-               (int32_t)((int64_t)(env->ar_bsp >> 9) -
-                         (int64_t)(env->ar_bspstore >> 9));
+        RSE_VIOL(env->rse.rse_dirty_nat !=
+                 (int32_t)((int64_t)(env->ar_bsp >> 9) -
+                           (int64_t)(env->ar_bspstore >> 9)), 5);
     }
-    if (!bad && env->rse.rse_clean >= 0 && env->rse.rse_dirty >= 0) {
+    if (!viol && env->rse.rse_clean >= 0 && env->rse.rse_dirty >= 0) {
         uint64_t bspload = env->ar_bspstore -
             (int64_t)(env->rse.rse_clean + env->rse.rse_clean_nat) * 8;
 
-        bad |= env->rse.rse_clean_nat !=
-               (int32_t)((int64_t)(env->ar_bspstore >> 9) -
-                         (int64_t)(bspload >> 9));
+        RSE_VIOL(env->rse.rse_clean_nat !=
+                 (int32_t)((int64_t)(env->ar_bspstore >> 9) -
+                           (int64_t)(bspload >> 9)), 6);
     }
 
     /*
      * AR.RNAT floor invariants (see the comments in ia64_rse_store_one):
-     * the floor is a slot address, so 8-byte aligned; every update path
-     * bounds it by the highest committed store, so it can exceed AR.BSP by
-     * at most the one-word advance of a boundary store; and AR.RNAT's
+     * the floor is a slot address, so 8-byte aligned, and AR.RNAT's
      * bit 63 is unrepresentable and masked on every write path.
+     *
+     * There is no checkable upper bound against AR.BSP or AR.BSPSTORE:
+     * a shrinking br.ret rebases both pointers arithmetically down and
+     * legitimately leaves the floor above them (the keep = INT64_MAX
+     * branch in ia64_rse_store_one exists exactly for that state, and
+     * clamping the floor there would misapply stale AR.RNAT bits into a
+     * lower collection word).  Only the alignment and the bit-63 mask
+     * are invariant.
      */
-    bad |= (env->rse.rse_rnat_low & 7) != 0;
-    bad |= env->rse.rse_rnat_low > env->ar_bsp + 8;
-    bad |= (env->ar_rnat >> 63) != 0;
+    RSE_VIOL((env->rse.rse_rnat_low & 7) != 0, 7);
+    RSE_VIOL((env->ar_rnat >> 63) != 0, 9);
+#undef RSE_VIOL
 
-    if (bad && qatomic_fetch_inc(&reported) < 8) {
+    if (viol && qatomic_fetch_inc(&reported) < 8) {
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "ia64 rse inconsistency at %s: excp=%u ip=%016" PRIx64
+                      "ia64 rse inconsistency at %s: viol=%#x excp=%u"
+                      " ip=%016" PRIx64
                       " sof=%u sol=%u sor=%u rrb=%u bol=%u dirty=%d/%d"
                       " clean=%d/%d invalid=%d bsp=%016" PRIx64
                       " bspstore=%016" PRIx64 " rnat=%016" PRIx64
-                      " cfle=%d\n",
-                      site, env->exception_state.exception, env->ip,
+                      " rnatlow=%016" PRIx64 " cfle=%d\n",
+                      site, viol, env->exception_state.exception, env->ip,
                       env->cfm_sof, env->cfm_sol,
                       env->cfm_sor, env->cfm_rrb_gr, env->rse.rse_bol,
                       env->rse.rse_dirty, env->rse.rse_dirty_nat,
                       env->rse.rse_clean,
                       env->rse.rse_clean_nat, env->rse.rse_invalid, env->ar_bsp,
-                      env->ar_bspstore, env->ar_rnat, env->rse.rse_cfle);
+                      env->ar_bspstore, env->ar_rnat, env->rse.rse_rnat_low,
+                      env->rse.rse_cfle);
     }
 #else
     (void)env;
@@ -1226,17 +1262,26 @@ void ia64_rse_load(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
     }
 
     /*
+     * Discard the clean partition up front rather than promoting it to
+     * dirty: promotion would reuse the physical copies without a memory
+     * read, which is observable when software modified the backing
+     * store under them (see ia64_rse_restore_frame).  Linux writes the
+     * user backing store from the kernel for ptrace and signal
+     * delivery, and the following kernel exit restores it with exactly
+     * this loadrs; the discarded range is re-read by the load loop
+     * below.
+     */
+    env->rse.rse_invalid += env->rse.rse_clean;
+    env->rse.rse_clean = 0;
+    env->rse.rse_clean_nat = 0;
+
+    /*
      * SDM Vol.2 6.5.4: ensure the backing store between BSP and the
      * tear point is present and dirty in the physical file; everything
      * below the tear point becomes invalid.
      */
-    words_to_load = words - (env->rse.rse_clean + env->rse.rse_clean_nat +
-                             env->rse.rse_dirty + env->rse.rse_dirty_nat);
+    words_to_load = words - (env->rse.rse_dirty + env->rse.rse_dirty_nat);
     if (words_to_load >= 0) {
-        env->rse.rse_dirty_nat += env->rse.rse_clean_nat;
-        env->rse.rse_dirty += env->rse.rse_clean;
-        env->rse.rse_clean = 0;
-        env->rse.rse_clean_nat = 0;
         env->ar_bspstore = env->ar_bsp -
             (int64_t)(env->rse.rse_dirty + env->rse.rse_dirty_nat) * 8;
         while (words_to_load > 0) {

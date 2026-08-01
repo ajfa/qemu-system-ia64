@@ -15,6 +15,8 @@ ia64_mmu_serialize(int cpu_index, uint32_t data, uint32_t instruction, uint32_t 
 # arch/rse.c
 ia64_rse_rnat_floor(int cpu_index, const char *operation, uint64_t old_low, uint64_t new_low, uint64_t bspstore, uint64_t rnat) "cpu=%d operation=%s rnat_low=0x%016" PRIx64 "->0x%016" PRIx64 " bspstore=0x%016" PRIx64 " rnat=0x%016" PRIx64
 ia64_rse_rnat_boundary_store(int cpu_index, uint64_t bspstore, uint64_t word, uint64_t keep_mask, uint64_t rnat, uint64_t rnat_low) "cpu=%d bspstore=0x%016" PRIx64 " word=0x%016" PRIx64 " keep=0x%016" PRIx64 " rnat=0x%016" PRIx64 " rnat_low=0x%016" PRIx64
+ia64_rse_spill(int cpu_index, uint64_t addr, uint64_t value, int nat) "cpu=%d addr=0x%016" PRIx64 " value=0x%016" PRIx64 " nat=%d"
+ia64_rse_fill(int cpu_index, uint64_t addr, uint64_t value, int nat) "cpu=%d addr=0x%016" PRIx64 " value=0x%016" PRIx64 " nat=%d"
 ia64_rse_state(int cpu_index, const char *operation, uint64_t bsp, uint64_t bspstore, int32_t dirty, int32_t dirty_nat, int32_t clean, int32_t clean_nat, int32_t invalid, uint32_t sof) "cpu=%d operation=%s bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64 " dirty=%" PRId32 "/%" PRId32 " clean=%" PRId32 "/%" PRId32 " invalid=%" PRId32 " sof=%" PRIu32
 
 # arch/pal.c

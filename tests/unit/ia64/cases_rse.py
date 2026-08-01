@@ -609,6 +609,52 @@ test_rse_nt_bstore_switch_nat_roundtrip = require_registers(
     }, entry=0x10)
 
 
+# gcc 2.96's IA-64 unwinder (ia64_throw_helper, libgcc2.c): flushrs, then a
+# plain st8 into the flushed backing store rewriting the caller's saved
+# slot, then br.ret -- WITHOUT the architected BSPSTORE rewrite of SDM
+# Vol.2 6.10 (the source carries a literal "TODO, do we need to do anything
+# to make the values we wrote 'stick'?").  The returned-to frame must see
+# the edited memory, not a stale clean-partition copy: the clean partition
+# is only a cache and restoring preserved registers from it made __throw
+# "return" to its call site instead of the landing pad, breaking every g++
+# 2.95/2.96 cleanup unwind on Debian 3.0 (update-menus SIGSEGV).
+test_rse_return_sees_backing_store_edit_under_clean = require_registers(
+    "rse_return_sees_backing_store_edit_under_clean", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, nop_m(), alloc(32, 3, 3, 0, 0),
+         nop_i()),
+        (0x40, *movl_mlx(34, 0x1111111122222222)),
+        (0x50, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x50, 0x200)),
+        (0x60, 0x00, nop_m(), adds(8, 0, 34),
+         nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_cond(0x70, 0x70)),
+
+        # "throw helper" body: leaf, sof == 0; flush the caller's frame,
+        # rewrite its saved r34 slot (AR.BSP - 8) in memory, return.
+        (0x200, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (0x210, 0x00, mov_m_ar_gr(20, 17), nop_i(),
+         nop_i()),
+        (0x220, 0x00, nop_m(), adds(20, -8, 20),
+         nop_i()),
+        (0x230, *movl_mlx(21, 0x3333333344444444)),
+        (0x240, 0x00, st8(20, 21), nop_i(),
+         nop_i()),
+        (0x250, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x3333333344444444,
+        "cfm_sof": 3,
+        "cfm_sol": 3,
+    }, entry=0x10)
+
+
 # KiFlushRse (WSRV03 miscs.s ~867): flushrs; loadrs (RSC.loadrs = 0);
 # br.ret -- with NO AR.RNAT save/restore.  The mandatory reloads after the
 # invalidation take the top partial collection group's NaT bits from
@@ -4482,6 +4528,7 @@ CASE_NAMES = (
     'rse_postinc_after_flushrs_preserves_register_value',
     'rse_return_growth_keeps_dirty_bsp_distance',
     'rse_return_reclaims_clean_keeps_unreached_rnat',
+    'rse_return_sees_backing_store_edit_under_clean',
     'rse_rfi_advanced_iip_bspstore_switch_loads_external_frame',
     'rse_rfi_advanced_iip_preserves_nested_call_locals',
     'rse_rfi_advanced_iip_uses_covered_current_frame',
