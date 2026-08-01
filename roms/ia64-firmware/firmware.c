@@ -23033,8 +23033,23 @@ static EFI_STATUS fw_partition_scan_gpt_header(
     }
     header_size = fw_le32(header + 12);
     header_crc = fw_le32(header + 16);
-    if (fw_le32(header + 8) != 0x00010000U ||
-        header_size < 92U || header_size > sizeof(header) ||
+    /*
+     * Deliberately no check on the Revision field at header+8.  The spec says
+     * it "is 0x00010000", but real writers disagree and real firmware does not
+     * care: EDK2's PartitionValidGptTable() validates the signature, the CRC
+     * over HeaderSize, MyLBA and SizeOfPartitionEntry, and never looks at the
+     * revision.  GNU Parted - which is what every period-correct IA-64 Linux
+     * installer partitions with - writes 0x00010200 instead
+     * (GPT_HEADER_REVISION_V1_02, parted-1.4.24 include/parted/disk_gpt.h:39,
+     * used by gpt_write_new() at libparted/disk_gpt.c:653, alongside
+     * "HeaderSize = 92; /_* per 1.02 spec *_/").  Requiring 0x00010000 exactly
+     * rejected a stock Debian 3.0 install outright: the primary and backup
+     * headers both failed, no partition was published, and the EFI shell's
+     * "map" reported "No readable file systems were found" on a disk whose
+     * ESP was perfectly intact.  The header CRC is the integrity guard here;
+     * the revision adds nothing to it.
+     */
+    if (header_size < 92U || header_size > sizeof(header) ||
         fw_le32(header + 20) != 0 || fw_le64(header + 24) != HeaderLba ||
         fw_le64(header + 32) > Parent->Media->LastBlock ||
         fw_le64(header + 32) == HeaderLba) {
