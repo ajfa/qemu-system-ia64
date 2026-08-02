@@ -655,6 +655,139 @@ test_rse_return_sees_backing_store_edit_under_clean = require_registers(
     }, entry=0x10)
 
 
+# Deep call recursion that wraps the 96-register physical stacked file,
+# followed by the kernel-exit sequence Linux uses in ia64_leave_kernel
+# (alloc 0 to drop the frame, loadrs to refill the covered frame,
+# mov ar.bspstore to rebase onto another backing store, rfi restoring
+# CR.IFS).  Modelled on entry.S dont_preserve_current_frame, whose
+# rse_clear_invalid loop allocs 12-register frames nine levels deep: the
+# deepest alloc runs the physical file out of invalid registers and
+# issues mandatory stores, spilling the oldest dirty registers of the
+# covered frame while the newest stay unspilled in the file.  After the
+# recursion unwinds, the covered frame must come back intact from a mix
+# of reloaded and never-spilled registers -- values *and* NaT bits, since
+# a stray NaT would fault the first consumer.
+#
+# NOTE: this passes on the code as of 2026-08-02 and is coverage for the
+# wrap/reload path, NOT a reproducer for the open clone2 bug in
+# status.md 3.9 -- that one is still unreproduced at microprogram level.
+def _clone_chain_level(base, next_base):
+    bundles = [
+        (base + 0x00, 0x00, alloc(34, 12, 10, 0, 0), mov_gr_b(35, 0),
+         nop_i()),
+        (base + 0x10, 0x00, nop_m(), adds(36, 0, 0),
+         adds(37, 0, 0)),
+        (base + 0x20, 0x00, nop_m(), adds(38, 0, 0),
+         adds(39, 0, 0)),
+        (base + 0x30, 0x00, nop_m(), adds(40, 0, 0),
+         adds(41, 0, 0)),
+    ]
+    if next_base is not None:
+        bundles.append((base + 0x40, 0x10, nop_m(), nop_i(),
+                        br_call(0, base + 0x40, next_base)))
+    else:
+        bundles.append((base + 0x40, 0x00, nop_m(), nop_i(),
+                        nop_i()))
+    bundles += [
+        (base + 0x50, 0x00, mov_m_gr_ar(34, 64), mov_b_gr(0, 35),
+         nop_i()),
+        (base + 0x60, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ]
+    return bundles
+
+
+test_rse_clone_return_reload_preserves_wrapped_frame = require_registers(
+    "rse_clone_return_reload_preserves_wrapped_frame", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, alloc(32, 10, 7, 0, 0), nop_i(),
+         nop_i()),
+        (0x40, *movl_mlx(33, 0x1111111111110033)),
+        (0x50, *movl_mlx(34, 0x2222222222220034)),
+        (0x60, *movl_mlx(35, 0x3333333333330035)),
+        (0x70, *movl_mlx(36, 0x4444444444440036)),
+        (0x80, *movl_mlx(37, 0x5555555555550037)),
+        (0x90, *movl_mlx(38, 0x6666666666660038)),
+        (0xa0, *movl_mlx(39, 0x7777777777770039)),
+        (0xb0, *movl_mlx(40, 0x8888888888880040)),
+        (0xc0, *movl_mlx(41, 0x9999999999990041)),
+        # schedule_tail stand-in: an ordinary call that clobbers the
+        # output registers (legal; the child code regenerates them).
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_call(0, 0xd0, 0x400)),
+        (0xe0, 0x18, nop_m(), nop_m(),
+         cover_b()),
+        (0xf0, *movl_mlx(20, (1 << 63) | 0x38a)),
+        (0x100, 0x00, mov_m_gr_cr(20, 23), nop_i(),
+         nop_i()),
+        (0x110, *movl_mlx(20, 0x330)),
+        (0x120, 0x00, mov_m_gr_cr(20, 19), nop_i(),
+         nop_i()),
+        (0x130, 0x00, mov_m_gr_cr(0, 16), nop_i(),
+         nop_i()),
+        (0x140, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x140, 0x500)),
+        (0x150, 0x00, alloc(2, 0, 0, 0, 0), nop_i(),
+         nop_i()),
+        (0x160, *movl_mlx(20, 0x50 << 16)),
+        (0x170, 0x00, mov_m_gr_ar(20, 16), nop_i(),
+         nop_i()),
+        (0x180, 0x00, loadrs_enc(), nop_i(),
+         nop_i()),
+        (0x190, *movl_mlx(20, 0x200f00)),
+        (0x1a0, 0x00, mov_ar(20, 18), nop_i(),
+         nop_i()),
+        (0x1b0, 0x00, mov_m_imm_ar(19, 0), nop_i(),
+         nop_i()),
+        (0x1c0, 0x10, nop_m(), nop_i(),
+         rfi_b()),
+
+        # rfi landing pad: the restored frame spins here for assertion.
+        (0x330, 0x00, mov_m_ar_gr(10, 17), nop_i(),
+         nop_i()),
+        (0x340, 0x10, nop_m(), nop_i(),
+         br_cond(0x340, 0x340)),
+
+        # schedule_tail stand-in body.
+        (0x400, 0x00, alloc(34, 3, 3, 0, 0), nop_i(),
+         nop_i()),
+        (0x410, 0x00, nop_m(), adds(32, 0, 0),
+         adds(33, 0, 0)),
+        (0x420, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ] + [b for k in range(9)
+         for b in _clone_chain_level(0x500 + 0x80 * k,
+                                     0x500 + 0x80 * (k + 1)
+                                     if k < 8 else None)], {
+        "ip": 0x340,
+        "exception": IA64_EXCP_NONE,
+        "r10": 0x200f00,
+        # r39-r41 are outputs: the schedule_tail stand-in clobbers them
+        # (legal).  The locals and every NaT bit must survive; a stray
+        # NaT here is what kills the clone2 child (its ld8 through the
+        # saved fn pointer would take a NaT-consumption fault).
+        "r33": 0x1111111111110033,
+        "r34": 0x2222222222220034,
+        "r35": 0x3333333333330035,
+        "r36": 0x4444444444440036,
+        "r37": 0x5555555555550037,
+        "r38": 0x6666666666660038,
+        "r33_nat": 0,
+        "r34_nat": 0,
+        "r35_nat": 0,
+        "r36_nat": 0,
+        "r37_nat": 0,
+        "r38_nat": 0,
+        "r39_nat": 0,
+        "r40_nat": 0,
+        "r41_nat": 0,
+        "cfm_sof": 10,
+        "cfm_sol": 7,
+    }, entry=0x10)
+
+
 # KiFlushRse (WSRV03 miscs.s ~867): flushrs; loadrs (RSC.loadrs = 0);
 # br.ret -- with NO AR.RNAT save/restore.  The mandatory reloads after the
 # invalidation take the top partial collection group's NaT bits from
@@ -4516,6 +4649,7 @@ CASE_NAMES = (
     'rse_loadrs_reloads_same_collection_rnat',
     'rse_loadrs_sets_tear_point',
     'rse_boundary_rewrite_preserves_committed_bits',
+    'rse_clone_return_reload_preserves_wrapped_frame',
     'rse_flushrs_loadrs_invalidate_preserves_rnat',
     'rse_loadrs_zero_current_frame_invalidates_parents',
     'rse_nt_bstore_switch_nat_roundtrip',
