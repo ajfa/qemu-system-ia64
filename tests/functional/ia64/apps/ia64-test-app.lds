@@ -23,4 +23,14 @@ SECTIONS
         *(.bss*)
         *(COMMON)
     }
+
+    /*
+     * Fedora's libgcc carries annobin notes; if they survive to the PE they
+     * become a non-loadable section 0 that the firmware PE loader rejects.
+     */
+    /DISCARD/ : {
+        *(.gnu.build.attributes*)
+        *(.note*)
+        *(.comment)
+    }
 }
