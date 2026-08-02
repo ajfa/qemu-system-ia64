@@ -386,6 +386,20 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
     case GUI_STAT:
         val = 64; /* free CMDFIFO entries */
         break;
+    case PM4_STAT:
+        /*
+         * Every GUI operation in this model completes synchronously, so
+         * the CCE never has queued work: report the PM4 command FIFO as
+         * fully free (PM4_FIFOCNT, bits 11:0) with PM4_BUSY (bit 16) and
+         * PM4_GUI_ACTIVE (bit 31) clear.  Linux's r128 DRM requires
+         * FIFOCNT >= its configured FIFO size (up to 192 depending on the
+         * CCE mode) with both busy bits clear before r128_do_cce_idle()
+         * succeeds; a constant 0 here made every such ioctl spin for its
+         * full 10 ms usec_timeout and XFree86 4.x with the DRI module
+         * loaded crawled at minutes per screen repaint.
+         */
+        val = 0xfff;
+        break;
     case CRTC_H_TOTAL_DISP:
         val = s->regs.crtc_h_total_disp;
         break;
