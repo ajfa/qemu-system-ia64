@@ -92,6 +92,7 @@ from .encoding import (
     bsw1,
     cmp4_eq_imm,
     cmp4_eq_unc_imm,
+    cmp4_ltu_imm,
     cmp_eq_and,
     cover_b,
     dep,
@@ -446,10 +447,16 @@ def test_repeated_timer_rfi_preserves_word_rmw(qemu):
         (0xe0, 0x00, ld2(4, 2), nop_i(), nop_i()),
         (0xf0, 0x00, nop_m(), adds(4, 1, 4), nop_i()),
         (0x100, 0x10, st2(2, 4), nop_i(), br_cloop(0x100, 0xe0)),
-        (0x110, 0x00, rsm(1 << 14), nop_i(), nop_i()),
-        (0x120, 0x00, ld2(8, 2), nop_i(), nop_i()),
-        (0x130, 0x00, ld8(9, 3), nop_i(), nop_i()),
-        (0x140, 0x10, nop_m(), nop_i(), br_cond(0x140, 0x140)),
+        # The counted loop is a wall-clock deadline the iothread-serviced
+        # ITM cannot promise to meet under host load; hold PSR.i until the
+        # two required handler runs have actually happened.
+        (0x110, 0x00, ld8(10, 3), nop_i(), nop_i()),
+        (0x120, 0x01, nop_m(), cmp4_ltu_imm(6, 7, 1, 10), nop_i()),
+        (0x130, 0x10, nop_m(), nop_i(), br_cond(0x130, 0x110, qp=7)),
+        (0x140, 0x00, rsm(1 << 14), nop_i(), nop_i()),
+        (0x150, 0x00, ld2(8, 2), nop_i(), nop_i()),
+        (0x160, 0x00, ld8(9, 3), nop_i(), nop_i()),
+        (0x170, 0x10, nop_m(), nop_i(), br_cond(0x170, 0x170)),
 
         (0x3000, 0x00, mov_m_cr_gr(16, IA64_CR_SAPIC_IVR),
          nop_i(), nop_i()),
@@ -463,10 +470,10 @@ def test_repeated_timer_rfi_preserves_word_rmw(qemu):
         (0x3080, 0x00, st8(18, 19), nop_i(), nop_i()),
         (0x3090, 0x10, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), nop_i(),
          rfi_b()),
-    ], entry=0x10, terminal_ip=0x140, timeout=8.0)
+    ], entry=0x10, terminal_ip=0x170, timeout=8.0)
     state = result.state
     expected = iterations & 0xffff
-    if (state.ip != 0x140 or
+    if (state.ip != 0x170 or
         state.exception != IA64_EXCP_NONE or
         state.gr[8] != expected or
         state.gr[9] < 2):
@@ -504,10 +511,16 @@ def test_timer_interrupt_preserves_banked_word_rmw(qemu):
         (0x1ff0, 0x08, ld2_bias(21, 22), adds(19, 1, 21), nop_i()),
         (0x2000, 0x10, st2(22, 19), nop_i(),
          br_cloop(0x2000, 0x1ff0)),
-        (0x2010, 0x00, rsm(IA64_PSR_I), nop_i(), nop_i()),
-        (0x2020, 0x00, ld2(8, 2), nop_i(), nop_i()),
-        (0x2030, 0x00, ld8(9, 3), nop_i(), nop_i()),
-        (0x2040, 0x10, nop_m(), nop_i(), br_cond(0x2040, 0x2040)),
+        # The counted loop is a wall-clock deadline the iothread-serviced
+        # ITM cannot promise to meet under host load; hold PSR.i until the
+        # handler has actually run once.
+        (0x2010, 0x00, ld8(10, 3), nop_i(), nop_i()),
+        (0x2020, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 10), nop_i()),
+        (0x2030, 0x10, nop_m(), nop_i(), br_cond(0x2030, 0x2010, qp=6)),
+        (0x2040, 0x00, rsm(IA64_PSR_I), nop_i(), nop_i()),
+        (0x2050, 0x00, ld2(8, 2), nop_i(), nop_i()),
+        (0x2060, 0x00, ld8(9, 3), nop_i(), nop_i()),
+        (0x2070, 0x10, nop_m(), nop_i(), br_cond(0x2070, 0x2070)),
 
         (0x3000, 0x00, mov_m_cr_gr(16, IA64_CR_SAPIC_IVR),
          nop_i(), nop_i()),
@@ -522,10 +535,10 @@ def test_timer_interrupt_preserves_banked_word_rmw(qemu):
          adds(22, 0x66, 0)),
         (0x3090, 0x10, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), nop_i(),
          rfi_b()),
-    ], entry=0x10, terminal_ip=0x2040, timeout=8.0)
+    ], entry=0x10, terminal_ip=0x2070, timeout=8.0)
     state = result.state
     expected = iterations & 0xffff
-    if (state.ip != 0x2040 or
+    if (state.ip != 0x2070 or
         state.exception != IA64_EXCP_NONE or
         state.psr != IA64_PSR_IC | IA64_PSR_BN or
         state.gr[8] != expected or
@@ -692,9 +705,18 @@ def test_rse_large_frame_timer_rfi_preserves_high_caller_local(qemu):
         (0x390, 0x08, mov_gr_psr_full(7), srlz_d(), nop_i()),
         (0x3a0, 0x10, nop_m(), adds(10, 1, 10),
          br_cloop(0x3a0, 0x3a0)),
-        (0x3b0, 0x00, rsm(1 << 14), nop_i(), nop_i()),
-        (0x3c0, 0x00, mov_m_gr_ar(36, 64), nop_i(), nop_i()),
-        (0x3d0, 0x10, nop_m(), nop_i(), br_ret(0)),
+        # The ITM deadline is serviced by the iothread and delivered via
+        # async_run_on_cpu, so under host load it can lag well past the
+        # counted loop.  Keep the large frame open with PSR.i set until
+        # the handler has run at least once; a fixed iteration count is
+        # a wall-clock deadline no emulated timer can promise to meet.
+        (0x3b0, *movl_mlx(25, 0x8010)),
+        (0x3c0, 0x00, ld8(26, 25), nop_i(), nop_i()),
+        (0x3d0, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 26), nop_i()),
+        (0x3e0, 0x10, nop_m(), nop_i(), br_cond(0x3e0, 0x3c0, qp=6)),
+        (0x3f0, 0x00, rsm(1 << 14), nop_i(), nop_i()),
+        (0x400, 0x00, mov_m_gr_ar(36, 64), nop_i(), nop_i()),
+        (0x410, 0x10, nop_m(), nop_i(), br_ret(0)),
 
         (0x3000, 0x00, mov_m_cr_gr(16, IA64_CR_SAPIC_IVR),
          nop_i(), nop_i()),
