@@ -92,6 +92,24 @@ jobs:
           --suite ia64 --suite qtest-ia64
           --print-errorlogs -t 2
 
+      - name: Run ia64 EFI functional suite
+        run: >
+          build/pyvenv/bin/meson test -C build
+          --suite func-ia64
+          --print-errorlogs -t 2
+
+      - name: Cross-check against upstream main's batteries
+        # Runs main's microprogram batteries (incl. the IA-32 cases) against
+        # the develop binary — the A/B check that has caught silent decode
+        # bugs (see plans/runbook.md §2). Both branches live in this repo.
+        run: |
+          git fetch --depth=1 origin main
+          git worktree add /tmp/qemu-main FETCH_HEAD
+          for g in core interrupt fp mmu memory-nat rse pal; do
+            python3 /tmp/qemu-main/tests/unit/ia64/test_tcg_group.py \
+              build/qemu-system-ia64 --group "$g"
+          done
+
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
