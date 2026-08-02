@@ -1191,8 +1191,19 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             return insn;
         }
 
-        if (ia64_b_op(raw) == 1 && ia64_bits(raw, 12, 1) == 0 &&
-            ia64_bits(raw, 27, 2) == 0 && ia64_bits(raw, 32, 1) == 0) {
+        /*
+         * hint.b is B9: op (40:37) == 2, x6 (32:27) == 1 (SDM Vol.3).  This
+         * used to match op == 1 with bits 32, 28:27 and 12 clear -- but op 1
+         * in the B unit is uniquely B5, the indirect br.call, and bits 36:32
+         * of B5 are branch hints an implementation must ignore.  Old gas
+         * (glibc 2.2.5's __clone2 on Debian 3.0) encodes br.call.few b0=b6
+         * with a branch-whether hint of 4, i.e. bits 32 and 12 clear, so the
+         * call that launches the LinuxThreads manager thread decoded as a
+         * hint and executed as a no-op: the child fell through into
+         * __clone2's _exit path with the callee's gp and wild-branched.
+         * Same defect class as the hint.i/chk.s.i fix (fdd7487).
+         */
+        if (ia64_b_op(raw) == 2 && ia64_bits(raw, 27, 6) == 1) {
             Ia64Instruction insn =
                 ia64_base_insn(IA64_OP_HINT_B, unit, raw, address, slot);
             insn.operands.decoder.imm = ia64_immu21(raw);
