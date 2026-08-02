@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <glib/gstdio.h>
 #include "qemu/bitops.h"
 #include "qemu/bswap.h"
 #include "qemu/sockets.h"

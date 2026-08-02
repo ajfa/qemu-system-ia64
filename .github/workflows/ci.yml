@@ -1,0 +1,218 @@
+name: CI
+
+# Build QEMU (ia64-softmmu) + the IA-64 firmware, and run the ia64 regression
+# gate (unit(ia64) + qtest-ia64).
+#
+# Both jobs run inside a Fedora container: Ubuntu has no IA-64 cross toolchain,
+# but Fedora packages gcc-ia64-linux-gnu / binutils-ia64-linux-gnu (a
+# kernel-style freestanding cross-compiler — exactly what the firmware's
+# -ffreestanding -nostdlib build needs). Fedora also carries the mingw64
+# toolchain upstream QEMU uses for Windows cross builds
+# (tests/docker/dockerfiles/fedora-win64-cross.docker).
+#
+# Pinned to fedora:44 to match the local development container.
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 1G
+
+jobs:
+  linux:
+    name: Linux build + ia64 test gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Install dependencies
+        # Beyond the bare build deps, this list mirrors the features enabled on
+        # the development host that matter for using the artifacts in testing:
+        # GTK+VTE and SDL2 displays, VNC with PNG/JPEG/SASL/TLS, curses, ALSA +
+        # PulseAudio backends, qcow2 compression libs (zstd/lzo/snappy/bzip2),
+        # curl block driver, capstone monitor disassembly, USB passthrough/
+        # redirection, iSCSI. (SCSI *controller* emulation is unconditional in
+        # QEMU and needs no library.)
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          bash bison bzip2 ccache diffutils findutils flex
+          gcc gcc-c++ gdb git glib2-devel glibc-langpack-en
+          libslirp-devel make meson ninja-build pixman-devel
+          pkgconf-pkg-config python3 which xorriso zlib-ng-compat-devel
+          gtk3-devel vte291-devel SDL2-devel SDL2_image-devel
+          ncurses-devel libpng-devel libjpeg-turbo-devel
+          cyrus-sasl-devel gnutls-devel
+          alsa-lib-devel pulseaudio-libs-devel
+          libzstd-devel lzo-devel snappy-devel bzip2-devel
+          libcurl-devel capstone-devel libiscsi-devel
+          libusb1-devel usbredir-devel
+          gcc-ia64-linux-gnu binutils-ia64-linux-gnu
+
+      - uses: actions/checkout@v4
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-linux-${{ github.sha }}
+          restore-keys: ccache-linux-
+
+      - name: Configure
+        run: |
+          export PATH=/usr/lib64/ccache:$PATH
+          mkdir build
+          cd build
+          ../configure \
+            --target-list=ia64-softmmu \
+            --enable-gtk \
+            --enable-slirp \
+            --disable-docs \
+            --disable-werror \
+            --disable-qom-cast-debug \
+            --disable-stack-protector
+
+      - name: Build QEMU + firmware
+        run: |
+          export PATH=/usr/lib64/ccache:$PATH
+          ninja -C build
+          ccache -s
+
+      - name: Run ia64 regression gate
+        run: >
+          build/pyvenv/bin/meson test -C build
+          --suite ia64 --suite qtest-ia64
+          --print-errorlogs -t 2
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-firmware
+          path: |
+            build/roms/ia64-firmware/ia64-firmware.bin
+            build/roms/ia64-firmware/ia64-firmware.map
+          if-no-files-found: error
+
+      - name: Assemble Linux package
+        # bin/ + share/qemu blobs + the IA-64 firmware (install:false in meson,
+        # copied in explicitly). Dynamically linked against Fedora 44 libraries —
+        # runs on Fedora 44+ (or a matching container), not on arbitrary distros.
+        run: |
+          DESTDIR=$PWD/dist ninja -C build install
+          cp build/roms/ia64-firmware/ia64-firmware.bin dist/usr/local/share/qemu/
+
+      - name: Upload Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-system-ia64-linux-x86_64
+          path: dist/
+          if-no-files-found: error
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-test-logs
+          path: build/meson-logs/
+          if-no-files-found: ignore
+
+  windows-cross:
+    name: Windows cross build (mingw64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Install dependencies
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          bash bison bzip2 ccache diffutils findutils flex
+          gcc gcc-c++ git glibc-langpack-en make meson
+          ninja-build pkgconf-pkg-config python3 which
+          mingw64-gcc mingw64-gcc-c++ mingw64-glib2 mingw64-pixman
+          mingw64-pkg-config mingw64-SDL2 mingw64-gtk3
+          mingw64-libpng mingw64-libjpeg-turbo mingw64-curl
+          mingw64-gnutls mingw64-bzip2 mingw-w64-tools
+          gcc-ia64-linux-gnu binutils-ia64-linux-gnu
+
+      - uses: actions/checkout@v4
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-mingw-${{ github.sha }}
+          restore-keys: ccache-mingw-
+
+      - name: Configure
+        run: |
+          mkdir build
+          cd build
+          ../configure \
+            --cross-prefix=x86_64-w64-mingw32- \
+            --target-list=ia64-softmmu \
+            --prefix=/ \
+            --enable-gtk \
+            --enable-slirp \
+            --disable-docs \
+            --disable-werror \
+            --disable-qom-cast-debug \
+            --disable-stack-protector
+
+      - name: Build QEMU + firmware
+        run: ninja -C build
+
+      - name: Assemble Windows package
+        # Windows installs use a flat layout: .exe files at the prefix root,
+        # firmware blobs in share/. The IA-64 firmware is install:false in
+        # meson, so copy it in explicitly, then pull in the mingw runtime DLLs
+        # the binaries link against (three passes to converge on transitive
+        # dependencies; system DLLs like kernel32 aren't in the sysroot and are
+        # skipped naturally).
+        run: |
+          DESTDIR=$PWD/dist ninja -C build install
+          cp build/roms/ia64-firmware/ia64-firmware.bin dist/share/
+          MINGW_PREFIX=/usr/x86_64-w64-mingw32/sys-root/mingw
+          SYSROOT=$MINGW_PREFIX/bin
+          # GTK needs its GSettings schemas at runtime or dialogs can abort;
+          # compile them from the sysroot into the package (best-effort).
+          if [ -d "$MINGW_PREFIX/share/glib-2.0/schemas" ]; then
+            mkdir -p dist/share/glib-2.0/schemas
+            glib-compile-schemas \
+              --targetdir=dist/share/glib-2.0/schemas \
+              "$MINGW_PREFIX/share/glib-2.0/schemas" || true
+          fi
+          cd dist
+          for pass in 1 2 3; do
+            for f in *.exe *.dll; do
+              x86_64-w64-mingw32-objdump -p "$f" 2>/dev/null | awk '/DLL Name/{print $3}'
+            done | sort -u | while read -r dll; do
+              if [ ! -f "$dll" ] && [ -f "$SYSROOT/$dll" ]; then
+                cp "$SYSROOT/$dll" .
+              fi
+            done
+          done
+          ls -l *.exe *.dll
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-system-ia64-win64
+          path: dist/
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-logs
+          path: build/meson-logs/
+          if-no-files-found: ignore
