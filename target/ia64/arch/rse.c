@@ -223,24 +223,97 @@ ia64_rse_sync_frame_out_slow(CPUIA64State *env, uint64_t dirty0,
                              uint64_t dirty1)
 {
     uint64_t dirty[2] = { dirty0, dirty1 };
+    uint64_t nat[2] = { env->nat[0], env->nat[1] };
     uint32_t sof = env->cfm_sof;
+    uint32_t sor_regs = (uint32_t)env->cfm_sor << 3;
+    uint32_t rrb_gr = env->cfm_rrb_gr;
+    uint32_t bol = env->rse.rse_bol;
+    bool nat_files_clear =
+        ((nat[0] >> IA64_STACKED_GR_BASE) | nat[1] |
+         env->rse.rse_pgr_nat[0] | env->rse.rse_pgr_nat[1]) == 0;
     uint32_t word;
 
     env->rse.rse_gr_dirty[0] = 0;
     env->rse.rse_gr_dirty[1] = 0;
+    /*
+     * Dirty bits outside the current frame were ignored by the loops below.
+     * Mask them once so the hot loops need neither to visit nor test them.
+     */
+    if (sof < 64) {
+        dirty[0] &= sof == 0 ? 0 : (1ULL << sof) - 1;
+        dirty[1] = 0;
+    } else {
+        dirty[1] &= (1ULL << (sof - 64)) - 1;
+    }
+
+    /*
+     * Most frames neither rotate their GRs nor wrap around the physical
+     * register ring.  With no NaT state to update, their mapping is a simple
+     * base-plus-index copy; select that case once per frame instead of
+     * repeating rotation and wrap checks for every dirty register.
+     */
+    if (nat_files_clear && (sor_regs == 0 || rrb_gr == 0) &&
+        bol + sof <= IA64_STACKED_GR_COUNT) {
+        for (word = 0; word < 2; word++) {
+            while (dirty[word] != 0) {
+                uint32_t bit = ctz64(dirty[word]);
+                uint32_t v = word * 64 + bit;
+
+                dirty[word] &= dirty[word] - 1;
+                env->rse.rse_pgr[bol + v] =
+                    env->gr[IA64_STACKED_GR_BASE + v];
+            }
+        }
+        return;
+    }
+
+    if (nat_files_clear) {
+        for (word = 0; word < 2; word++) {
+            while (dirty[word] != 0) {
+                uint32_t bit = ctz64(dirty[word]);
+                uint32_t v = word * 64 + bit;
+                uint32_t p = v;
+
+                dirty[word] &= dirty[word] - 1;
+                if (v < sor_regs) {
+                    p += rrb_gr;
+                    if (p >= sor_regs) {
+                        p -= sor_regs;
+                    }
+                }
+                p += bol;
+                if (p >= IA64_STACKED_GR_COUNT) {
+                    p -= IA64_STACKED_GR_COUNT;
+                }
+                env->rse.rse_pgr[p] =
+                    env->gr[IA64_STACKED_GR_BASE + v];
+            }
+        }
+        return;
+    }
+
     for (word = 0; word < 2; word++) {
         while (dirty[word] != 0) {
             uint32_t bit = ctz64(dirty[word]);
             uint32_t v = word * 64 + bit;
+            uint32_t p = v;
+            uint32_t reg = IA64_STACKED_GR_BASE + v;
 
             dirty[word] &= dirty[word] - 1;
-            if (v < sof) {
-                uint32_t p = ia64_rse_virt_to_phys(env, v);
-                uint32_t reg = IA64_STACKED_GR_BASE + v;
-
-                env->rse.rse_pgr[p] = env->gr[reg];
-                ia64_rse_pgr_nat_set(env, p, ia64_gr_nat_get(env, reg));
+            if (v < sor_regs) {
+                p += rrb_gr;
+                if (p >= sor_regs) {
+                    p -= sor_regs;
+                }
             }
+            p += bol;
+            if (p >= IA64_STACKED_GR_COUNT) {
+                p -= IA64_STACKED_GR_COUNT;
+            }
+            env->rse.rse_pgr[p] = env->gr[reg];
+            ia64_rse_pgr_nat_set(env, p, v < 32 ?
+                                 (nat[0] >> (IA64_STACKED_GR_BASE + v)) & 1 :
+                                 (nat[1] >> (v - 32)) & 1);
         }
     }
 }
