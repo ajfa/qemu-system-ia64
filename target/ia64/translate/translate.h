@@ -81,6 +81,12 @@ typedef struct DisasContext {
      */
     TCGv_i32 cfm_sof;
     bool cfm_sof_valid;
+    /*
+     * Largest SOF a dominating, certainly-executed frame check has already
+     * proven in this TB.  Checks for the same or a smaller SOF need no new
+     * branch or exception path.  Reset whenever CFM.SOF may change.
+     */
+    uint8_t cfm_sof_checked;
 } DisasContext;
 
 typedef enum IA64GenResult {

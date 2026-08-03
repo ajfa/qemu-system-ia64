@@ -518,6 +518,7 @@ void ia64_update_frame_tracking(DisasContext *ctx,
 {
     if (ia64_insn_may_modify_cfm_sof(insn)) {
         ctx->cfm_sof_valid = false;
+        ctx->cfm_sof_checked = 0;
     }
 
     /*
@@ -526,8 +527,10 @@ void ia64_update_frame_tracking(DisasContext *ctx,
      * frame check.
      */
     if (insn->opcode == IA64_OP_ALLOC) {
-        ctx->cfm_sof =
-            tcg_constant_i32(insn->operands.common.immediate & 0x7f);
+        uint8_t new_sof = insn->operands.common.immediate & 0x7f;
+
+        ctx->cfm_sof = tcg_constant_i32(new_sof);
+        ctx->cfm_sof_checked = new_sof;
         ctx->cfm_sof_valid = true;
     }
 }
@@ -1538,6 +1541,7 @@ void ia64_prepare_self_counted_loop(
      * inside the body are re-established by the re-executed code.
      */
     ctx->cfm_sof_valid = false;
+    ctx->cfm_sof_checked = 0;
     ctx->memory.nat_known_clear[0] = 1;
     ctx->memory.nat_known_clear[1] = 0;
 
@@ -1834,9 +1838,20 @@ static void ia64_gen_check_gr_in_frame(const Ia64Instruction *insn,
 
     if (reg >= IA64_STACKED_GR_BASE) {
         DisasContext *ctx = insn->ctx;
-        TCGLabel *valid = gen_new_label();
+        uint8_t required_sof = reg - IA64_STACKED_GR_BASE + 1;
+        TCGLabel *valid;
         TCGv_i32 sof;
 
+        /*
+         * A successful dominating check proves every lower stacked register
+         * is also in frame until an instruction changes CFM.SOF.  Avoid
+         * regenerating an exception path and branch for that already-proven
+         * range.
+         */
+        if (ctx && required_sof <= ctx->cfm_sof_checked) {
+            return;
+        }
+        valid = gen_new_label();
         if (ctx && ctx->cfm_sof_valid) {
             sof = ctx->cfm_sof;
         } else {
@@ -1859,6 +1874,9 @@ static void ia64_gen_check_gr_in_frame(const Ia64Instruction *insn,
         ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
                                   insn->raw, insn->slot);
         gen_set_label(valid);
+        if (ctx && insn->qp == 0) {
+            ctx->cfm_sof_checked = required_sof;
+        }
     }
 }
 
@@ -2636,6 +2654,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     ctx->cpl = (flags & IA64_TB_FLAG_CPL_MASK) >> IA64_TB_FLAG_CPL_SHIFT;
     ctx->cpl_known = true;
     ctx->cfm_sof_valid = false;
+    ctx->cfm_sof_checked = 0;
     ctx->restart.start_slot = (ctx->base.tb->flags & IA64_TB_FLAG_RI_MASK) >>
                       IA64_TB_FLAG_RI_SHIFT;
     if (ctx->restart.start_slot > 2) {
