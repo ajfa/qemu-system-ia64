@@ -59,6 +59,8 @@ More operating systems (including Linux and more) will be tested and supported i
 
 ## Run
 
+Pre-compiled binaries are available via the GitHub Actions of this repository: https://github.com/makuhlmann/qemu-system-ia64/actions/workflows/ci.yml
+
 ```sh
 ./build/qemu-system-ia64 \
   -machine ia64-vpc \
@@ -66,6 +68,8 @@ More operating systems (including Linux and more) will be tested and supported i
   -drive file=/path/to/guest-media.iso,media=cdrom,format=raw,readonly=on \
   -display gtk
 ```
+
+If QEMU does not launch due to the error `failed to find romfile "vgabios-ati.bin"`, try setting the path to the folder containing the roms with `-L <path>`, i.e. `-L share` for the Windows artifacts build.
 
 ### CPU model selection
 
