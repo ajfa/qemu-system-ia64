@@ -1961,11 +1961,55 @@ static ACPI_SSDT               mSsdt = {
         0x52, 0x53, 0x11, 0x08, 0x0a, 0x05, 0x22, 0x00, 0x10, 0x79, 0x00,
     },
 };
-#define SSDT_CPU0_ENABLED_OFFSET 30U
-#define SSDT_CPU1_ENABLED_OFFSET 37U
-#define SSDT_CPU2_ENABLED_OFFSET 44U
-#define SSDT_CPU3_ENABLED_OFFSET 51U
-#define SSDT_PS2_ENABLED_OFFSET 171U
+/*
+ * The patchable SSDT bytes are byte-encoded Name objects (NameOp, 4-char
+ * name, BytePrefix, value).  Locate them by name instead of by raw offset
+ * so an AML edit cannot silently shift the patch targets.
+ */
+static const UINT8 mSsdtCpuEnabledNames[4][4] = {
+    { 'C', '0', 'E', 'N' },
+    { 'C', '1', 'E', 'N' },
+    { 'C', '2', 'E', 'N' },
+    { 'C', '3', 'E', 'N' },
+};
+static const UINT8 mSsdtPs2EnabledName[4] = { 'P', '2', 'E', 'N' };
+
+static UINT8 *acpi_ssdt_named_byte(ACPI_SSDT *Ssdt, const UINT8 Name[4])
+{
+    UINTN i;
+
+    for (i = 0; i + 6U < sizeof(Ssdt->Aml); i++) {
+        if (Ssdt->Aml[i] == 0x08U &&
+            Ssdt->Aml[i + 1U] == Name[0] &&
+            Ssdt->Aml[i + 2U] == Name[1] &&
+            Ssdt->Aml[i + 3U] == Name[2] &&
+            Ssdt->Aml[i + 4U] == Name[3] &&
+            Ssdt->Aml[i + 5U] == 0x0aU) {
+            return &Ssdt->Aml[i + 6U];
+        }
+    }
+    return NULL;
+}
+
+static BOOLEAN acpi_ssdt_set_named_byte(ACPI_SSDT *Ssdt,
+                                        const UINT8 Name[4], UINT8 Value)
+{
+    UINT8 *value = acpi_ssdt_named_byte(Ssdt, Name);
+
+    if (value == NULL) {
+        return 0;
+    }
+    *value = Value;
+    return 1;
+}
+
+static BOOLEAN acpi_ssdt_named_byte_is(ACPI_SSDT *Ssdt,
+                                       const UINT8 Name[4], UINT8 Value)
+{
+    const UINT8 *value = acpi_ssdt_named_byte(Ssdt, Name);
+
+    return value != NULL && *value == Value;
+}
 static ACPI_MCFG               mMcfg;
 static ACPI_MADT               mMadt;
 static ACPI_SRAT               mSrat;
@@ -14516,15 +14560,16 @@ static void efi_init_platform_tables(void)
     mFadt.XGpe1Block = acpi_system_memory_gas(0, 0);
     mFadt.Hdr.Checksum = table_checksum8(&mFadt, sizeof(mFadt));
 
-    mSsdt.Aml[SSDT_CPU0_ENABLED_OFFSET] = 0x0fU;
-    mSsdt.Aml[SSDT_CPU1_ENABLED_OFFSET] =
-        mProcessorCount > 1 ? 0x0fU : 0;
-    mSsdt.Aml[SSDT_CPU2_ENABLED_OFFSET] =
-        mProcessorCount > 2 ? 0x0fU : 0;
-    mSsdt.Aml[SSDT_CPU3_ENABLED_OFFSET] =
-        mProcessorCount > 3 ? 0x0fU : 0;
-    mSsdt.Aml[SSDT_PS2_ENABLED_OFFSET] =
-        fw_handoff_i8042_enabled() ? 0x0fU : 0;
+    {
+        UINTN cpu;
+
+        for (cpu = 0; cpu < FW_ARRAY_SIZE(mSsdtCpuEnabledNames); cpu++) {
+            acpi_ssdt_set_named_byte(&mSsdt, mSsdtCpuEnabledNames[cpu],
+                                     mProcessorCount > cpu ? 0x0fU : 0);
+        }
+    }
+    acpi_ssdt_set_named_byte(&mSsdt, mSsdtPs2EnabledName,
+                             fw_handoff_i8042_enabled() ? 0x0fU : 0);
     init_sdt_header(&mSsdt.Hdr, EFI_SIGNATURE_32('S', 'S', 'D', 'T'),
                     sizeof(mSsdt));
     mSsdt.Hdr.Revision = 2;
@@ -14970,20 +15015,16 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         !acpi_ssdt_has_bytes(hid_uart, sizeof(hid_uart) - 1) ||
         !acpi_ssdt_has_bytes(ps2_enabled, sizeof(ps2_enabled)) ||
         !acpi_ssdt_has_bytes(sta_name, sizeof(sta_name)) ||
-        mAcpiSsdt->Aml[SSDT_CPU0_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_CPU1_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_CPU2_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_CPU3_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_PS2_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_CPU0_ENABLED_OFFSET] != 0x0fU ||
-        mAcpiSsdt->Aml[SSDT_CPU1_ENABLED_OFFSET] !=
-            (mProcessorCount > 1 ? 0x0fU : 0) ||
-        mAcpiSsdt->Aml[SSDT_CPU2_ENABLED_OFFSET] !=
-            (mProcessorCount > 2 ? 0x0fU : 0) ||
-        mAcpiSsdt->Aml[SSDT_CPU3_ENABLED_OFFSET] !=
-            (mProcessorCount > 3 ? 0x0fU : 0) ||
-        mAcpiSsdt->Aml[SSDT_PS2_ENABLED_OFFSET] !=
-            (fw_handoff_i8042_enabled() ? 0x0fU : 0) ||
+        !acpi_ssdt_named_byte_is(mAcpiSsdt, mSsdtCpuEnabledNames[0],
+                                 0x0fU) ||
+        !acpi_ssdt_named_byte_is(mAcpiSsdt, mSsdtCpuEnabledNames[1],
+                                 mProcessorCount > 1 ? 0x0fU : 0) ||
+        !acpi_ssdt_named_byte_is(mAcpiSsdt, mSsdtCpuEnabledNames[2],
+                                 mProcessorCount > 2 ? 0x0fU : 0) ||
+        !acpi_ssdt_named_byte_is(mAcpiSsdt, mSsdtCpuEnabledNames[3],
+                                 mProcessorCount > 3 ? 0x0fU : 0) ||
+        !acpi_ssdt_named_byte_is(mAcpiSsdt, mSsdtPs2EnabledName,
+                                 fw_handoff_i8042_enabled() ? 0x0fU : 0) ||
         !acpi_ssdt_has_bytes(crs_name, sizeof(crs_name))) {
         return 0;
     }
