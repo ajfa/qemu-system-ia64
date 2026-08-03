@@ -793,8 +793,19 @@ static void ati_mm_write(void *opaque, hwaddr addr,
             s->regs.cur_offset &= ~BIT(31);
             ati_cursor_define(s);
         }
+        /*
+         * Push the new position to the display even when CUR_LOCK (BIT 31) is
+         * set. The lock only exists to make a CUR_HORZ_VERT_OFF / _POSN /
+         * _OFFSET update atomic on real hardware; there is no tearing to guard
+         * against in this model. XFree86's r128 driver sets CUR_LOCK on *every*
+         * R128SetCursorPosition write (r128_cursor.c), so gating on !lock left
+         * the overlay cursor frozen at its last enable-time position while the
+         * pointer moved -- it looked like the hardware cursor was not rendering
+         * at all. Only the shape reload (ati_cursor_define) needs to respect
+         * the lock, which it still does above.
+         */
         if (!s->cursor_guest_mode &&
-            (s->regs.crtc_gen_cntl & CRTC2_CUR_EN) && !(t & BIT(31))) {
+            (s->regs.crtc_gen_cntl & CRTC2_CUR_EN)) {
             dpy_mouse_set(s->vga.con, s->regs.cur_hv_pos >> 16,
                           s->regs.cur_hv_pos & 0xffff, true);
         }
