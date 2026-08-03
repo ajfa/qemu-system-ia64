@@ -197,6 +197,15 @@ jobs:
               "$MINGW_PREFIX/share/glib-2.0/schemas" || true
           fi
           cd dist
+          # Fedora's mingw64-SDL2 is sdl2-compat: SDL2.dll dlopens SDL3.dll at
+          # runtime, which an import-table sweep cannot see. Seed such
+          # runtime-loaded DLLs first so the sweep below also resolves their
+          # own imports.
+          for extra in SDL3.dll; do
+            if [ -f "$SYSROOT/$extra" ]; then
+              cp "$SYSROOT/$extra" .
+            fi
+          done
           for pass in 1 2 3; do
             for f in *.exe *.dll; do
               x86_64-w64-mingw32-objdump -p "$f" 2>/dev/null | awk '/DLL Name/{print $3}'
@@ -206,6 +215,12 @@ jobs:
               fi
             done
           done
+          # A package that links SDL2 but lacks SDL3 fails only at runtime
+          # ("Failed loading SDL3 library") — catch it here instead.
+          if [ -f SDL2.dll ] && [ ! -f SDL3.dll ]; then
+            echo "SDL2.dll is present but SDL3.dll is missing" >&2
+            exit 1
+          fi
           ls -l *.exe *.dll
 
       - name: Upload Windows package
