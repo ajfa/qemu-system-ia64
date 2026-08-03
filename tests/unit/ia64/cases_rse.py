@@ -5,6 +5,7 @@ from __future__ import annotations
 from .case import (CaseMetadata, CaseObservation, bind_cases)
 from .encoding import (
     CHECK_LOAD_DATA,
+    DTR_PTE_WB,
     EIGHT_K_ITIR,
     ExpectedFP,
     HIGH_TR_BASE,
@@ -22,6 +23,8 @@ from .encoding import (
     IA64_PSR_CPL3,
     IA64_PSR_DT,
     IA64_PSR_IC,
+    IA64_PKR_RD,
+    IA64_PKR_VALID,
     IA64_PSR_PK,
     IA64_PSR_RT,
     IA64_RSC_BE,
@@ -79,6 +82,7 @@ from .encoding import (
     mov_m_ar_gr,
     mov_m_cr_gr,
     mov_m_gr_ar,
+    mov_pkr_indexed,
     mov_m_gr_cr,
     mov_m_imm_ar,
     mov_m_psr_gr,
@@ -4816,6 +4820,42 @@ test_rse_firmware_unaligned_postinc_marks_stacked_base_dirty = \
         "cfm_sol": 5,
     }, entry=0x10)
 
+test_rse_write_only_rnat_store_preserves_backed_prefix = require_registers(
+    "rse_write_only_rnat_store_preserves_backed_prefix", [
+        (0x10, *movl_mlx(3, 0x4081f8)),
+        (0x20, *movl_mlx(4, 1 << 2)),
+        (0x30, 0x00, st8(3, 4), nop_i(), nop_i()),
+        (0x40, *movl_mlx(18, 0x400000 | DTR_PTE_WB)),
+        (0x50, *movl_mlx(20, HIGH_TR_BASE)),
+        (0x60, *movl_mlx(21, (KEY_TEST_KEY << 8) | (16 << 2))),
+        (0x70, 0x00, mov_m_gr_cr(20, 20), adds(10, 5, 0), nop_i()),
+        (0x80, 0x00, mov_m_gr_cr(21, 21), nop_i(), nop_i()),
+        (0x90, 0x00, itr_d(10, 18), nop_i(), nop_i()),
+        (0xa0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xb0, *movl_mlx(4, IA64_PKR_VALID | IA64_PKR_RD |
+                         (KEY_TEST_KEY << 8))),
+        (0xc0, 0x00, adds(3, 0, 0), nop_i(), nop_i()),
+        (0xd0, 0x00, mov_pkr_indexed(3, 4, bit36=1), nop_i(), nop_i()),
+        (0xe0, *movl_mlx(3, HIGH_TR_BASE + 0x8030)),
+        (0xf0, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x100, 0x00, nop_m(), alloc(1, 60, 0, 0, 0), nop_i()),
+        (0x110, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x120, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_RT | IA64_PSR_PK)),
+        (0x130, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x140, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x150, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0x160, *movl_mlx(19, 0)),
+        (0x170, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x180, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x190, *movl_mlx(3, 0x4081f8)),
+        (0x1a0, 0x00, ld8(8, 3), nop_i(), nop_i()),
+        (0x1b0, 0x10, nop_m(), nop_i(), br_cond(0x1b0, 0x1b0)),
+    ], {
+        "ip": 0x1b0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 1 << 2,
+    }, entry=0x10)
+
 CASE_NAMES = (
 
     'predicated_off_stacked_write_keeps_following_write_valid',
@@ -4943,6 +4983,7 @@ CASE_NAMES = (
     'rse_untracked_return_resyncs_trimmed_rnat',
     'rse_untracked_return_uses_each_rnat_collection',
     'rse_uses_rsc_pl_for_access_rights',
+    'rse_write_only_rnat_store_preserves_backed_prefix',
     'rse_zero_sol_cover_return_restores_bsp_base',
     'stacked_gr_destination_out_of_frame',
 )

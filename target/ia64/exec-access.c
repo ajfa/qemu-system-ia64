@@ -5,7 +5,9 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/atomic.h"
 #include "qemu/atomic128.h"
+#include "qemu/log.h"
 #include "cpu.h"
 #include "exec-access.h"
 #include "accel/tcg/cpu-ldst.h"
@@ -117,6 +119,76 @@ void ia64_exec_store_mmuidx(CPUIA64State *env, uint64_t addr, uint64_t value,
     default:
         g_assert_not_reached();
     }
+}
+
+/*
+ * Store a completed RSE NaT collection without exposing the preserved
+ * portion as an architectural load.
+ *
+ * When undefined positions need preservation, a store probe performs the
+ * guest's write translation and permission checks.  For writable RAM,
+ * inspect the resolved host backing directly so that read permission, read
+ * watchpoints and plugin load callbacks are not involved.  The normal store
+ * below remains the only architected memory access and therefore retains
+ * write watchpoint, dirty-page and plugin semantics.  A fully defined
+ * collection takes the ordinary single-store path without probing.
+ */
+uint64_t ia64_exec_rse_store_collection(CPUIA64State *env, uint64_t addr,
+                                        uint64_t value, uint64_t defined,
+                                        bool big_endian, int mmu_idx,
+                                        uint64_t *previous, uintptr_t ra)
+{
+    static int non_ram_reported;
+    CPUTLBEntryFull *full;
+    void *host;
+    uint64_t old = 0;
+    int flags;
+    bool writable_ram;
+
+    g_assert((addr & 7) == 0);
+    defined &= INT64_MAX;
+    value &= defined;
+
+    if (defined == INT64_MAX) {
+        *previous = 0;
+        ia64_exec_store_mmuidx(env, addr, value, 8, big_endian, mmu_idx, ra);
+        return value;
+    }
+
+    flags = probe_access_full(env, addr, 8, MMU_DATA_STORE, mmu_idx, false,
+                              &host, &full, ra);
+    writable_ram = memory_region_is_ram(full->section->mr) &&
+                   !memory_region_is_protected(full->section->mr) &&
+                   !full->section->readonly &&
+                   !(full->slow_flags[MMU_DATA_STORE] &
+                     (TLB_BSWAP | TLB_DISCARD_WRITE | TLB_MMIO));
+
+    if (writable_ram) {
+        if (host == NULL) {
+            /*
+             * Plugin instrumentation deliberately hides the direct host
+             * pointer.  xlat_offset still names the same RAM backing and is
+             * safe to consume before the next TLB access.
+             */
+            host = qemu_map_ram_ptr(NULL, addr + full->xlat_offset);
+        }
+        old = big_endian ? ldq_be_p(host) : ldq_le_p(host);
+    } else if (qatomic_cmpxchg(&non_ram_reported, 0, 1) == 0) {
+        /*
+         * The architecture requires an RSE backing store to be ordinary
+         * cacheable memory.  Never issue a private read against MMIO or ROMD:
+         * retain the deterministic zero choice for undefined bits instead.
+         */
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ia64 RSE RNAT store to non-writable RAM/MMIO at "
+                      "0x%016" PRIx64 " cannot preserve undefined bits "
+                      "(flags=0x%x)\n", addr, flags);
+    }
+
+    *previous = old;
+    value = ((old & ~defined) | value) & INT64_MAX;
+    ia64_exec_store_mmuidx(env, addr, value, 8, big_endian, mmu_idx, ra);
+    return value;
 }
 
 Int128 ia64_exec_load_16(CPUIA64State *env, uint64_t addr, MemOpIdx oi,

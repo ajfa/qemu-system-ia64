@@ -46,6 +46,17 @@ static void ia64_rse_write_u64(CPUIA64State *env, uint64_t addr,
                            (env->ar_rsc & IA64_RSC_BE) != 0, mmu_idx, ra);
 }
 
+static uint64_t ia64_rse_write_collection(CPUIA64State *env, uint64_t addr,
+                                          uint64_t value, uint64_t defined,
+                                          uint64_t *previous, uintptr_t ra)
+{
+    int mmu_idx = ia64_rse_mmu_index(env);
+
+    return ia64_exec_rse_store_collection(
+        env, addr, value, defined, (env->ar_rsc & IA64_RSC_BE) != 0,
+        mmu_idx, previous, ra);
+}
+
 static uint64_t ia64_rse_read_u64(CPUIA64State *env, uint64_t addr,
                                   uintptr_t ra)
 {
@@ -455,10 +466,9 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
          */
         uint64_t word = env->ar_rnat & INT64_MAX;
         uint64_t group_base = bspstore - 0x1f8;
+        uint64_t keep = 0;
 
         if (env->rse.rse_rnat_low > group_base) {
-            uint64_t keep;
-
             if (env->rse.rse_rnat_low > bspstore) {
                 /*
                  * The floor sits above this collection word -- possible
@@ -480,14 +490,27 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
                             env->rse.rse_rnat_low)) - 1;
             }
 
-            word = (ia64_rse_read_u64(env, bspstore, ra) & keep) |
-                   (word & ~keep);
+        }
+        if (keep != 0) {
+            /*
+             * Merge the committed lower bits from the word in memory
+             * without an architectural load: the RSE is only supposed to
+             * be *storing* here, so read permission checks and read
+             * watchpoints must not fire on the backing store page.
+             */
+            uint64_t previous;
+
+            word = ia64_rse_write_collection(env, bspstore,
+                                             word & ~keep & INT64_MAX,
+                                             INT64_MAX & ~keep,
+                                             &previous, ra);
             trace_ia64_rse_rnat_boundary_store(env_cpu(env)->cpu_index,
                                                bspstore, word & INT64_MAX,
                                                keep, env->ar_rnat,
                                                env->rse.rse_rnat_low);
+        } else {
+            ia64_rse_write_u64(env, bspstore, word & INT64_MAX, ra);
         }
-        ia64_rse_write_u64(env, bspstore, word & INT64_MAX, ra);
         env->ar_rnat = 0;
         trace_ia64_rse_rnat_floor(env_cpu(env)->cpu_index, "boundary-store",
                                   env->rse.rse_rnat_low, bspstore + 8,

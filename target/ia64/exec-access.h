@@ -27,6 +27,10 @@ void ia64_exec_store_data(CPUIA64State *env, uint64_t addr, uint64_t value,
 uint64_t ia64_exec_load_mmuidx(CPUIA64State *env, uint64_t addr,
                                unsigned size, bool big_endian, int mmu_idx,
                                uintptr_t ra);
+uint64_t ia64_exec_rse_store_collection(CPUIA64State *env, uint64_t addr,
+                                        uint64_t value, uint64_t defined,
+                                        bool big_endian, int mmu_idx,
+                                        uint64_t *previous, uintptr_t ra);
 void ia64_exec_store_mmuidx(CPUIA64State *env, uint64_t addr, uint64_t value,
                             unsigned size, bool big_endian, int mmu_idx,
                             uintptr_t ra);
