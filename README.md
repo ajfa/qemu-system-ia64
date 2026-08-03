@@ -291,6 +291,47 @@ Profiles are tied to the exact build tree, compiler, and source revision; do not
 On hosts that all support the x86-64-v3 ISA level, add `--x86-version=3` to a separate comparison build.
 This changes the minimum host ISA for QEMU and its C helpers; TCG-generated guest code still selects host vector features at runtime.
 
+### Windows x86_64 cross build
+
+This is the release path for producing a Windows binary from a checkout on any Linux host.
+
+Install a MinGW-w64 cross compiler and the usual build tools (Debian/Ubuntu: `gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 build-essential meson ninja-build pkg-config python3 python3-venv curl zstd flex bison`), plus the IA-64 cross toolchain for the firmware.
+
+`scripts/fetch-win64-deps.sh` downloads the pinned MSYS2 MinGW64 libraries (SDL2, glib, pixman, libslirp, and their dependencies) from `repo.msys2.org`, verifies each SHA-256, assembles a sysroot, and prints its path.
+GTK is not part of the pinned manifest; the Windows build uses SDL.
+`repo.msys2.org` rolls its package files, so when a pinned URL disappears, update the version and hash in the script from the current MSYS2 repository in the same commit.
+
+```sh
+WIN_SYSROOT="$(./scripts/fetch-win64-deps.sh)"
+HOST_PKG_CONFIG="$(command -v pkg-config)"
+mkdir -p build-win64
+(
+  cd build-win64
+  PKG_CONFIG="$HOST_PKG_CONFIG" \
+  PKG_CONFIG_LIBDIR="$WIN_SYSROOT/mingw64/lib/pkgconfig" \
+  PKG_CONFIG_SYSROOT_DIR="$WIN_SYSROOT" \
+  ../configure \
+    --cross-prefix=x86_64-w64-mingw32- \
+    --host-cc=gcc \
+    --python=/usr/bin/python3 \
+    --target-list=ia64-softmmu \
+    --without-default-features \
+    --enable-system \
+    --enable-tcg \
+    --enable-pixman \
+    --enable-fdt=internal \
+    --enable-sdl \
+    --enable-slirp \
+    --enable-vnc \
+    --disable-docs \
+    --disable-werror
+)
+ninja -C build-win64 qemu-system-ia64.exe qemu-system-ia64w.exe \
+  roms/ia64-firmware/ia64-firmware.bin
+```
+
+To make the result relocatable, copy beside the executables: the runtime DLLs from `$WIN_SYSROOT/mingw64/bin` (`SDL2.dll libglib-2.0-0.dll libiconv-2.dll libintl-8.dll libpcre2-8-0.dll libpixman-1-0.dll libslirp-0.dll zlib1.dll`), `libwinpthread-1.dll` from `x86_64-w64-mingw32-gcc -print-file-name=libwinpthread-1.dll`, the built `ia64-firmware.bin`, and the `pc-bios` ROMs and keymaps the machine loads (`efi-e1000.rom`, `vgabios-ati.bin`, `vgabios-stdvga.bin`).
+
 ## Legal disclaimer
 
 This repository does not include third-party operating system images, disk images, firmware images, machine ROM dumps, proprietary firmware blobs, or operating system binaries.
