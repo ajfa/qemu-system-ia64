@@ -1,10 +1,28 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Source for the DSDT AML byte array in firmware.c (mDsdt).  Recompile with
-//     iasl -on dsdt-pci-root.asl
+//     iasl -on -oi dsdt-pci-root.asl
 // (-on suppresses the \_SB -> _SB name optimisation so the encoding stays
 // byte-identical to what is shipping) and splice the AML body back in; see
 // plans/runbook.md.
+//
+// -oi, and the 0x00 constants inside _S5 and _PRT below, are load-bearing:
+// together they keep every *package element* encoded as a typed literal
+// (BytePrefix/WordPrefix/DWordPrefix) rather than the ZeroOp/OneOp constant
+// opcodes iasl prefers.  The ACPI CA in Linux 2.4 (20011018, what Debian 3.0's
+// 2.4.17-mckinley kernel carries) types a constant opcode as
+// INTERNAL_TYPE_REFERENCE, not ACPI_TYPE_INTEGER
+// (acpi_ds_map_opcode_to_data_type(), dispatcher/dsutils.c), and converts it
+// only while *resolving a value*.  Code that walks package elements raw never
+// resolves them and so rejects the whole object:
+// acpi_rs_create_pci_routing_table() fails the _PRT with AE_BAD_DATA on the
+// first entry whose Pin or Source is ZeroOp, and
+// acpi_hw_obtain_sleep_type_register_data() fails _S5 the same way.  A failed
+// _PRT leaves Linux with *no* PCI interrupt routes: no IOSAPIC RTE is
+// programmed for any PCI device, so the SCSI HBA's interrupt is never
+// delivered and every command dies on a timeout.  Scalar names (_SEG, _BBN,
+// _UID, _CCA) are read through acpi_evaluate_object(), which does resolve
+// constants, so they are unaffected and stay as Zero/One.
 //
 // The root bridge _HID must be PNP0A03 (conventional PCI), not PNP0A08: some
 // guest OS installers validate every ancestor device of the install disk
@@ -17,10 +35,10 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
 {
     Name (_S5, Package (0x04)
     {
-        Zero,
-        Zero,
-        Zero,
-        Zero
+        0x00,
+        0x00,
+        0x00,
+        0x00
     })
 
     Scope (\_SB)
@@ -54,34 +72,34 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
             })
             Name (_PRT, Package ()
             {
-                Package () { 0x0000FFFF, 0, Zero, 16 },
-                Package () { 0x0000FFFF, 1, Zero, 17 },
-                Package () { 0x0000FFFF, 2, Zero, 18 },
-                Package () { 0x0000FFFF, 3, Zero, 19 },
-                Package () { 0x0001FFFF, 0, Zero, 17 },
-                Package () { 0x0001FFFF, 1, Zero, 18 },
-                Package () { 0x0001FFFF, 2, Zero, 19 },
-                Package () { 0x0001FFFF, 3, Zero, 16 },
-                Package () { 0x0002FFFF, 0, Zero, 18 },
-                Package () { 0x0002FFFF, 1, Zero, 19 },
-                Package () { 0x0002FFFF, 2, Zero, 16 },
-                Package () { 0x0002FFFF, 3, Zero, 17 },
-                Package () { 0x0003FFFF, 0, Zero, 19 },
-                Package () { 0x0003FFFF, 1, Zero, 16 },
-                Package () { 0x0003FFFF, 2, Zero, 17 },
-                Package () { 0x0003FFFF, 3, Zero, 18 },
-                Package () { 0x0004FFFF, 0, Zero, 16 },
-                Package () { 0x0004FFFF, 1, Zero, 17 },
-                Package () { 0x0004FFFF, 2, Zero, 18 },
-                Package () { 0x0004FFFF, 3, Zero, 19 },
-                Package () { 0x0005FFFF, 0, Zero, 17 },
-                Package () { 0x0005FFFF, 1, Zero, 18 },
-                Package () { 0x0005FFFF, 2, Zero, 19 },
-                Package () { 0x0005FFFF, 3, Zero, 16 },
-                Package () { 0x0006FFFF, 0, Zero, 18 },
-                Package () { 0x0006FFFF, 1, Zero, 19 },
-                Package () { 0x0006FFFF, 2, Zero, 16 },
-                Package () { 0x0006FFFF, 3, Zero, 17 }
+                Package () { 0x0000FFFF, 0, 0x00, 16 },
+                Package () { 0x0000FFFF, 1, 0x00, 17 },
+                Package () { 0x0000FFFF, 2, 0x00, 18 },
+                Package () { 0x0000FFFF, 3, 0x00, 19 },
+                Package () { 0x0001FFFF, 0, 0x00, 17 },
+                Package () { 0x0001FFFF, 1, 0x00, 18 },
+                Package () { 0x0001FFFF, 2, 0x00, 19 },
+                Package () { 0x0001FFFF, 3, 0x00, 16 },
+                Package () { 0x0002FFFF, 0, 0x00, 18 },
+                Package () { 0x0002FFFF, 1, 0x00, 19 },
+                Package () { 0x0002FFFF, 2, 0x00, 16 },
+                Package () { 0x0002FFFF, 3, 0x00, 17 },
+                Package () { 0x0003FFFF, 0, 0x00, 19 },
+                Package () { 0x0003FFFF, 1, 0x00, 16 },
+                Package () { 0x0003FFFF, 2, 0x00, 17 },
+                Package () { 0x0003FFFF, 3, 0x00, 18 },
+                Package () { 0x0004FFFF, 0, 0x00, 16 },
+                Package () { 0x0004FFFF, 1, 0x00, 17 },
+                Package () { 0x0004FFFF, 2, 0x00, 18 },
+                Package () { 0x0004FFFF, 3, 0x00, 19 },
+                Package () { 0x0005FFFF, 0, 0x00, 17 },
+                Package () { 0x0005FFFF, 1, 0x00, 18 },
+                Package () { 0x0005FFFF, 2, 0x00, 19 },
+                Package () { 0x0005FFFF, 3, 0x00, 16 },
+                Package () { 0x0006FFFF, 0, 0x00, 18 },
+                Package () { 0x0006FFFF, 1, 0x00, 19 },
+                Package () { 0x0006FFFF, 2, 0x00, 16 },
+                Package () { 0x0006FFFF, 3, 0x00, 17 }
             })
         }
     }

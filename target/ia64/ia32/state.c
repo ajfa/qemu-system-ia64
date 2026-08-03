@@ -249,8 +249,8 @@ uint32_t ia64_ia32_virtual_ip(const CPUIA64State *env)
 void ia64_ia32_enter(CPUIA64State *env)
 {
     CPUX86State *xenv = &env->ia32;
-    uint64_t selectors_ds = env->gr[16];
-    uint64_t selectors_cs = env->gr[17];
+    uint64_t selectors_ds = env->gr[IA64_GR_IA32_DATA_SELECTORS];
+    uint64_t selectors_cs = env->gr[IA64_GR_IA32_CODE_SELECTORS];
     uint32_t eflags =
         ((uint32_t)env->ar_eflag & IA32_EFLAGS_VALID_MASK) | 2;
     unsigned i;
@@ -270,28 +270,29 @@ void ia64_ia32_enter(CPUIA64State *env)
      * integer state; sync_to_ia64() clears the mapped GR NaT bits on exit.
      */
     for (i = 0; i < 8; i++) {
-        xenv->regs[i] = (uint32_t)env->gr[8 + i];
+        xenv->regs[i] = (uint32_t)env->gr[IA64_GR_IA32_GPR_BASE + i];
     }
 
     /* CSD and SSD are copied into their mapped GR descriptors on entry. */
-    env->gr[25] = env->ar_csd;
-    env->gr[26] = env->ar_ssd;
+    env->gr[IA64_GR_IA32_CSD] = env->ar_csd;
+    env->gr[IA64_GR_IA32_SSD] = env->ar_ssd;
     ia32_load_desc(&xenv->segs[R_DS], ia32_selector(selectors_ds, 0),
-                   env->gr[27]);
+                   env->gr[IA64_GR_IA32_DSD]);
     ia32_load_desc(&xenv->segs[R_ES], ia32_selector(selectors_ds, 1),
-                   env->gr[24]);
+                   env->gr[IA64_GR_IA32_ESD]);
     ia32_load_desc(&xenv->segs[R_FS], ia32_selector(selectors_ds, 2),
-                   env->gr[28]);
+                   env->gr[IA64_GR_IA32_FSD]);
     ia32_load_desc(&xenv->segs[R_GS], ia32_selector(selectors_ds, 3),
-                   env->gr[29]);
+                   env->gr[IA64_GR_IA32_GSD]);
     ia32_load_desc(&xenv->segs[R_CS], ia32_selector(selectors_cs, 0),
                    env->ar_csd);
     ia32_load_desc(&xenv->segs[R_SS], ia32_selector(selectors_cs, 1),
                    env->ar_ssd);
-    ia32_load_desc(&xenv->ldt, ia32_selector(selectors_cs, 2), env->gr[30]);
+    ia32_load_desc(&xenv->ldt, ia32_selector(selectors_cs, 2),
+                   env->gr[IA64_GR_IA32_LDTD]);
     ia32_load_desc(&xenv->tr, ia32_selector(selectors_cs, 3),
                    env->ar[IA64_AR_KR0 + 1]);
-    ia32_load_desc(&xenv->gdt, 0, env->gr[31]);
+    ia32_load_desc(&xenv->gdt, 0, env->gr[IA64_GR_IA32_GDTD]);
     memset(&xenv->idt, 0, sizeof(xenv->idt));
 
     /* CFLG.io, CFLG.if and CFLG.ii read as zero through IA-32 CR0. */
@@ -318,8 +319,8 @@ void ia64_ia32_sync_to_ia64(CPUIA64State *env)
     unsigned i;
 
     for (i = 0; i < 8; i++) {
-        env->gr[8 + i] = (int64_t)(int32_t)xenv->regs[i];
-        ia64_gr_nat_set(env, 8 + i, false);
+        env->gr[IA64_GR_IA32_GPR_BASE + i] = (int64_t)(int32_t)xenv->regs[i];
+        ia64_gr_nat_set(env, IA64_GR_IA32_GPR_BASE + i, false);
     }
 
     ds_selectors = (uint64_t)xenv->segs[R_DS].selector |
@@ -330,18 +331,18 @@ void ia64_ia32_sync_to_ia64(CPUIA64State *env)
                    (uint64_t)xenv->segs[R_SS].selector << 16 |
                    (uint64_t)xenv->ldt.selector << 32 |
                    (uint64_t)xenv->tr.selector << 48;
-    env->gr[16] = ds_selectors;
-    env->gr[17] = cs_selectors;
-    env->gr[24] = ia32_store_desc(&xenv->segs[R_ES], false);
-    env->gr[25] = ia32_store_desc(&xenv->segs[R_CS], true);
-    env->gr[26] = ia32_store_desc(&xenv->segs[R_SS], true);
-    env->gr[27] = ia32_store_desc(&xenv->segs[R_DS], false);
-    env->gr[28] = ia32_store_desc(&xenv->segs[R_FS], false);
-    env->gr[29] = ia32_store_desc(&xenv->segs[R_GS], false);
-    env->gr[30] = ia32_store_desc(&xenv->ldt, false);
-    env->gr[31] = ia32_store_desc(&xenv->gdt, false);
-    env->ar_csd = env->gr[25];
-    env->ar_ssd = env->gr[26];
+    env->gr[IA64_GR_IA32_DATA_SELECTORS] = ds_selectors;
+    env->gr[IA64_GR_IA32_CODE_SELECTORS] = cs_selectors;
+    env->gr[IA64_GR_IA32_ESD] = ia32_store_desc(&xenv->segs[R_ES], false);
+    env->gr[IA64_GR_IA32_CSD] = ia32_store_desc(&xenv->segs[R_CS], true);
+    env->gr[IA64_GR_IA32_SSD] = ia32_store_desc(&xenv->segs[R_SS], true);
+    env->gr[IA64_GR_IA32_DSD] = ia32_store_desc(&xenv->segs[R_DS], false);
+    env->gr[IA64_GR_IA32_FSD] = ia32_store_desc(&xenv->segs[R_FS], false);
+    env->gr[IA64_GR_IA32_GSD] = ia32_store_desc(&xenv->segs[R_GS], false);
+    env->gr[IA64_GR_IA32_LDTD] = ia32_store_desc(&xenv->ldt, false);
+    env->gr[IA64_GR_IA32_GDTD] = ia32_store_desc(&xenv->gdt, false);
+    env->ar_csd = env->gr[IA64_GR_IA32_CSD];
+    env->ar_ssd = env->gr[IA64_GR_IA32_SSD];
     env->ar[IA64_AR_KR0 + 1] = ia32_store_desc(&xenv->tr, false);
     env->ar_cflg =
         (env->ar_cflg & IA32_CFLG_VIRTUAL_MASK) |

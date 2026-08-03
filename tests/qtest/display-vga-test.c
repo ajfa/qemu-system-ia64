@@ -8,6 +8,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <glib/gstdio.h>
 #include "libqtest.h"
 
 #define VBE_DISPI_IOPORT_INDEX 0x1ce

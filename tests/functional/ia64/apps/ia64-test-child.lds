@@ -3,7 +3,12 @@ ENTRY(__efi_entry_descriptor)
 
 SECTIONS
 {
-    . = 0x05000000;
+    /*
+     * Keep clear of the firmware's reserved guard at 80 MB
+     * (FW_LOW_IMAGE_END): the image is linked with relocations stripped, so
+     * LoadImage() must be able to honour this exact base.
+     */
+    . = 0x06000000;
 
     .text : { *(.text*) }
     . = ALIGN(16);
@@ -39,7 +44,7 @@ SECTIONS
         LONG(__hii_data_entry - __hii_resource_start);
 
         __hii_data_entry = .;
-        LONG(__hii_packages - 0x05000000);
+        LONG(__hii_packages - 0x06000000);
         LONG(__hii_packages_end - __hii_packages);
         LONG(0); LONG(0);
 
@@ -56,5 +61,15 @@ SECTIONS
     .bss : {
         *(.bss*)
         *(COMMON)
+    }
+
+    /*
+     * Fedora's libgcc carries annobin notes; if they survive to the PE they
+     * become a non-loadable section 0 that the firmware PE loader rejects.
+     */
+    /DISCARD/ : {
+        *(.gnu.build.attributes*)
+        *(.note*)
+        *(.comment)
     }
 }

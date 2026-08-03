@@ -57,7 +57,7 @@ ia64_start_image_child = custom_target(
     '@OUTPUT@',
     '@INPUT@',
     ia64_child_linker_script,
-    '0x5000000',
+    '0x6000000',
   ],
   build_by_default: false,
 )

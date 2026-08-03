@@ -32,6 +32,7 @@ from .encoding import (
     LOW_VECTOR_TR_PTE,
     _strcpy_pipeline_data,
     add_one,
+    add,
     addl,
     adds,
     alloc,
@@ -606,6 +607,286 @@ test_rse_nt_bstore_switch_nat_roundtrip = require_registers(
         "r34_nat": 0,
         "cfm_sof": 8,
         "cfm_sol": 8,
+    }, entry=0x10)
+
+
+# gcc 2.96's IA-64 unwinder (ia64_throw_helper, libgcc2.c): flushrs, then a
+# plain st8 into the flushed backing store rewriting the caller's saved
+# slot, then br.ret -- WITHOUT the architected BSPSTORE rewrite of SDM
+# Vol.2 6.10 (the source carries a literal "TODO, do we need to do anything
+# to make the values we wrote 'stick'?").  The returned-to frame must see
+# the edited memory, not a stale clean-partition copy: the clean partition
+# is only a cache and restoring preserved registers from it made __throw
+# "return" to its call site instead of the landing pad, breaking every g++
+# 2.95/2.96 cleanup unwind on Debian 3.0 (update-menus SIGSEGV).
+test_rse_return_sees_backing_store_edit_under_clean = require_registers(
+    "rse_return_sees_backing_store_edit_under_clean", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, nop_m(), alloc(32, 3, 3, 0, 0),
+         nop_i()),
+        (0x40, *movl_mlx(34, 0x1111111122222222)),
+        (0x50, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x50, 0x200)),
+        (0x60, 0x00, nop_m(), adds(8, 0, 34),
+         nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_cond(0x70, 0x70)),
+
+        # "throw helper" body: leaf, sof == 0; flush the caller's frame,
+        # rewrite its saved r34 slot (AR.BSP - 8) in memory, return.
+        (0x200, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (0x210, 0x00, mov_m_ar_gr(20, 17), nop_i(),
+         nop_i()),
+        (0x220, 0x00, nop_m(), adds(20, -8, 20),
+         nop_i()),
+        (0x230, *movl_mlx(21, 0x3333333344444444)),
+        (0x240, 0x00, st8(20, 21), nop_i(),
+         nop_i()),
+        (0x250, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x3333333344444444,
+        "cfm_sof": 3,
+        "cfm_sol": 3,
+    }, entry=0x10)
+
+
+# Linux copy_thread + ia64_switch_to for a new clone2 child: the parent's
+# register backing store is memcpy'd to a different base, and the child
+# resumes with AR.BSPSTORE pointing into the *copy* and AR.RNAT carried
+# over from the original (valid because both bases share the same
+# 0x200-phase, so every NaT collection bit keeps its index).  The child's
+# frames then materialize purely through mandatory loads from the copied
+# memory: register values, the NaT bits below the RNAT floor (from the
+# copied collection word), and the bits above it (from the restored
+# AR.RNAT) must all survive, as must the copied b0/ar.pfs save slots the
+# return path itself depends on.  The bases sit at phase 0x1c0 so the
+# first frame straddles a collection word, exercising both NaT sources.
+test_rse_bspstore_rebase_onto_copied_backing_store = require_registers(
+    "rse_bspstore_rebase_onto_copied_backing_store", [
+        (0x10, *movl_mlx(3, 0x1001c0)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, alloc(32, 9, 9, 0, 0), nop_i(),
+         nop_i()),
+        (0x40, *movl_mlx(9, 1 << 32)),
+        (0x50, 0x00, mov_m_gr_ar(9, 36), addl(3, 0x300, 0),
+         nop_i()),
+        (0x60, 0x08, ld8_fill_postinc(36, 3, 0), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(33, 0xa0a0a0a0a0a00033)),
+        (0x80, *movl_mlx(34, 0xa0a0a0a0a0a00034)),
+        (0x90, *movl_mlx(35, 0xa0a0a0a0a0a00035)),
+        (0xa0, *movl_mlx(37, 0xa0a0a0a0a0a00037)),
+        (0xb0, *movl_mlx(38, 0xa0a0a0a0a0a00038)),
+        (0xc0, *movl_mlx(39, 0xa0a0a0a0a0a00039)),
+        (0xd0, *movl_mlx(40, 0xa0a0a0a0a0a00040)),
+        (0xe0, 0x10, nop_m(), nop_i(),
+         br_call(0, 0xe0, 0x400)),
+        (0xf0, 0x00, mov_m_ar_gr(10, 17), nop_i(),
+         nop_i()),
+        (0x100, 0x10, nop_m(), nop_i(),
+         br_cond(0x100, 0x100)),
+
+        # middle frame: its own locals plus the b0/ar.pfs save slots that
+        # must round-trip through the copied backing store.
+        (0x400, 0x00, alloc(34, 8, 8, 0, 0), mov_gr_b(35, 0),
+         nop_i()),
+        (0x410, *movl_mlx(36, 0xb0b0b0b0b0b00036)),
+        (0x420, *movl_mlx(37, 0xb0b0b0b0b0b00037)),
+        (0x430, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x430, 0x500)),
+        (0x440, 0x00, mov_m_gr_ar(34, 64), mov_b_gr(0, 35),
+         nop_i()),
+        (0x450, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+
+        # the "copy_thread + switch_to" stand-in: flush everything to the
+        # old base, save AR.RNAT, copy the flushed image (collection word
+        # included) to the new base, rebase BSPSTORE and RNAT, return.
+        (0x500, 0x00, alloc(34, 4, 4, 0, 0), nop_i(),
+         nop_i()),
+        (0x510, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (0x520, 0x00, mov_m_ar_gr(20, 19), nop_i(),
+         nop_i()),
+        (0x530, 0x00, mov_m_ar_gr(21, 18), nop_i(),
+         nop_i()),
+        (0x540, *movl_mlx(22, 0x80000)),
+        (0x550, 0x00, nop_m(), add(23, 21, 22),
+         nop_i()),
+        (0x560, *movl_mlx(24, 0x1001c0)),
+        (0x570, *movl_mlx(25, 0x1801c0)),
+    ] + [
+        (0x580 + 0x10 * i, 0x0a, ld8_postinc(26, 24, 8),
+         st8_postinc(25, 26, 8), nop_i())
+        for i in range(32)
+    ] + [
+        (0x780, 0x00, mov_ar(23, 18), nop_i(),
+         nop_i()),
+        (0x790, 0x00, mov_m_gr_ar(20, 19), nop_i(),
+         nop_i()),
+        (0x7a0, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ], {
+        "ip": 0x100,
+        "exception": IA64_EXCP_NONE,
+        "r10": 0x1801c0,
+        "r33": 0xa0a0a0a0a0a00033,
+        "r34": 0xa0a0a0a0a0a00034,
+        "r35": 0xa0a0a0a0a0a00035,
+        "r37": 0xa0a0a0a0a0a00037,
+        "r38": 0xa0a0a0a0a0a00038,
+        "r39": 0xa0a0a0a0a0a00039,
+        "r40": 0xa0a0a0a0a0a00040,
+        "r33_nat": 0,
+        "r34_nat": 0,
+        "r35_nat": 0,
+        "r36_nat": 1,
+        "r37_nat": 0,
+        "r38_nat": 0,
+        "r39_nat": 0,
+        "r40_nat": 0,
+        "cfm_sof": 9,
+        "cfm_sol": 9,
+    }, entry=0x10)
+
+
+# Deep call recursion that wraps the 96-register physical stacked file,
+# followed by the kernel-exit sequence Linux uses in ia64_leave_kernel
+# (alloc 0 to drop the frame, loadrs to refill the covered frame,
+# mov ar.bspstore to rebase onto another backing store, rfi restoring
+# CR.IFS).  Modelled on entry.S dont_preserve_current_frame, whose
+# rse_clear_invalid loop allocs 12-register frames nine levels deep: the
+# deepest alloc runs the physical file out of invalid registers and
+# issues mandatory stores, spilling the oldest dirty registers of the
+# covered frame while the newest stay unspilled in the file.  After the
+# recursion unwinds, the covered frame must come back intact from a mix
+# of reloaded and never-spilled registers -- values *and* NaT bits, since
+# a stray NaT would fault the first consumer.
+#
+# NOTE: this passes on the code as of 2026-08-02 and is coverage for the
+# wrap/reload path, NOT a reproducer for the open clone2 bug in
+# status.md 3.9 -- that one is still unreproduced at microprogram level.
+def _clone_chain_level(base, next_base):
+    bundles = [
+        (base + 0x00, 0x00, alloc(34, 12, 10, 0, 0), mov_gr_b(35, 0),
+         nop_i()),
+        (base + 0x10, 0x00, nop_m(), adds(36, 0, 0),
+         adds(37, 0, 0)),
+        (base + 0x20, 0x00, nop_m(), adds(38, 0, 0),
+         adds(39, 0, 0)),
+        (base + 0x30, 0x00, nop_m(), adds(40, 0, 0),
+         adds(41, 0, 0)),
+    ]
+    if next_base is not None:
+        bundles.append((base + 0x40, 0x10, nop_m(), nop_i(),
+                        br_call(0, base + 0x40, next_base)))
+    else:
+        bundles.append((base + 0x40, 0x00, nop_m(), nop_i(),
+                        nop_i()))
+    bundles += [
+        (base + 0x50, 0x00, mov_m_gr_ar(34, 64), mov_b_gr(0, 35),
+         nop_i()),
+        (base + 0x60, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ]
+    return bundles
+
+
+test_rse_clone_return_reload_preserves_wrapped_frame = require_registers(
+    "rse_clone_return_reload_preserves_wrapped_frame", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x30, 0x00, alloc(32, 10, 7, 0, 0), nop_i(),
+         nop_i()),
+        (0x40, *movl_mlx(33, 0x1111111111110033)),
+        (0x50, *movl_mlx(34, 0x2222222222220034)),
+        (0x60, *movl_mlx(35, 0x3333333333330035)),
+        (0x70, *movl_mlx(36, 0x4444444444440036)),
+        (0x80, *movl_mlx(37, 0x5555555555550037)),
+        (0x90, *movl_mlx(38, 0x6666666666660038)),
+        (0xa0, *movl_mlx(39, 0x7777777777770039)),
+        (0xb0, *movl_mlx(40, 0x8888888888880040)),
+        (0xc0, *movl_mlx(41, 0x9999999999990041)),
+        # schedule_tail stand-in: an ordinary call that clobbers the
+        # output registers (legal; the child code regenerates them).
+        (0xd0, 0x10, nop_m(), nop_i(),
+         br_call(0, 0xd0, 0x400)),
+        (0xe0, 0x18, nop_m(), nop_m(),
+         cover_b()),
+        (0xf0, *movl_mlx(20, (1 << 63) | 0x38a)),
+        (0x100, 0x00, mov_m_gr_cr(20, 23), nop_i(),
+         nop_i()),
+        (0x110, *movl_mlx(20, 0x330)),
+        (0x120, 0x00, mov_m_gr_cr(20, 19), nop_i(),
+         nop_i()),
+        (0x130, 0x00, mov_m_gr_cr(0, 16), nop_i(),
+         nop_i()),
+        (0x140, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x140, 0x500)),
+        (0x150, 0x00, alloc(2, 0, 0, 0, 0), nop_i(),
+         nop_i()),
+        (0x160, *movl_mlx(20, 0x50 << 16)),
+        (0x170, 0x00, mov_m_gr_ar(20, 16), nop_i(),
+         nop_i()),
+        (0x180, 0x00, loadrs_enc(), nop_i(),
+         nop_i()),
+        (0x190, *movl_mlx(20, 0x200f00)),
+        (0x1a0, 0x00, mov_ar(20, 18), nop_i(),
+         nop_i()),
+        (0x1b0, 0x00, mov_m_imm_ar(19, 0), nop_i(),
+         nop_i()),
+        (0x1c0, 0x10, nop_m(), nop_i(),
+         rfi_b()),
+
+        # rfi landing pad: the restored frame spins here for assertion.
+        (0x330, 0x00, mov_m_ar_gr(10, 17), nop_i(),
+         nop_i()),
+        (0x340, 0x10, nop_m(), nop_i(),
+         br_cond(0x340, 0x340)),
+
+        # schedule_tail stand-in body.
+        (0x400, 0x00, alloc(34, 3, 3, 0, 0), nop_i(),
+         nop_i()),
+        (0x410, 0x00, nop_m(), adds(32, 0, 0),
+         adds(33, 0, 0)),
+        (0x420, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ] + [b for k in range(9)
+         for b in _clone_chain_level(0x500 + 0x80 * k,
+                                     0x500 + 0x80 * (k + 1)
+                                     if k < 8 else None)], {
+        "ip": 0x340,
+        "exception": IA64_EXCP_NONE,
+        "r10": 0x200f00,
+        # r39-r41 are outputs: the schedule_tail stand-in clobbers them
+        # (legal).  The locals and every NaT bit must survive; a stray
+        # NaT here is what kills the clone2 child (its ld8 through the
+        # saved fn pointer would take a NaT-consumption fault).
+        "r33": 0x1111111111110033,
+        "r34": 0x2222222222220034,
+        "r35": 0x3333333333330035,
+        "r36": 0x4444444444440036,
+        "r37": 0x5555555555550037,
+        "r38": 0x6666666666660038,
+        "r33_nat": 0,
+        "r34_nat": 0,
+        "r35_nat": 0,
+        "r36_nat": 0,
+        "r37_nat": 0,
+        "r38_nat": 0,
+        "r39_nat": 0,
+        "r40_nat": 0,
+        "r41_nat": 0,
+        "cfm_sof": 10,
+        "cfm_sol": 7,
     }, entry=0x10)
 
 
@@ -4470,6 +4751,8 @@ CASE_NAMES = (
     'rse_loadrs_reloads_same_collection_rnat',
     'rse_loadrs_sets_tear_point',
     'rse_boundary_rewrite_preserves_committed_bits',
+    'rse_bspstore_rebase_onto_copied_backing_store',
+    'rse_clone_return_reload_preserves_wrapped_frame',
     'rse_flushrs_loadrs_invalidate_preserves_rnat',
     'rse_loadrs_zero_current_frame_invalidates_parents',
     'rse_nt_bstore_switch_nat_roundtrip',
@@ -4482,6 +4765,7 @@ CASE_NAMES = (
     'rse_postinc_after_flushrs_preserves_register_value',
     'rse_return_growth_keeps_dirty_bsp_distance',
     'rse_return_reclaims_clean_keeps_unreached_rnat',
+    'rse_return_sees_backing_store_edit_under_clean',
     'rse_rfi_advanced_iip_bspstore_switch_loads_external_frame',
     'rse_rfi_advanced_iip_preserves_nested_call_locals',
     'rse_rfi_advanced_iip_uses_covered_current_frame',

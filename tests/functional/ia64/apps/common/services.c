@@ -1221,6 +1221,7 @@ typedef struct {
 static EFI_HANDLE test_start_image_controller;
 static UINTN test_start_image_start_count;
 static EFI_BOOT_SERVICES *test_start_image_bs;
+static const char *test_start_image_fail_detail;
 
 static EFI_STATUS test_start_image_supported(
     EFI_DRIVER_BINDING_PROTOCOL *This, EFI_HANDLE Controller,
@@ -1299,6 +1300,7 @@ static BOOLEAN test_start_image_connect(EFI_HANDLE ImageHandle,
     test_start_image_controller = NULL;
     test_start_image_start_count = 0;
     test_start_image_bs = bs;
+    test_start_image_fail_detail = "controller-install";
     if (bs->InstallProtocolInterface(&test_start_image_controller,
                                      start_image_base_guid,
                                      EFI_NATIVE_INTERFACE,
@@ -1312,6 +1314,7 @@ static BOOLEAN test_start_image_connect(EFI_HANDLE ImageHandle,
     binding.Stop = test_start_image_stop;
     binding.Version = 1;
     binding.ImageHandle = ImageHandle;
+    test_start_image_fail_detail = "binding-install";
     if (bs->InstallProtocolInterface(&driver, driver_binding_guid,
                                      EFI_NATIVE_INTERFACE,
                                      &binding) != EFI_SUCCESS) {
@@ -1332,37 +1335,78 @@ static BOOLEAN test_start_image_connect(EFI_HANDLE ImageHandle,
         child = NULL;
         loaded = NULL;
         status = bs->LoadImage(0, ImageHandle, &path, NULL, 0, &child);
-        if (status != EFI_SUCCESS || child == NULL ||
-            bs->HandleProtocol(child, loaded_image_guid,
+        if (status != EFI_SUCCESS || child == NULL) {
+            switch (status) {
+            case EFI_NOT_FOUND:
+                test_start_image_fail_detail = "load-image-not-found";
+                break;
+            case EFI_INVALID_PARAMETER:
+                test_start_image_fail_detail = "load-image-invalid-parameter";
+                break;
+            case EFI_UNSUPPORTED:
+                test_start_image_fail_detail = "load-image-unsupported";
+                break;
+            case EFI_LOAD_ERROR:
+                test_start_image_fail_detail = "load-image-load-error";
+                break;
+            case EFI_OUT_OF_RESOURCES:
+                test_start_image_fail_detail = "load-image-out-of-resources";
+                break;
+            case EFI_DEVICE_ERROR:
+                test_start_image_fail_detail = "load-image-device-error";
+                break;
+            default:
+                test_start_image_fail_detail = "load-image";
+                break;
+            }
+            goto out;
+        }
+        if (bs->HandleProtocol(child, loaded_image_guid,
                                (VOID **)&loaded) != EFI_SUCCESS ||
-            loaded == NULL ||
-            bs->HandleProtocol(child, loaded_image_device_path_guid,
+            loaded == NULL) {
+            test_start_image_fail_detail = "loaded-image-protocol";
+            goto out;
+        }
+        if (bs->HandleProtocol(child, loaded_image_device_path_guid,
                                &loaded_device_path) != EFI_SUCCESS ||
             loaded_device_path == NULL || loaded_device_path == &path ||
             !ia64_bytes_equal(loaded_device_path, &path, sizeof(path)) ||
-            loaded->FilePath != loaded_device_path ||
-            bs->HandleProtocol(child, hii_package_list_guid,
+            loaded->FilePath != loaded_device_path) {
+            test_start_image_fail_detail = "device-path-duplicate";
+            goto out;
+        }
+        if (bs->HandleProtocol(child, hii_package_list_guid,
                                &hii_package_list) != EFI_SUCCESS ||
             hii_package_list == NULL ||
             get_u32((UINT8 *)hii_package_list + 16U) != 24U ||
             get_u32((UINT8 *)hii_package_list + 20U) != 0xdf000004U) {
+            test_start_image_fail_detail = "hii-package-list";
             goto out;
         }
         loaded->LoadOptions = &options;
         loaded->LoadOptionsSize = sizeof(options);
         status = bs->StartImage(child, NULL, NULL);
-        if (status != EFI_SUCCESS ||
-            test_start_image_start_count != pass + 1U ||
-            bs->HandleProtocol(test_start_image_controller,
+        if (status != EFI_SUCCESS) {
+            test_start_image_fail_detail = "start-image-status";
+            goto out;
+        }
+        if (test_start_image_start_count != pass + 1U) {
+            test_start_image_fail_detail = pass == 0 ?
+                "auto-connect-after-return" : "auto-connect-after-exit";
+            goto out;
+        }
+        if (bs->HandleProtocol(test_start_image_controller,
                                start_image_change_guid,
                                &installed_change) != EFI_SUCCESS ||
             installed_change != &change_interface) {
+            test_start_image_fail_detail = "change-protocol-content";
             goto out;
         }
         change_installed = 1;
         if (bs->UninstallProtocolInterface(test_start_image_controller,
                                            start_image_change_guid,
                                            &change_interface) != EFI_SUCCESS) {
+            test_start_image_fail_detail = "change-protocol-uninstall";
             goto out;
         }
         change_installed = 0;
@@ -1386,6 +1430,9 @@ out:
                                        start_image_base_guid,
                                        &base_interface) != EFI_SUCCESS) {
         cleanup_ok = 0;
+    }
+    if (ok && !cleanup_ok) {
+        test_start_image_fail_detail = "cleanup-uninstall";
     }
     test_start_image_controller = NULL;
     test_start_image_bs = NULL;
@@ -1999,7 +2046,13 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
             offset += 1U + length;
         }
     }
-    return bus && io && legacy_memory && memory && uart_window && end_tag;
+    /*
+     * The root bridge must NOT publish a producer window for the UART: a
+     * sub-page window above 4 GB BSODs Windows XP with STOP 0x50 during PnP
+     * arbitration (dropped in 5a58a91).  UAR0 describes its own registers in
+     * the SSDT instead, so a reappearing DSDT window is a regression.
+     */
+    return bus && io && legacy_memory && memory && !uart_window && end_tag;
 }
 
 static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
@@ -2709,7 +2762,8 @@ EFI_STATUS ia64_services_main(EFI_HANDLE ImageHandle,
             ia64_test_check(
                 &context, "start-image-connect", start_connect_ok,
                 EFI_DEVICE_ERROR,
-                "modified-handle-auto-connect");
+                start_connect_ok ? "modified-handle-auto-connect"
+                                 : test_start_image_fail_detail);
         }
         ia64_test_check(&context, "memory-primitives",
                         test_memory_primitives(SystemTable), EFI_DEVICE_ERROR,

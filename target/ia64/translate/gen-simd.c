@@ -84,9 +84,10 @@ static void ia64_simd_insert_lane(TCGv_i64 result, TCGv_i64 value,
 /*
  * Write a SIMD result through the normal GR path.  An r0 destination is
  * ignored here (matching every other GR writer in this translator); the
- * old env-writing helpers stored to env->gr[0] and corrupted the r0
- * global.  The stacked-register dirty note is taken care of by the
- * ia64_gen_gr_nat_from_* call that every site emits afterwards.
+ * old env-writing helpers stored through r0's slot in env->gr and
+ * corrupted the r0 global.  The stacked-register dirty note is taken
+ * care of by the ia64_gen_gr_nat_from_* call that every site emits
+ * afterwards.
  */
 static void ia64_simd_write_gr(uint8_t reg, TCGv_i64 value)
 {

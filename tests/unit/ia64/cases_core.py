@@ -162,6 +162,7 @@ from .encoding import (
     mux1_rev,
     mux2,
     nop_b,
+    nop_f,
     nop_i,
     nop_m,
     nop_x,
@@ -592,6 +593,34 @@ test_br_call_indirect_prefetch_hint_bit_ignored_madison = require_registers(
         (0x40, 0x00, adds(4, 0x5a, 0), nop_i(), nop_i()),
         (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
     ], {"ip": 0x50, "r4": 0x5a}, entry=0x10, cpu="madison")
+
+# mov r1 = b2 (I22): read back a branch register to prove a call wrote its
+# link.  op 0, x6 = 0x31 (SDM Vol.3 I22); verified against gas output.
+def _mov_gr_br(r1, b2, qp=0):
+    return (bitfield(0x31, 27, 6) | bitfield(b2, 13, 3) |
+            bitfield(r1, 6, 7) | bitfield(qp, 0, 6))
+
+# The prefetch-hint cases above cannot see a call that decodes but is not
+# TAKEN: their target (0x40) is also the fall-through bundle, so they pass
+# either way, and they never check the link register.  This case pins the
+# taken-ness and the link write of the exact bundle glibc 2.2.5 ships in
+# __clone2's child path (Debian 3.0 ia64, libc offset 0x1b2f70): template
+# MFB (0x1d), slot 2 = 0x240000c000 = br.call.few b0=b6 with wh=4 (branch-
+# whether hint bit 32 clear).  If that call falls through, the child runs
+# straight into __clone2's _exit path with the fn's gp and wild-branches --
+# the LinuxThreads manager dies at birth and every pthread_create hangs.
+test_br_call_indirect_wh4_few_mfb_is_taken = require_registers(
+    "br_call_indirect_wh4_few_mfb_is_taken", [
+        (0x10, 0x00, addl(8, 0x60, 0), nop_i(), nop_i()),
+        (0x20, 0x00, nop_m(), mov_br_gr(6, 8), nop_i()),
+        (0x30, 0x1d, nop_m(), nop_f(), br_call_indirect(0, 6, wh=4)),
+        # Fall-through poison: must not execute.
+        (0x40, 0x00, adds(4, 0x2b, 0), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+        # Call target: prove arrival and that b0 = the link (0x40).
+        (0x60, 0x00, adds(4, 0x5a, 0), _mov_gr_br(5, 0), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {"ip": 0x70, "r4": 0x5a, "r5": 0x40}, entry=0x10)
 
 # CPUID identity on merced: CPUID[3] = family 0x07, model 0, rev 8 (C2 stepping)
 # = 0x0000000007000804 (249720-009); CPUID[4] = 0, i.e. brl NOT implemented
@@ -2930,6 +2959,7 @@ CASE_NAMES = (
     'tf_upper_cpuid_feature_bits',
     'br_call_indirect_prefetch_hint_bit_ignored',
     'br_call_indirect_prefetch_hint_bit_ignored_madison',
+    'br_call_indirect_wh4_few_mfb_is_taken',
     'ia32_cpuid_leaf1_reports_merced_signature',
     'cpuid_merced',
     'unpack2_l_decode',

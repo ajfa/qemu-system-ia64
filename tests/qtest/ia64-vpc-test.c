@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <glib/gstdio.h>
 #include "qemu/bitops.h"
 #include "qemu/bswap.h"
 #include "qemu/sockets.h"
@@ -1383,6 +1384,35 @@ static uint64_t cpu_sapic_irr_word(QTestState *qts, unsigned word)
 }
 
 /*
+ * SAPIC delivery from the I/O SAPIC is queued to the target vCPU with
+ * async_run_on_cpu(), so an immediate IRR readback races the (idle)
+ * qtest vCPU thread draining its work queue.  Pulse a disambiguating
+ * fence vector through a spare pin and wait for it to appear: the
+ * per-CPU work queue is FIFO, so once the fence delivery is visible,
+ * every delivery requested before it -- including an erroneous one --
+ * is visible too, and both the ==0 and !=0 assertions below are exact.
+ * IRR bits are never accepted (no code runs on a qtest vCPU), so each
+ * fence needs a vector of its own.
+ */
+static void iosapic_irr_fence(QTestState *qts, const char *iosapic_path,
+                              uint8_t fence_vector)
+{
+    const unsigned pin = 20;
+    const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + pin * 2;
+    const unsigned word = fence_vector / 64;
+    const uint64_t bit = 1ULL << (fence_vector % 64);
+    gint64 deadline = g_get_monotonic_time() + 15 * G_USEC_PER_SEC;
+
+    iosapic_write(qts, rte_low, fence_vector);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 0);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    while (!(cpu_sapic_irr_word(qts, word) & bit)) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+}
+
+/*
  * A redirection-table write is not an interrupt request, and a redundant
  * assert of an already-high input is not a new edge: an edge-triggered
  * entry delivers only on a 0->1 input transition (460GX SSDM 248704-001
@@ -1403,19 +1433,23 @@ static void test_iosapic_edge_rte_write_is_not_a_request(void)
     /* Input already asserted before the route is programmed. */
     qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
     iosapic_write(qts, rte_low, vector);
+    iosapic_irr_fence(qts, iosapic_path, 0x60);
     g_assert_cmphex(cpu_sapic_irr_word(qts, word) & bit, ==, 0);
 
     /* Rewriting the entry is not a request either. */
     iosapic_write(qts, rte_low, vector);
+    iosapic_irr_fence(qts, iosapic_path, 0x61);
     g_assert_cmphex(cpu_sapic_irr_word(qts, word) & bit, ==, 0);
 
     /* Nor is a redundant assert of the already-high input. */
     qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    iosapic_irr_fence(qts, iosapic_path, 0x62);
     g_assert_cmphex(cpu_sapic_irr_word(qts, word) & bit, ==, 0);
 
     /* The 0->1 transition is. */
     qtest_set_irq_in(qts, iosapic_path, NULL, pin, 0);
     qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    iosapic_irr_fence(qts, iosapic_path, 0x63);
     g_assert_cmphex(cpu_sapic_irr_word(qts, word) & bit, !=, 0);
     qtest_quit(qts);
 }

@@ -445,6 +445,25 @@ typedef enum IA64GeneralRegisterIndex {
     IA64_GR_RETURN3 = 11,
     IA64_GR_STACK_POINTER = 12,
     IA64_GR_THREAD_POINTER = 13,
+    /*
+     * IA-32 execution model mapping (SDM volume 1, section 6.2): GR8-GR15
+     * hold the IA-32 general registers, GR16/GR17 the packed data- and
+     * code-side segment selectors, and GR24-GR31 the unscrambled segment
+     * descriptors (CSD/SSD in GR25/GR26 mirror AR.CSD/AR.SSD).  jmpe
+     * leaves the address of its next IA-32 instruction in GR1.
+     */
+    IA64_GR_IA32_JMPE_RETURN = 1,
+    IA64_GR_IA32_GPR_BASE = 8,
+    IA64_GR_IA32_DATA_SELECTORS = 16,
+    IA64_GR_IA32_CODE_SELECTORS = 17,
+    IA64_GR_IA32_ESD = 24,
+    IA64_GR_IA32_CSD = 25,
+    IA64_GR_IA32_SSD = 26,
+    IA64_GR_IA32_DSD = 27,
+    IA64_GR_IA32_FSD = 28,
+    IA64_GR_IA32_GSD = 29,
+    IA64_GR_IA32_LDTD = 30,
+    IA64_GR_IA32_GDTD = 31,
 } IA64GeneralRegisterIndex;
 
 typedef enum IA64PredicateRegisterIndex {

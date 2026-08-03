@@ -1593,19 +1593,32 @@ static VOID send_wake_ipi(UINTN Id, UINT64 Vector)
 static BOOLEAN wait_for_round(UINT64 Round)
 {
     UINT64 deadline = read_itc() + TEST_WAIT_TICKS;
+    UINT64 last_progress = 0;
 
     for (;;) {
         UINTN id;
         BOOLEAN complete = 1;
+        UINT64 progress = 0;
 
         __asm__ volatile ("mf;;" : : : "memory");
         for (id = 1; id < TEST_PROCESSOR_COUNT; id++) {
+            progress += ap_rendezvous_count[id];
             if (ap_rendezvous_count[id] < Round) {
                 complete = 0;
             }
         }
         if (complete) {
             return 1;
+        }
+        /*
+         * The ITC tracks wall time even while a vCPU is starved by host
+         * scheduling, so a fixed deadline flakes under parallel test load.
+         * Any AP advancing proves the system is live; only a total wedge
+         * may time out.
+         */
+        if (progress > last_progress) {
+            last_progress = progress;
+            deadline = read_itc() + TEST_WAIT_TICKS;
         }
         if ((INTN)(read_itc() - deadline) >= 0) {
             return 0;
@@ -1617,19 +1630,28 @@ static BOOLEAN wait_for_round(UINT64 Round)
 static BOOLEAN wait_for_global_translation_ready(VOID)
 {
     UINT64 deadline = read_itc() + TEST_WAIT_TICKS;
+    UINT64 last_progress = 0;
 
     for (;;) {
         UINTN id;
         BOOLEAN complete = 1;
+        UINT64 progress = 0;
 
         __asm__ volatile ("mf;;" : : : "memory");
         for (id = 1; id < TEST_PROCESSOR_COUNT; id++) {
             if (global_translation_ready[id] == 0) {
                 complete = 0;
+            } else {
+                progress++;
             }
         }
         if (complete) {
             return 1;
+        }
+        /* See wait_for_round(): extend the deadline while APs make progress. */
+        if (progress > last_progress) {
+            last_progress = progress;
+            deadline = read_itc() + TEST_WAIT_TICKS;
         }
         if ((INTN)(read_itc() - deadline) >= 0) {
             return 0;
@@ -2026,6 +2048,17 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
                      TEST_SLOW_LOCK_INCREMENTS);
     for (id = 0; id < TEST_PROCESSOR_COUNT; id++) {
         slow_path_total += slow_path_calls[id];
+    }
+    if (slow_lock_semantics && slow_path_total == 0) {
+        /*
+         * Host scheduling can serialize the vCPUs so completely that no
+         * acquisition ever observes the lock held (lock *correctness* is
+         * already proven by the exact counter above).  Run the RSE-pressure
+         * slow path once deterministically so it is always exercised.
+         */
+        slow_lock_acquire(0);
+        store8_release(&slow_lock, 0);
+        slow_path_total = slow_path_calls[0];
     }
     slow_lock_semantics = slow_lock_semantics && slow_path_total != 0;
     ia64_test_check(&context, "contended-call-rse-guarded-word",

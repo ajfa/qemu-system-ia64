@@ -902,7 +902,7 @@ uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
     }
 
     bridge->psr = env->psr;
-    bridge->b0 = env->br[0];
+    bridge->b0 = env->br[IA64_BR_RETURN_LINK];
     bridge->sp = env->gr[IA64_GR_STACK_POINTER];
     bridge->gp = env->gr[IA64_GR_GLOBAL_POINTER];
     bridge->rsc = env->ar_rsc;
@@ -930,7 +930,7 @@ uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
     env->gr[IA64_GR_STACK_POINTER] = stack;
     ia64_gr_nat_set(env, IA64_GR_GLOBAL_POINTER, false);
     ia64_gr_nat_set(env, IA64_GR_STACK_POINTER, false);
-    env->br[0] = IA64_FW_SAL_RUNTIME_RETURN_PA;
+    env->br[IA64_BR_RETURN_LINK] = IA64_FW_SAL_RUNTIME_RETURN_PA;
 
     ia64_set_psr(env, env->psr & ~(IA64_PSR_DT | IA64_PSR_RT |
                                    IA64_PSR_IT | IA64_PSR_I |
@@ -961,7 +961,7 @@ uint32_t ia64_sal_runtime_exit(CPUIA64State *env)
     env->gr[IA64_GR_STACK_POINTER] = bridge->sp;
     ia64_gr_nat_set(env, IA64_GR_GLOBAL_POINTER, false);
     ia64_gr_nat_set(env, IA64_GR_STACK_POINTER, false);
-    env->br[0] = bridge->b0;
+    env->br[IA64_BR_RETURN_LINK] = bridge->b0;
     ia64_set_psr(env, bridge->psr);
     ia64_tlb_serialize(env, 1, 1);
 
