@@ -68,7 +68,6 @@
 #define IA64_NVRAM_COMMIT_MAGIC 0x54494d4d4f43564eULL /* "NVCOMMIT" */
 #define IA64_HIGH_RAM_AFTER_FIRMWARE_BASE \
     (IA64_FIRMWARE_ADDRESS_SPACE_BASE + IA64_FIRMWARE_ADDRESS_SPACE_SIZE)
-#define IA64_FW_BOOTSTRAP_STACK_TOP (128 * MiB)
 #define IA64_FW_LOW_RAM_MIN IA64_FW_BOOTSTRAP_STACK_TOP
 #define IA64_IVT_BASE   0x10000ULL
 #define IA64_IVT_SIZE   0x8000ULL
@@ -158,12 +157,7 @@
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
-#define IA64_VPC_MAX_CPUS           4
 #define IA64_VPC_NIC_SLOT           6
-#define IA64_VPC_RSE_STACK_SIZE     0x8000ULL
-#define IA64_VPC_EARLY_STACK_TOP    0x08000000ULL
-#define IA64_VPC_AP_EARLY_STACK_TOP 0x00100000ULL
-#define IA64_VPC_EARLY_STACK_STRIDE 0x10000ULL
 
 #define IA64_SAPIC_DELIVERY_INT     0
 #define IA64_SAPIC_DELIVERY_NMI     4
@@ -2628,11 +2622,10 @@ static IA64BootInfo ia64_vpc_boot_info(unsigned int cpu_index,
         .firmware_entry = entry,
         .global_pointer = global_pointer,
         .iva = IA64_IVT_BASE,
-        .bsp = 0x80000 + cpu_index * IA64_VPC_RSE_STACK_SIZE,
-        .stack_pointer = cpu_index == 0 ?
-            IA64_VPC_EARLY_STACK_TOP - 16 :
-            IA64_VPC_AP_EARLY_STACK_TOP - 16 -
-                cpu_index * IA64_VPC_EARLY_STACK_STRIDE,
+        .bsp = IA64_FW_EARLY_RSE_BASE +
+            cpu_index * IA64_FW_EARLY_RSE_SIZE,
+        .stack_pointer = IA64_FW_BOOTSTRAP_STACK_TOP - 16 -
+            cpu_index * IA64_FW_CPU_STACK_SIZE,
         .rsc = IA64_RSC_MODE,
         .powered_off = cpu_index != 0,
     };

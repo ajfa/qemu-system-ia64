@@ -193,7 +193,7 @@ static unsigned ia64_fw_debug_cpu_index(CPUIA64State *env)
     CPUState *cs = env_cpu(env);
     unsigned index = cs->cpu_index < 0 ? 0 : cs->cpu_index;
 
-    return MIN(index, IA64_FW_DEBUG_MAX_CPUS - 1);
+    return MIN(index, IA64_VPC_MAX_CPUS - 1);
 }
 
 static hwaddr ia64_fw_debug_context_pa(CPUIA64State *env)
@@ -900,6 +900,21 @@ uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
     if (!entry || !gp || !stack || !bstore ||
         (entry & (IA64_BUNDLE_SIZE - 1)) || (bstore & 7)) {
         return 0;
+    }
+
+    /*
+     * The dispatch block publishes CPU 0's physical stack and backing
+     * store; every processor owns a private slot at a fixed stride so
+     * concurrent SAL calls cannot share re-entry memory.
+     */
+    if (stack >= IA64_FW_SAL_RUNTIME_BASE &&
+        stack < IA64_FW_SAL_RUNTIME_BASE + IA64_FW_SAL_RUNTIME_SLOT_SIZE &&
+        bstore >= IA64_FW_SAL_RUNTIME_BASE &&
+        bstore < IA64_FW_SAL_RUNTIME_BASE + IA64_FW_SAL_RUNTIME_SLOT_SIZE) {
+        unsigned index = ia64_fw_debug_cpu_index(env);
+
+        stack += (uint64_t)index * IA64_FW_SAL_RUNTIME_SLOT_SIZE;
+        bstore += (uint64_t)index * IA64_FW_SAL_RUNTIME_SLOT_SIZE;
     }
 
     bridge->psr = env->psr;

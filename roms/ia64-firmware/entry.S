@@ -8,7 +8,13 @@
 
     .section .text._start, "ax"
     .equ FW_BOOTSTRAP_STACK_TOP, 0x08000000
-    .equ FW_AP_BOOTSTRAP_STACK_TOP, 0x00100000
+    /*
+     * Must equal IA64_FW_BOOTSTRAP_STACK_TOP (hw/ia64/ia64_vpc_abi.h);
+     * the per-CPU stride below (shl 17 = 128 KiB) must equal
+     * IA64_FW_CPU_STACK_SIZE.  This file is assembled without the C
+     * preprocessor, so the values cannot be included.
+     */
+    .equ FW_AP_BOOTSTRAP_STACK_TOP, 0x08000000
     .global _start
     .type _start, @function
     .proc _start
@@ -248,7 +254,7 @@ start_secondary:
     ;;
     extr.u r14 = r14, 24, 8
     ;;
-    shl r15 = r14, 16
+    shl r15 = r14, 17
     movl r12 = (FW_AP_BOOTSTRAP_STACK_TOP - 16)
     ;;
     sub r12 = r12, r15

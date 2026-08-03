@@ -11,6 +11,10 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
         Name (C1EN, 0x0F)
         Name (C2EN, 0x0F)
         Name (C3EN, 0x0F)
+        Name (C4EN, 0x0F)
+        Name (C5EN, 0x0F)
+        Name (C6EN, 0x0F)
+        Name (C7EN, 0x0F)
 
         Processor (CPU0, 0, 0, 0)
         {
@@ -41,6 +45,38 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
             Method (_STA, 0, NotSerialized)
             {
                 Return (C3EN)
+            }
+        }
+
+        Processor (CPU4, 4, 0, 0)
+        {
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (C4EN)
+            }
+        }
+
+        Processor (CPU5, 5, 0, 0)
+        {
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (C5EN)
+            }
+        }
+
+        Processor (CPU6, 6, 0, 0)
+        {
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (C6EN)
+            }
+        }
+
+        Processor (CPU7, 7, 0, 0)
+        {
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (C7EN)
             }
         }
 

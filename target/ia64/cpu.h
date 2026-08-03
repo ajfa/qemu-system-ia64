@@ -5,6 +5,7 @@
 #include "exec/cpu-common.h"
 #include "exec/cpu-interrupt.h"
 #include "fpu/softfloat.h"
+#include "hw/ia64/ia64_vpc_abi.h"
 #include "qemu/timer.h"
 
 #ifdef CONFIG_USER_ONLY
@@ -780,18 +781,11 @@ typedef struct IA64CodeTlbEdCache {
 
 /*
  * The EFI 1.10 native debug-support ABI uses a fixed 1192-byte IA-64
- * context record.  Firmware places one record per vCPU immediately after
- * the architected IVT.  The emulator retains only the RSE bookkeeping that
- * is needed while a registered callback runs; architected state is carried
- * in the guest-visible context record itself.
+ * context record.  Firmware places one record per vCPU in the fixed
+ * CPU-assist area (see hw/ia64/ia64_vpc_abi.h).  The emulator retains only
+ * the RSE bookkeeping that is needed while a registered callback runs;
+ * architected state is carried in the guest-visible context record itself.
  */
-#define IA64_FW_DEBUG_CONTEXT_BASE    0x0000000000018000ULL
-#define IA64_FW_DEBUG_CONTEXT_STRIDE  0x800ULL
-#define IA64_FW_DEBUG_CONTEXT_SIZE    1192U
-#define IA64_FW_DEBUG_MAX_CPUS        4U
-#define IA64_FW_DEBUG_STACK_BASE      0x0000000000020000ULL
-#define IA64_FW_DEBUG_STACK_SIZE      0x8000ULL
-
 typedef struct IA64FirmwareDebugRseState {
     uint64_t pgr[IA64_STACKED_GR_COUNT];
     uint64_t pgr_nat[2];
