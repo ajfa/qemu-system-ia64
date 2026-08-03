@@ -1547,6 +1547,23 @@ static bool sapic_irr_has_vector(QTestState *qts, uint8_t vector)
     return (irr[vector / 64] & BIT_ULL(vector % 64)) != 0;
 }
 
+/*
+ * SAPIC delivery is asynchronous; a single readback races it under host
+ * load.  Spin like the other interrupt tests do.
+ */
+static bool sapic_wait_irr_vector(QTestState *qts, uint8_t vector)
+{
+    int i;
+
+    for (i = 0; i < 1000; i++) {
+        if (sapic_irr_has_vector(qts, vector)) {
+            return true;
+        }
+        g_usleep(1000);
+    }
+    return false;
+}
+
 static void test_savevm_restores_platform_state(void)
 {
     const char *machine = "ia64-vpc";
@@ -1618,7 +1635,7 @@ static void test_savevm_restores_platform_state(void)
     iosapic_write(qts, rte_low,
                   saved_vector | IA64_IOSAPIC_RTE_LEVEL);
     qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
-    g_assert_true(sapic_irr_has_vector(qts, saved_vector));
+    g_assert_true(sapic_wait_irr_vector(qts, saved_vector));
     g_assert_cmphex(iosapic_read(qts, rte_low) &
                     IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
 
@@ -1649,8 +1666,8 @@ static void test_savevm_restores_platform_state(void)
     iosapic_write(qts, rte_low,
                   changed_vector | IA64_IOSAPIC_RTE_LEVEL);
     qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    g_assert_true(sapic_wait_irr_vector(qts, changed_vector));
     g_assert_false(sapic_irr_has_vector(qts, saved_vector));
-    g_assert_true(sapic_irr_has_vector(qts, changed_vector));
 
     response = qtest_hmp(qts, "loadvm platform-state");
     g_assert_cmpstr(response, ==, "");
