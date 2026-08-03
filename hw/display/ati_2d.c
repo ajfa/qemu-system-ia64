@@ -63,6 +63,16 @@ typedef struct {
     QemuRect src;
     int src_stride;
     const uint8_t *src_bits;
+
+    /*
+     * Transparent (foreground-only) source mask. When non-NULL, SRCCOPY blits
+     * copy a source pixel only where the mask byte is non-zero; background
+     * pixels leave the destination untouched. Used for SRC_MONO_FRGD
+     * (MONO_FG_LA) host-data colour expansion. The mask is one byte per source
+     * pixel with the same row stride, in pixels, as the source (src_stride /
+     * bytes-per-pixel).
+     */
+    const uint8_t *src_fg_mask;
 } ATI2DCtx;
 
 static void ati_set_dirty(const ATI2DCtx *ctx)
@@ -105,6 +115,7 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
     ctx->vga = &s->vga;
     ctx->bpp = ati_bpp_from_datatype(s);
     ctx->rop3 = s->regs.dp_mix & GMC_ROP3_MASK;
+    ctx->src_fg_mask = NULL;
     ctx->host_data_active = s->host_data.active;
     ctx->left_to_right = s->regs.dp_cntl & DST_X_LEFT_TO_RIGHT;
     ctx->top_to_bottom = s->regs.dp_cntl & DST_Y_TOP_TO_BOTTOM;
@@ -228,7 +239,7 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
 #ifdef CONFIG_PIXMAN
         int src_stride_words = ctx->src_stride / sizeof(uint32_t);
         int dst_stride_words = ctx->dst_stride / sizeof(uint32_t);
-        if ((use_pixman & BIT(1)) &&
+        if ((use_pixman & BIT(1)) && !ctx->src_fg_mask &&
             ctx->left_to_right && ctx->top_to_bottom) {
             fallback = !pixman_blt((uint32_t *)ctx->src_bits,
                                    (uint32_t *)ctx->dst_bits, src_stride_words,
@@ -241,20 +252,33 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
             fallback = true;
         }
         if (fallback) {
+            unsigned mask_stride = ctx->src_stride / bypp;
             for (y = 0; y < vis_dst.height; y++) {
+                unsigned src_row;
                 i = vis_dst.x * bypp;
                 j = vis_src.x * bypp;
                 if (ctx->top_to_bottom) {
-                    i += (vis_dst.y + y) * ctx->dst_stride;
-                    j += (vis_src.y + y) * ctx->src_stride;
+                    src_row = vis_src.y + y;
                 } else {
-                    i += (vis_dst.y + vis_dst.height - 1 - y)
-                         * ctx->dst_stride;
-                    j += (vis_src.y + vis_dst.height - 1 - y)
-                         * ctx->src_stride;
+                    src_row = vis_src.y + vis_dst.height - 1 - y;
                 }
-                memmove(&ctx->dst_bits[i], &ctx->src_bits[j],
-                        vis_dst.width * bypp);
+                i += (ctx->top_to_bottom ? vis_dst.y + y :
+                      vis_dst.y + vis_dst.height - 1 - y) * ctx->dst_stride;
+                j += src_row * ctx->src_stride;
+                if (ctx->src_fg_mask) {
+                    /* Transparent: copy only foreground (mask) pixels. */
+                    const uint8_t *mrow = ctx->src_fg_mask +
+                                          src_row * mask_stride + vis_src.x;
+                    for (x = 0; x < vis_dst.width; x++) {
+                        if (mrow[x]) {
+                            memcpy(&ctx->dst_bits[i + x * bypp],
+                                   &ctx->src_bits[j + x * bypp], bypp);
+                        }
+                    }
+                } else {
+                    memmove(&ctx->dst_bits[i], &ctx->src_bits[j],
+                            vis_dst.width * bypp);
+                }
             }
         }
         break;
@@ -343,8 +367,10 @@ bool ati_host_data_flush(ATIVGAState *s)
     ATI2DCtx ctx, chunk;
     unsigned bypp, pix_count, row, col, idx;
     uint8_t pix_buf[ATI_HOST_DATA_ACC_BITS * sizeof(uint32_t)];
+    uint8_t fg_mask[ATI_HOST_DATA_ACC_BITS];
     uint32_t src_source = s->regs.dp_mix & DP_SRC_SOURCE;
     uint32_t src_datatype = s->regs.dp_datatype & DP_SRC_DATATYPE;
+    bool transparent = (src_datatype == SRC_MONO_FRGD);
 
     if (!s->host_data.active) {
         return false;
@@ -403,6 +429,7 @@ bool ati_host_data_flush(ATIVGAState *s)
                 uint8_t byte_val = s->host_data.acc[word] >> (byte * 8);
                 for (int i = 0; i < 8; i++) {
                     bool is_fg = byte_val & BIT(byte_pix_order ? i : 7 - i);
+                    fg_mask[idx / bypp] = is_fg;
                     stn_he_p(&pix_buf[idx], bypp, is_fg ? fg : bg);
                     idx += bypp;
                 }
@@ -415,6 +442,12 @@ bool ati_host_data_flush(ATIVGAState *s)
     chunk.src_bits = pix_buf;
     chunk.src.y = 0;
     chunk.src_stride = ATI_HOST_DATA_ACC_BITS * bypp;
+    /*
+     * MONO_FG_LA expansion has a transparent background: only foreground bits
+     * are drawn, background bits leave the destination untouched. Drive that
+     * through the per-pixel mask; SRC_MONO_FRGD_BKGD and SRC_COLOR stay opaque.
+     */
+    chunk.src_fg_mask = transparent ? fg_mask : NULL;
 
     /* Blit one scanline chunk at a time */
     row = s->host_data.row;
