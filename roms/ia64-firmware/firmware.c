@@ -21568,6 +21568,10 @@ typedef struct FW_FAT_VOLUME {
     UINT32  total_sectors;
     UINT32  cluster_count;
     UINT32  lba_offset;
+    BOOLEAN fat_cache_valid;
+    UINT32  fat_cache_media_id;
+    UINT32  fat_cache_lba;
+    UINT8   fat_cache[512];
     EFI_HANDLE handle;
     EFI_BLOCK_IO_PROTOCOL *block_io;
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL simple_fs;
@@ -21635,6 +21639,9 @@ typedef struct {
     FW_FS_KIND fs_kind;
     FW_FAT_VOLUME *fat_volume;
     UINT32  first_cluster;
+    BOOLEAN fat_cursor_valid;
+    UINT32  fat_cursor_cluster;
+    UINT32  fat_cursor_index;
     UINT32  extent;
     UINT16  partition_reference;
     UINT64  size;
@@ -24790,6 +24797,32 @@ static BOOLEAN fw_fat_read_512s(FW_FAT_VOLUME *Volume, UINT8 *buf,
                buf) == EFI_SUCCESS;
 }
 
+static const UINT8 *fw_fat_read_table_sector(FW_FAT_VOLUME *Volume,
+                                             UINT32 lba)
+{
+    UINT32 media_id;
+
+    if (Volume == NULL || !Volume->valid || Volume->block_io == NULL ||
+        Volume->block_io->Media == NULL) {
+        return NULL;
+    }
+    media_id = Volume->block_io->Media->MediaId;
+    if (Volume->fat_cache_valid &&
+        Volume->fat_cache_media_id == media_id &&
+        Volume->fat_cache_lba == lba) {
+        return Volume->fat_cache;
+    }
+
+    Volume->fat_cache_valid = 0;
+    if (!fw_fat_read_512(Volume, Volume->fat_cache, lba)) {
+        return NULL;
+    }
+    Volume->fat_cache_media_id = media_id;
+    Volume->fat_cache_lba = lba;
+    Volume->fat_cache_valid = 1;
+    return Volume->fat_cache;
+}
+
 static BOOLEAN fw_fat_is_data_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
 {
     return Volume != NULL && cluster >= 2U &&
@@ -24799,7 +24832,7 @@ static BOOLEAN fw_fat_is_data_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
 
 static UINT32 fw_fat_next_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
 {
-    UINT8 sec[512];
+    const UINT8 *sec;
     UINT32 offset;
     UINT32 lba;
     UINT32 pos;
@@ -24815,12 +24848,14 @@ static UINT32 fw_fat_next_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
         offset = cluster + (cluster >> 1);
         lba = Volume->reserved_secs + (offset / 512U);
         pos = offset & 511U;
-        if (!fw_fat_read_512(Volume, sec, lba)) {
+        sec = fw_fat_read_table_sector(Volume, lba);
+        if (sec == NULL) {
             return 0xffffffffU;
         }
         b0 = sec[pos];
         if (pos == 511U) {
-            if (!fw_fat_read_512(Volume, sec, lba + 1U)) {
+            sec = fw_fat_read_table_sector(Volume, lba + 1U);
+            if (sec == NULL) {
                 return 0xffffffffU;
             }
             b1 = sec[0];
@@ -24833,7 +24868,8 @@ static UINT32 fw_fat_next_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
 
     offset = cluster * (Volume->fat_type == 16U ? 2U : 4U);
     lba = Volume->reserved_secs + offset / 512U;
-    if (!fw_fat_read_512(Volume, sec, lba)) {
+    sec = fw_fat_read_table_sector(Volume, lba);
+    if (sec == NULL) {
         return 0xffffffffU;
     }
     if (Volume->fat_type == 16U) {
@@ -26677,6 +26713,134 @@ static EFI_STATUS fat_file_open(EFI_FILE_PROTOCOL *This,
     return EFI_SUCCESS;
 }
 
+static UINT32 fat_file_cluster_at(FW_FILE *File, UINT32 Position,
+                                  UINT32 *ClusterPosition,
+                                  UINT32 *ClusterIndex)
+{
+    FW_FAT_VOLUME *volume = File != NULL ? File->fat_volume : NULL;
+    UINT32 target_index;
+    UINT32 current_index;
+    UINT32 cluster;
+
+    if (volume == NULL || !volume->valid || volume->cluster_size == 0) {
+        return 0xffffffffU;
+    }
+
+    target_index = Position / volume->cluster_size;
+    if (File->fat_cursor_valid &&
+        File->fat_cursor_index <= target_index &&
+        fw_fat_is_data_cluster(volume, File->fat_cursor_cluster)) {
+        cluster = File->fat_cursor_cluster;
+        current_index = File->fat_cursor_index;
+    } else {
+        cluster = File->first_cluster;
+        current_index = 0;
+    }
+
+    while (current_index < target_index &&
+           fw_fat_is_data_cluster(volume, cluster)) {
+        cluster = fw_fat_next_cluster(volume, cluster);
+        current_index++;
+    }
+    if (!fw_fat_is_data_cluster(volume, cluster)) {
+        return 0xffffffffU;
+    }
+
+    File->fat_cursor_valid = 1;
+    File->fat_cursor_cluster = cluster;
+    File->fat_cursor_index = current_index;
+    if (ClusterPosition != NULL) {
+        *ClusterPosition = Position % volume->cluster_size;
+    }
+    if (ClusterIndex != NULL) {
+        *ClusterIndex = current_index;
+    }
+    return cluster;
+}
+
+typedef struct {
+    EFI_BLOCK_IO_PROTOCOL protocol;
+    EFI_BLOCK_IO_MEDIA media;
+    UINT8 fat_sector[512];
+    UINT32 read_count;
+} FW_FAT_CACHE_TEST;
+
+static EFI_STATUS fat_cache_test_read(EFI_BLOCK_IO_PROTOCOL *This,
+                                      UINT32 MediaId, UINT64 Lba,
+                                      UINTN BufferSize, VOID *Buffer)
+{
+    FW_FAT_CACHE_TEST *test = (FW_FAT_CACHE_TEST *)This;
+
+    if (MediaId != test->media.MediaId) {
+        return EFI_MEDIA_CHANGED;
+    }
+    if (Lba != 1U || BufferSize != sizeof(test->fat_sector) ||
+        Buffer == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+    fw_copy_mem(Buffer, test->fat_sector, sizeof(test->fat_sector));
+    test->read_count++;
+    return EFI_SUCCESS;
+}
+
+static BOOLEAN fat_cursor_cache_selftest(VOID)
+{
+    FW_FAT_CACHE_TEST test;
+    FW_FAT_VOLUME volume;
+    FW_FILE file;
+    UINT32 cluster_position;
+    UINT32 cluster_index;
+
+    fw_set_mem(&test, sizeof(test), 0);
+    fw_set_mem(&volume, sizeof(volume), 0);
+    fw_set_mem(&file, sizeof(file), 0);
+
+    test.media.MediaId = 7U;
+    test.media.MediaPresent = 1;
+    test.media.BlockSize = 512U;
+    test.media.LastBlock = 31U;
+    test.protocol.Media = &test.media;
+    test.protocol.ReadBlocks = fat_cache_test_read;
+    test.fat_sector[4] = 3U;  /* cluster 2 -> 3 */
+    test.fat_sector[6] = 4U;  /* cluster 3 -> 4 */
+    test.fat_sector[8] = 5U;  /* cluster 4 -> 5 */
+    test.fat_sector[10] = 0xf8U; /* cluster 5 -> end of chain */
+    test.fat_sector[11] = 0xffU;
+
+    volume.valid = 1;
+    volume.fat_type = 16U;
+    volume.sec_per_cluster = 1U;
+    volume.reserved_secs = 1U;
+    volume.eoc_cluster = 0xfff8U;
+    volume.cluster_size = 512U;
+    volume.total_sectors = 32U;
+    volume.cluster_count = 16U;
+    volume.block_io = &test.protocol;
+
+    file.fs_kind = FW_FS_FAT;
+    file.fat_volume = &volume;
+    file.first_cluster = 2U;
+
+    if (fat_file_cluster_at(&file, 2U * 512U, &cluster_position,
+                            &cluster_index) != 4U ||
+        cluster_position != 0U || cluster_index != 2U ||
+        test.read_count != 1U ||
+        fat_file_cluster_at(&file, 3U * 512U, &cluster_position,
+                            &cluster_index) != 5U ||
+        cluster_index != 3U || test.read_count != 1U ||
+        fat_file_cluster_at(&file, 512U, &cluster_position,
+                            &cluster_index) != 3U ||
+        cluster_index != 1U || test.read_count != 1U) {
+        return 0;
+    }
+
+    test.fat_sector[6] = 6U;  /* changed medium: cluster 3 -> 6 */
+    test.media.MediaId++;
+    return fat_file_cluster_at(&file, 2U * 512U, &cluster_position,
+                               &cluster_index) == 6U &&
+           cluster_index == 2U && test.read_count == 2U;
+}
+
 static EFI_STATUS iso_file_open(EFI_FILE_PROTOCOL *This,
                                 EFI_FILE_HANDLE *NewHandle,
                                 CHAR16 *FileName, UINT64 OpenMode,
@@ -26855,19 +27019,14 @@ static BOOLEAN fat_dir_read_raw_at(FW_FILE *file, UINT32 pos,
         }
         lba = volume->root_dir_start + (pos >> 9);
     } else {
-        UINT32 cluster = file->is_root ? volume->root_cluster :
-                         file->first_cluster;
-        UINT32 skip = pos / volume->cluster_size;
+        UINT32 cluster;
         UINT32 cluster_pos;
 
-        while (skip-- > 0 && fw_fat_is_data_cluster(volume, cluster)) {
-            cluster = fw_fat_next_cluster(volume, cluster);
-        }
+        cluster = fat_file_cluster_at(file, pos, &cluster_pos, NULL);
         if (!fw_fat_is_data_cluster(volume, cluster)) {
             return 0;
         }
 
-        cluster_pos = pos % volume->cluster_size;
         lba = volume->data_start +
               (cluster - 2U) * volume->sec_per_cluster +
               (cluster_pos >> 9);
@@ -26954,6 +27113,7 @@ static EFI_STATUS fat_file_read(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
     UINT32 done = 0;
     UINT32 pos;
     UINT32 cluster;
+    UINT32 cluster_index;
 
     if (BufferSize == NULL || file == NULL || volume == NULL ||
         !volume->valid ||
@@ -26973,13 +27133,8 @@ static EFI_STATUS fat_file_read(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
         want = file->size - file->position;
     }
 
-    pos = (UINT32)file->position;
-    cluster = file->first_cluster;
-    while (pos >= volume->cluster_size &&
-           fw_fat_is_data_cluster(volume, cluster)) {
-        pos -= volume->cluster_size;
-        cluster = fw_fat_next_cluster(volume, cluster);
-    }
+    cluster = fat_file_cluster_at(file, (UINT32)file->position,
+                                  &pos, &cluster_index);
 
     while (done < want && fw_fat_is_data_cluster(volume, cluster)) {
         UINT32 cluster_off = pos;
@@ -27026,6 +27181,12 @@ static EFI_STATUS fat_file_read(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
         pos = 0;
         if (done < want) {
             cluster = fw_fat_next_cluster(volume, cluster);
+            cluster_index++;
+            if (fw_fat_is_data_cluster(volume, cluster)) {
+                file->fat_cursor_valid = 1;
+                file->fat_cursor_cluster = cluster;
+                file->fat_cursor_index = cluster_index;
+            }
         }
     }
 
@@ -34554,6 +34715,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     uart_puts("File Protocol:        ");
     uart_puts(file_protocol_contract_selftest() ?
               "read-only positioning and information verified\r\n" :
+              "verification failed\r\n");
+    uart_puts("FAT File Reads:       ");
+    uart_puts(fat_cursor_cache_selftest() ?
+              "cursor and table cache verified\r\n" :
               "verification failed\r\n");
     uart_puts("Unicode Collation:    ");
     uart_puts(unicode_collation_selftest() ?
