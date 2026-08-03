@@ -91,22 +91,40 @@ static bool ia64_translation_insert_fields_valid(const CPUIA64State *env,
 }
 
 static bool ia64_tlb_entry_overlaps(const IA64TlbEntry *entry,
-                                    uint64_t start, uint64_t end,
+                                    uint64_t start, uint64_t ps,
                                     uint32_t rid)
 {
-    uint64_t entry_start, entry_end;
+    uint64_t mask;
 
-    if (!entry->valid || entry->rid != rid || entry->ps == 0) {
+    if (entry->rid != rid || !entry->valid || entry->ps == 0) {
         return false;
     }
 
-    entry_start = entry->va & entry->page_mask;
-    entry_end = entry_start + entry->ps - 1;
-    if (entry_end < entry_start || entry_end > IA64_REGION7_PHYS_MASK) {
-        entry_end = IA64_REGION7_PHYS_MASK;
-    }
+    /*
+     * Both ranges are power-of-two sized and naturally aligned.  They
+     * overlap exactly when their bases agree after masking by the larger
+     * page size.  Reuse the entry's precomputed mask in the common case.
+     */
+    mask = entry->ps >= ps ? entry->page_mask : ia64_va_vpn_mask(ps);
+    return ((entry->va ^ start) & mask) == 0;
+}
 
-    return start <= entry_end && entry_start <= end;
+static int ia64_tlb_circular_tc_victim(const IA64TlbEntry *tlb,
+                                       uint16_t capacity,
+                                       uint16_t next_replace)
+{
+    uint16_t i = next_replace;
+    uint16_t n;
+
+    for (n = 0; n < capacity; n++) {
+        if (tlb[i].valid && !tlb[i].is_tr) {
+            return i;
+        }
+        if (++i == capacity) {
+            i = 0;
+        }
+    }
+    return -1;
 }
 
 static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
@@ -282,18 +300,12 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
                                   uint16_t *next_replace, int *insert_slot)
 {
     int empty = -1;
-    int victim = -1;
     uint64_t start = ia64_va_page_base(va, ps);
-    uint64_t end = start + ps - 1;
-    uint16_t victim_distance = IA64_TLB_MAX;
     uint16_t i;
     bool purged = false;
 
     if (insert_slot) {
         *insert_slot = -1;
-    }
-    if (end < start || end > IA64_REGION7_PHYS_MASK) {
-        end = IA64_REGION7_PHYS_MASK;
     }
     for (i = 0; i < *count; i++) {
         if (!tlb[i].valid) {
@@ -302,7 +314,7 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
             }
             continue;
         }
-        if (tlb[i].is_tr) {
+        if (tlb[i].rid != rid || tlb[i].is_tr) {
             continue;
         }
         if (ia64_tlb_entry_overlaps(&tlb[i], start, ps, rid)) {
@@ -314,14 +326,6 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
                 empty = i;
             }
             purged = true;
-        } else if (insert_slot) {
-            uint16_t distance = i >= *next_replace ?
-                i - *next_replace : IA64_TLB_MAX + i - *next_replace;
-
-            if (distance < victim_distance) {
-                victim = i;
-                victim_distance = distance;
-            }
         }
     }
 
@@ -333,9 +337,12 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
         if (empty < 0 && *count < IA64_TLB_MAX) {
             empty = *count;
         }
-        *insert_slot = empty >= 0 ? empty : victim;
+        *insert_slot = empty >= 0 ? empty :
+            ia64_tlb_circular_tc_victim(tlb, IA64_TLB_MAX, *next_replace);
         if (*insert_slot >= 0) {
-            *next_replace = (*insert_slot + 1) % IA64_TLB_MAX;
+            uint16_t next = *insert_slot + 1;
+
+            *next_replace = next == IA64_TLB_MAX ? 0 : next;
         }
     }
 
@@ -349,16 +356,12 @@ static bool ia64_mark_pending_purge_entries(IA64TlbEntry *tlb, uint16_t count,
                                             char kind)
 {
     uint64_t start = ia64_va_page_base(va, ps);
-    uint64_t end = start + ps - 1;
     uint16_t i;
     bool marked = false;
 
-    if (end < start || end > IA64_REGION7_PHYS_MASK) {
-        end = IA64_REGION7_PHYS_MASK;
-    }
     for (i = 0; i < count; i++) {
         if ((!tc_only || !tlb[i].is_tr) &&
-            ia64_tlb_entry_overlaps(&tlb[i], start, end, rid)) {
+            ia64_tlb_entry_overlaps(&tlb[i], start, ps, rid)) {
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 pending purge.%c slot=%u %s"
                           " va=0x%016" PRIx64 " rid=0x%06" PRIx32
@@ -522,8 +525,7 @@ static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb,
                                    uint32_t rid, bool *matched)
 {
     int empty = -1;
-    int victim = -1;
-    uint16_t victim_distance = IA64_TLB_MAX;
+    int victim;
     uint16_t i;
 
     *matched = false;
@@ -541,15 +543,6 @@ static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb,
             *matched = true;
             return i;
         }
-        {
-            uint16_t distance = i >= *next_replace ?
-                i - *next_replace : IA64_TLB_MAX + i - *next_replace;
-
-            if (distance < victim_distance) {
-                victim = i;
-                victim_distance = distance;
-            }
-        }
     }
 
     if (empty >= 0) {
@@ -557,6 +550,7 @@ static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb,
         return empty;
     }
 
+    victim = ia64_tlb_circular_tc_victim(tlb, IA64_TLB_MAX, *next_replace);
     if (victim >= 0) {
         /* Keep replacement moving forward over non-TR entries. */
         *next_replace = (victim + 1) % IA64_TLB_MAX;
