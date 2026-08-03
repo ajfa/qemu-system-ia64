@@ -4681,6 +4681,43 @@ test_predicated_off_stacked_write_keeps_following_write_valid = \
             "r33": 2,
         }, entry=0x10)
 
+test_rse_firmware_unaligned_postinc_marks_stacked_base_dirty = \
+    require_registers(
+        "rse_firmware_unaligned_postinc_marks_stacked_base_dirty", [
+        (0x10, *movl_mlx(2, (1 << 13) | (1 << 3))),
+        (0x20, 0x10, mov_gr_psr_full(2), nop_i(),
+         br_cond(0x20, 0x40)),
+        (0x40, *movl_mlx(3, 0x100000)),
+        (0x50, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x60, *movl_mlx(2, 0x8000)),
+        (0x70, *movl_mlx(4, 0x1122334455667788)),
+        (0x80, 0x0a, st8(2, 4), adds(2, 8, 2), nop_i()),
+        (0x90, *movl_mlx(4, 0x99aabbccddeeff00)),
+        (0xa0, 0x00, st8(2, 4), nop_i(),
+         nop_i()),
+        (0xb0, 0x00, addl(2, 0x10000, 0), nop_i(), nop_i()),
+        (0xc0, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0xd0, 0x00, nop_m(), alloc(36, 5, 5, 0, 0),
+         addl(33, 0x8004, 0)),
+        (0xe0, 0x13, nop_m(), nop_b(), clrrrb_b()),
+        (0xf0, 0x08, ld8_postinc(8, 33, 8), nop_i(),
+         nop_i()),
+        (0x100, 0x13, nop_m(), nop_b(), clrrrb_b()),
+        (0x110, 0x00, nop_m(), adds(9, 0, 33),
+         nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(),
+         br_cond(0x120, 0x120)),
+    ], {
+        "ip": 0x120,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0xddeeff0011223344,
+        "r9": 0x800c,
+        "r33": 0x800c,
+        "cfm_sof": 5,
+        "cfm_sol": 5,
+    }, entry=0x10)
+
 CASE_NAMES = (
 
     'predicated_off_stacked_write_keeps_following_write_valid',
@@ -4739,6 +4776,7 @@ CASE_NAMES = (
     'rse_exception_flushrs_preserves_high_local',
     'rse_exception_loadrs_preserves_interrupted_call',
     'rse_exception_restores_snapshot_arrays',
+    'rse_firmware_unaligned_postinc_marks_stacked_base_dirty',
     'rse_firmware_unmatched_return_restores_matching_frame',
     'rse_flushrs_clears_stale_rnat',
     'rse_flushrs_crosses_reverse_mapped_virtual_pages',

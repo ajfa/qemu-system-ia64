@@ -656,6 +656,7 @@ static void ia64_unaligned_base_update(CPUIA64State *env,
     } else if (insn->imm_base_update) {
         env->gr[insn->operands.common.source2] =
             addr + insn->operands.common.immediate;
+        ia64_rse_mark_gr_dirty(env, insn->operands.common.source2);
     }
 }
 
