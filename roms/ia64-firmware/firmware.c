@@ -16442,6 +16442,113 @@ static UINT64 pe_image_base_alignment(BOOLEAN RuntimeImage)
 }
 
 /* Whether an image of Size bytes physically fits at base, ignoring policy. */
+static BOOLEAN pe_find_loaded_image_overlap(UINT64 Start, UINT64 End,
+                                            UINT64 *FirstEnd,
+                                            UINT64 *LastStart)
+{
+    UINT64 first_end = ~0ULL;
+    UINT64 last_start = 0;
+    BOOLEAN found = 0;
+    UINTN i;
+
+    if (End <= Start) {
+        return 0;
+    }
+
+    for (i = 0; i < LOADED_IMAGE_MAX; i++) {
+        EFI_LOADED_IMAGE_RECORD *rec = &mLoadedImages[i];
+        UINT64 base;
+        UINT64 size;
+        UINT64 end;
+
+        if (!rec->in_use) {
+            continue;
+        }
+        base = (UINT64)(UINTN)rec->loaded_image.ImageBase;
+        size = pe_loaded_image_allocation_size(
+            rec->loaded_image.ImageSize, rec->loaded_image.ImageCodeType);
+        if (size == 0 || base > ~0ULL - size) {
+            continue;
+        }
+        end = base + size;
+        if (Start >= end || base >= End) {
+            continue;
+        }
+        if (!found || end < first_end) {
+            first_end = end;
+        }
+        if (!found || base > last_start) {
+            last_start = base;
+        }
+        found = 1;
+    }
+
+    if (found) {
+        if (FirstEnd != NULL) {
+            *FirstEnd = first_end;
+        }
+        if (LastStart != NULL) {
+            *LastStart = last_start;
+        }
+    }
+    return found;
+}
+
+/*
+ * First fit inside one conventional descriptor, jumping straight past the
+ * allocation, loaded-image or source-buffer blocker instead of advancing
+ * one IA64_EFI_IMAGE_ALIGN step at a time.
+ */
+static BOOLEAN pe_find_image_base_forward(UINT64 Start, UINT64 End,
+                                          UINT64 Size,
+                                          UINT64 SourceBase,
+                                          UINT64 SourceSize,
+                                          UINT64 *ImageBase)
+{
+    UINT64 base;
+    UINT64 source_end;
+
+    if (Size == 0 || End <= Start || End - Start < Size ||
+        !efi_align_up_u64(Start, IA64_EFI_IMAGE_ALIGN, &base)) {
+        return 0;
+    }
+    source_end = SourceSize > ~0ULL - SourceBase ?
+                 ~0ULL : SourceBase + SourceSize;
+
+    while (base <= End - Size) {
+        UINT64 blocker_end = 0;
+        UINT64 overlap_end;
+        BOOLEAN blocked = 0;
+
+        if (SourceSize != 0 && base < source_end &&
+            SourceBase < base + Size) {
+            blocker_end = source_end;
+            blocked = 1;
+        }
+        if (efi_find_allocation_overlap(base, base + Size, &overlap_end,
+                                        NULL) &&
+            (!blocked || overlap_end < blocker_end)) {
+            blocker_end = overlap_end;
+            blocked = 1;
+        }
+        if (pe_find_loaded_image_overlap(base, base + Size, &overlap_end,
+                                         NULL) &&
+            (!blocked || overlap_end < blocker_end)) {
+            blocker_end = overlap_end;
+            blocked = 1;
+        }
+        if (!blocked) {
+            *ImageBase = base;
+            return 1;
+        }
+        if (blocker_end <= base ||
+            !efi_align_up_u64(blocker_end, IA64_EFI_IMAGE_ALIGN, &base)) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
 static BOOLEAN pe_image_base_usable(UINT64 base, UINT64 size, UINT64 alignment)
 {
     if (alignment == 0 || (base & (alignment - 1U)) != 0) {
@@ -16554,21 +16661,21 @@ static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size,
                 continue;
             }
 
-            for (base = desc_start; base <= desc_end - aligned_size;) {
+            /*
+             * The forward search returns the lowest usable base in the
+             * descriptor at or above desc_start; if that already sits at
+             * or past the cursor on the wrap-around pass, no base below
+             * the cursor exists in this descriptor either.
+             */
+            if (pe_find_image_base_forward(desc_start, desc_end,
+                                           aligned_size,
+                                           SourceBase, SourceSize,
+                                           &base)) {
                 if (pass != 0 && cursor_valid && base >= cursor) {
-                    break;
+                    continue;
                 }
-                if (!ranges_overlap(base, aligned_size,
-                                    SourceBase, SourceSize) &&
-                    pe_image_base_available(base, aligned_size,
-                                            RuntimeImage)) {
-                    mNextPeImageBase = base + aligned_size;
-                    return base;
-                }
-                if (base > ~0ULL - IA64_EFI_IMAGE_ALIGN) {
-                    break;
-                }
-                base += IA64_EFI_IMAGE_ALIGN;
+                mNextPeImageBase = base + aligned_size;
+                return base;
             }
         }
     }
