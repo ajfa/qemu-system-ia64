@@ -116,8 +116,11 @@ def _command(qemu: str, program: MicroProgram) -> list[str]:
     ]
     if program.memory is not None:
         command += ["-m", program.memory]
-    if program.cpu is not None:
-        command += ["-cpu", program.cpu]
+    # The battery was authored against Montecito behaviour for every case
+    # that does not name a model.  Pin it so the cases keep their meaning
+    # independently of the machine's default CPU type.
+    command += ["-cpu", program.cpu if program.cpu is not None
+                else "montecito"]
     return command + _loader_args(program)
 
 

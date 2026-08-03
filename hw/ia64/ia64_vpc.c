@@ -3021,7 +3021,7 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
     mc->init = ia64_vpc_init;
     mc->max_cpus = IA64_VPC_MAX_CPUS;
     mc->default_cpus = 1;
-    mc->default_cpu_type = IA64_CPU_TYPE_NAME("montecito");
+    mc->default_cpu_type = IA64_CPU_TYPE_NAME("madison");
     mc->smp_props.prefer_sockets = true;
     mc->default_ram_size = 2 * GiB;
     mc->default_ram_id = "ia64-vpc.ram";

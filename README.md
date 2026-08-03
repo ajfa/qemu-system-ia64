@@ -10,9 +10,9 @@ Experimental QEMU full-system emulation target for IA-64/Itanium guests. Forked 
 The default machine is `ia64-vpc`.
 It models an IA-64 virtual PC profile intended for firmware, boot loader, and operating-system bring-up:
 
-- Montecito CPU model by default, with Merced and Madison selection available.
+- Madison (Itanium 2) CPU model by default, with Merced and Montecito selection available.
   All models use TCG translation and provide PAL/SAL helpers, the register stack engine, TLB/VHPT paths, and architectural floating-point state.
-- 1 vCPU by default, configurable from 1 to 4 vCPUs; MTTCG is supported with `-accel tcg,thread=multi`
+- 1 vCPU by default, configurable from 1 to 8 vCPUs; MTTCG is supported with `-accel tcg,thread=multi`
 - 2 GiB default RAM
 - project-owned IA-64 EFI firmware built from source under `roms/ia64-firmware/`
 - EFI boot/runtime services, an interactive pre-boot shell, PE/COFF and EBC image loading, decompression, filesystems, graphics, storage, USB/input, and debug-support protocols
@@ -73,7 +73,7 @@ If QEMU does not launch due to the error `failed to find romfile "vgabios-ati.bi
 
 ### CPU model selection
 
-The `ia64-vpc` machine uses the `montecito` CPU model by default.
+The `ia64-vpc` machine uses the `madison` CPU model by default; as an Itanium 2 it has the widest compatibility with operating systems released throughout Itanium's lifespan.
 Select a different model with `-cpu`.
 CPU selection changes guest-visible CPUID and PAL information as well as the available instruction set.
 
@@ -88,18 +88,18 @@ Use `-cpu merced` for first-generation guests such as Windows XP 64-bit Edition:
   ...
 ```
 
-#### `montecito` (default)
+#### `madison` (default)
+
+Madison provides the hardware IA-32 execution environment.
+Eligible `br.ia` and `rfi` transitions execute IA-32 code, and IA-32 `JMPE` returns to IA-64.
+The later 16-byte operations and virtualization instructions are not available and raise an Illegal Operation fault.
+
+#### `montecito`
 
 Montecito implements the later 16-byte operations `ld16`, `ld16.acq`, `st16`, `st16.rel`, `cmp8xchg16.acq`, and `cmp8xchg16.rel`.
 It has no hardware IA-32 execution engine, so an eligible `br.ia` or `rfi` request to enter IA-32 mode raises a Disabled ISA Transition fault.
 The `vmsw.0` and `vmsw.1` encodings are recognized as virtualization instructions.
 Because this emulator does not provide an IA-64 virtual-machine environment, these instructions produce the architecturally appropriate Privileged Operation or Virtualization fault instead of executing a mode switch.
-
-#### `madison`
-
-Madison provides the hardware IA-32 execution environment.
-Eligible `br.ia` and `rfi` transitions execute IA-32 code, and IA-32 `JMPE` returns to IA-64.
-The later 16-byte operations and virtualization instructions are not available and raise an Illegal Operation fault.
 
 #### `merced`
 
