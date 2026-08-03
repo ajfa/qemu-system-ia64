@@ -8,6 +8,7 @@
 #include "qemu/osdep.h"
 #include "hw/ia64/ia64_iosapic.h"
 #include "cpu.h"
+#include "migration/vmstate.h"
 #include "system/address-spaces.h"
 
 #define IOSAPIC_IOREGSEL   0x00
@@ -276,12 +277,47 @@ static void iosapic_reset(DeviceState *dev)
     s->reg_select = 0;
 }
 
+static int iosapic_post_load(void *opaque, int version_id)
+{
+    IA64IOSapicState *s = opaque;
+    unsigned int pin;
+
+    /*
+     * Edge inputs are historical events and must not be replayed merely
+     * because their input wire was high at the snapshot boundary.  An
+     * asserted level input, however, must be re-evaluated if it did not
+     * already have Remote IRR set.
+     */
+    for (pin = 0; pin < IA64_IOSAPIC_NUM_PINS; pin++) {
+        if (s->rte[pin] & RTE_TRIGGER_LEVEL) {
+            iosapic_update(s, pin);
+        }
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_ia64_iosapic = {
+    .name = "ia64-iosapic",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = iosapic_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64_ARRAY(rte, IA64IOSapicState,
+                             IA64_IOSAPIC_NUM_PINS),
+        VMSTATE_UINT8_ARRAY(irq_level, IA64IOSapicState,
+                            IA64_IOSAPIC_NUM_PINS),
+        VMSTATE_UINT32(reg_select, IA64IOSapicState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void iosapic_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = iosapic_realize;
     device_class_set_legacy_reset(dc, iosapic_reset);
+    dc->vmsd = &vmstate_ia64_iosapic;
 }
 
 static const TypeInfo iosapic_info = {

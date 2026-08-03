@@ -1525,6 +1525,8 @@ void ia64_sapic_eoi(CPUIA64State *env);
 int  ia64_sapic_get_ivr(CPUIA64State *env);
 void ia64_itm_update(CPUIA64State *env, uint64_t itm_value);
 void ia64_itc_sync(CPUIA64State *env);
+
+extern const VMStateDescription vmstate_ia64_cpu;
 void ia64_itc_advance_pending_itm(CPUIA64State *env);
 void ia64_itc_check_timer(CPUIA64State *env);
 void ia64_itc_enter_halt(CPUIA64State *env);

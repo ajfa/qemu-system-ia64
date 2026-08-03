@@ -5,6 +5,7 @@ ia64_ss.add(files(
   'exec-access.c',
   'fault-trace.c',
   'gdbstub.c',
+  'machine.c',
   'arch/alat.c',
   'arch/exception.c',
   'arch/firmware.c',

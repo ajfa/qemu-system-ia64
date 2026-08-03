@@ -1135,6 +1135,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     resettable_class_set_parent_phases(rc, NULL, ia64_cpu_reset_hold, NULL,
                                        &icc->parent_phases);
 
+    dc->vmsd = &vmstate_ia64_cpu;
     cc->class_by_name = ia64_cpu_class_by_name;
     cc->dump_state = ia64_cpu_dump_state;
     cc->set_pc = ia64_cpu_set_pc;

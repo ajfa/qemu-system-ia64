@@ -26,10 +26,13 @@
 #define IA64_LEGACY_IO_BASE          0x000000800010000000ULL
 #define IA64_PCI_CONFIG_BASE         0x0000007ff0000000ULL
 #define IA64_ACPI_PM_IO_BASE         0x00002000ULL
+#define IA64_ACPI_PM1_EVT_EN_OFFSET  0x02ULL
 #define IA64_ACPI_PM1_CNT_OFFSET     0x04ULL
 #define IA64_ACPI_PM_RESET_OFFSET    0x0cULL
 #define IA64_ACPI_PM_RESET_VALUE     0x01U
 #define IA64_RTC_BASE                0x00000000ffef0000ULL
+#define IA64_WATCHDOG_BASE           0x00000000ffee0000ULL
+#define IA64_WATCHDOG_CODE_OFFSET    0x08ULL
 #define IA64_NVRAM_BASE              0x00000000fff00000ULL
 #define IA64_NVRAM_SIZE              (64 * KiB)
 #define IA64_NVRAM_COMMIT_OFFSET     (IA64_NVRAM_SIZE - 8)
@@ -61,7 +64,9 @@
 #define IA64_VBE_IO_INDEX            0x01ceU
 #define IA64_VBE_IO_DATA             0x01d0U
 #define IA64_VGA_FB_BASE             0x00000000c4000000ULL
+#define IA64_VGA_MMIO_BASE           0x00000000c8000000ULL
 #define IA64_VGA_LEGACY_BASE         0x00000000000a0000ULL
+#define IA64_ATI_BIOS_0_SCRATCH      0x0010U
 #define IA64_BDA_VIDEO_MODE          0x00000449ULL
 #define IA64_BDA_VIDEO_COLUMNS       0x0000044aULL
 #define IA64_BDA_VIDEO_PAGE_SIZE     0x0000044cULL
@@ -1497,6 +1502,154 @@ static void test_sparse_io_pm_register(void)
     qtest_quit(qts);
 }
 
+static bool sapic_irr_has_vector(QTestState *qts, uint8_t vector)
+{
+    g_autofree char *registers = qtest_hmp(qts, "info registers");
+    const char *line = strstr(registers, "SAPIC IRR:");
+    uint64_t irr[4];
+
+    g_assert_nonnull(line);
+    g_assert_cmpint(sscanf(line, "SAPIC IRR: %" SCNx64 " %" SCNx64
+                          " %" SCNx64 " %" SCNx64,
+                          &irr[0], &irr[1], &irr[2], &irr[3]), ==, 4);
+    return (irr[vector / 64] & BIT_ULL(vector % 64)) != 0;
+}
+
+static void test_savevm_restores_platform_state(void)
+{
+    const char *machine = "ia64-vpc";
+    const uint64_t ram_addr = 0x00300000;
+    const uint64_t saved_ram = 0x0123456789abcdefULL;
+    const uint64_t changed_ram = 0xfedcba9876543210ULL;
+    const uint64_t saved_nvram = 0x1020304050607080ULL;
+    const uint64_t changed_nvram = 0x8877665544332211ULL;
+    const uint64_t saved_watchdog = 0xa5a55a5ac3c33c3cULL;
+    const uint64_t changed_watchdog = 0x55aa55aa66996699ULL;
+    const uint16_t saved_pm_enable = 0x0100;
+    const uint16_t changed_pm_enable = 0x0400;
+    const uint32_t saved_vram = 0x00112233;
+    const uint32_t changed_vram = 0x00aabbcc;
+    const uint32_t saved_ati_scratch = 0x13579bdf;
+    const uint32_t changed_ati_scratch = 0x2468ace0;
+    const unsigned pin = 23;
+    const uint8_t saved_vector = 0x55;
+    const uint8_t changed_vector = 0x56;
+    const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + pin * 2;
+    const uint64_t pm_enable_addr =
+        IA64_LEGACY_IO_BASE +
+        ia64_sparse_io_offset(IA64_ACPI_PM_IO_BASE +
+                              IA64_ACPI_PM1_EVT_EN_OFFSET);
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *disk_path = NULL;
+    g_autofree char *quoted_disk_path = NULL;
+    g_autofree char *args = NULL;
+    g_autofree char *iosapic_path = NULL;
+    g_autofree char *response = NULL;
+    g_autoptr(GError) error = NULL;
+    uint8_t int10_response[2];
+    TestInt10Registers int10_regs;
+    QTestState *qts;
+
+    if (!have_qemu_img()) {
+        g_test_skip("qemu-img is required for internal snapshot testing");
+        return;
+    }
+
+    tmpdir = g_dir_make_tmp("ia64-vpc-savevm-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    disk_path = g_build_filename(tmpdir, "snapshot.qcow2", NULL);
+    g_assert_true(mkimg(disk_path, "qcow2", 64));
+    quoted_disk_path = g_shell_quote(disk_path);
+    args = g_strdup_printf("-drive file=%s,format=qcow2,if=scsi",
+                           quoted_disk_path);
+
+    qts = qtest_initf("-machine %s -m 256M -smp 4 -S %s",
+                      machine, args);
+    iosapic_path = find_unattached_child(qts, "ia64-iosapic");
+
+    qtest_writeq(qts, ram_addr, saved_ram);
+    qtest_writeq(qts, IA64_NVRAM_BASE, saved_nvram);
+    qtest_writeq(qts, IA64_WATCHDOG_BASE + IA64_WATCHDOG_CODE_OFFSET,
+                 saved_watchdog);
+    qtest_writew(qts, pm_enable_addr, saved_pm_enable);
+    int10_regs = (TestInt10Registers) {
+        .ax = 0x4f02,
+        .bx = 0x4143,
+    };
+    g_assert_cmpuint(int10_call(qts, &int10_regs,
+                                int10_response, sizeof(int10_response)), ==, 0);
+    g_assert_cmphex(int10_regs.ax, ==, 0x004f);
+    qtest_writel(qts, IA64_VGA_FB_BASE, saved_vram);
+    qtest_writel(qts, IA64_VGA_MMIO_BASE + IA64_ATI_BIOS_0_SCRATCH,
+                 saved_ati_scratch);
+    iosapic_write(qts, rte_low,
+                  saved_vector | IA64_IOSAPIC_RTE_LEVEL);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    g_assert_true(sapic_irr_has_vector(qts, saved_vector));
+    g_assert_cmphex(iosapic_read(qts, rte_low) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
+
+    response = qtest_hmp(qts, "savevm platform-state");
+    g_assert_cmpstr(response, ==, "");
+    g_clear_pointer(&response, g_free);
+
+    /*
+     * Reset first so that the CPU's Local SAPIC state differs as well as
+     * the memory-mapped machine and IOSAPIC state.
+     */
+    qtest_system_reset(qts);
+    qtest_writeq(qts, ram_addr, changed_ram);
+    qtest_writeq(qts, IA64_NVRAM_BASE, changed_nvram);
+    qtest_writeq(qts, IA64_WATCHDOG_BASE + IA64_WATCHDOG_CODE_OFFSET,
+                 changed_watchdog);
+    qtest_writew(qts, pm_enable_addr, changed_pm_enable);
+    int10_regs = (TestInt10Registers) {
+        .ax = 0x4f02,
+        .bx = 0x4144,
+    };
+    g_assert_cmpuint(int10_call(qts, &int10_regs,
+                                int10_response, sizeof(int10_response)), ==, 0);
+    g_assert_cmphex(int10_regs.ax, ==, 0x004f);
+    qtest_writel(qts, IA64_VGA_FB_BASE, changed_vram);
+    qtest_writel(qts, IA64_VGA_MMIO_BASE + IA64_ATI_BIOS_0_SCRATCH,
+                 changed_ati_scratch);
+    iosapic_write(qts, rte_low,
+                  changed_vector | IA64_IOSAPIC_RTE_LEVEL);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    g_assert_false(sapic_irr_has_vector(qts, saved_vector));
+    g_assert_true(sapic_irr_has_vector(qts, changed_vector));
+
+    response = qtest_hmp(qts, "loadvm platform-state");
+    g_assert_cmpstr(response, ==, "");
+
+    g_assert_cmphex(qtest_readq(qts, ram_addr), ==, saved_ram);
+    g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, saved_nvram);
+    g_assert_cmphex(qtest_readq(qts, IA64_WATCHDOG_BASE +
+                               IA64_WATCHDOG_CODE_OFFSET),
+                    ==, saved_watchdog);
+    g_assert_cmphex(qtest_readw(qts, pm_enable_addr), ==, saved_pm_enable);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_XRES), ==, 800);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_YRES), ==, 600);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_BPP), ==, 32);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_ENABLE) & 0x41,
+                    ==, 0x41);
+    g_assert_cmphex(qtest_readl(qts, IA64_VGA_FB_BASE), ==, saved_vram);
+    g_assert_cmphex(qtest_readl(qts,
+                               IA64_VGA_MMIO_BASE +
+                               IA64_ATI_BIOS_0_SCRATCH),
+                    ==, saved_ati_scratch);
+    g_assert_cmphex(iosapic_read(qts, rte_low) & 0xff, ==, saved_vector);
+    g_assert_cmphex(iosapic_read(qts, rte_low) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
+    g_assert_true(sapic_irr_has_vector(qts, saved_vector));
+    g_assert_false(sapic_irr_has_vector(qts, changed_vector));
+
+    qtest_quit(qts);
+    g_assert_cmpint(g_unlink(disk_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
 int main(int argc, char **argv)
 {
     unsigned cpus;
@@ -1552,6 +1705,8 @@ int main(int argc, char **argv)
                    test_iosapic_edge_rte_write_is_not_a_request);
     qtest_add_func("/ia64-vpc/sparse-io/pm-register",
                    test_sparse_io_pm_register);
+    qtest_add_func("/ia64-vpc/savevm/platform-state",
+                   test_savevm_restores_platform_state);
 
     return g_test_run();
 }

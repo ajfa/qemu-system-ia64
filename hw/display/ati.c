@@ -27,6 +27,7 @@
 #include "qemu/module.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "migration/vmstate.h"
 #include "ui/console.h"
 #include "trace.h"
 
@@ -1065,6 +1066,150 @@ static const MemoryRegionOps ati_mm_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+static const VMStateDescription vmstate_ati_vga_regs = {
+    .name = "ati-vga/regs",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(mm_index, ATIVGARegs),
+        VMSTATE_UINT32_ARRAY(bios_scratch, ATIVGARegs, 8),
+        VMSTATE_UINT32(gen_int_cntl, ATIVGARegs),
+        VMSTATE_UINT32(gen_int_status, ATIVGARegs),
+        VMSTATE_UINT32(crtc_gen_cntl, ATIVGARegs),
+        VMSTATE_UINT32(crtc_ext_cntl, ATIVGARegs),
+        VMSTATE_UINT32(dac_cntl, ATIVGARegs),
+        VMSTATE_UINT32(gpio_vga_ddc, ATIVGARegs),
+        VMSTATE_UINT32(gpio_dvi_ddc, ATIVGARegs),
+        VMSTATE_UINT32(gpio_monid, ATIVGARegs),
+        VMSTATE_UINT32(config_cntl, ATIVGARegs),
+        VMSTATE_UINT32_ARRAY(palette, ATIVGARegs, 256),
+        VMSTATE_UINT32(crtc_h_total_disp, ATIVGARegs),
+        VMSTATE_UINT32(crtc_h_sync_strt_wid, ATIVGARegs),
+        VMSTATE_UINT32(crtc_v_total_disp, ATIVGARegs),
+        VMSTATE_UINT32(crtc_v_sync_strt_wid, ATIVGARegs),
+        VMSTATE_UINT32(crtc_offset, ATIVGARegs),
+        VMSTATE_UINT32(crtc_offset_cntl, ATIVGARegs),
+        VMSTATE_UINT32(crtc_pitch, ATIVGARegs),
+        VMSTATE_UINT32(cur_offset, ATIVGARegs),
+        VMSTATE_UINT32(cur_hv_pos, ATIVGARegs),
+        VMSTATE_UINT32(cur_hv_offs, ATIVGARegs),
+        VMSTATE_UINT32(cur_color0, ATIVGARegs),
+        VMSTATE_UINT32(cur_color1, ATIVGARegs),
+        VMSTATE_UINT32(dst_offset, ATIVGARegs),
+        VMSTATE_UINT32(dst_pitch, ATIVGARegs),
+        VMSTATE_UINT32(dst_tile, ATIVGARegs),
+        VMSTATE_UINT32(dst_width, ATIVGARegs),
+        VMSTATE_UINT32(dst_height, ATIVGARegs),
+        VMSTATE_UINT32(src_offset, ATIVGARegs),
+        VMSTATE_UINT32(src_pitch, ATIVGARegs),
+        VMSTATE_UINT32(src_tile, ATIVGARegs),
+        VMSTATE_UINT32(src_x, ATIVGARegs),
+        VMSTATE_UINT32(src_y, ATIVGARegs),
+        VMSTATE_UINT32(dst_x, ATIVGARegs),
+        VMSTATE_UINT32(dst_y, ATIVGARegs),
+        VMSTATE_UINT32(dp_gui_master_cntl, ATIVGARegs),
+        VMSTATE_UINT32(dp_brush_bkgd_clr, ATIVGARegs),
+        VMSTATE_UINT32(dp_brush_frgd_clr, ATIVGARegs),
+        VMSTATE_UINT32(dp_src_frgd_clr, ATIVGARegs),
+        VMSTATE_UINT32(dp_src_bkgd_clr, ATIVGARegs),
+        VMSTATE_UINT16(sc_top, ATIVGARegs),
+        VMSTATE_UINT16(sc_left, ATIVGARegs),
+        VMSTATE_UINT16(sc_bottom, ATIVGARegs),
+        VMSTATE_UINT16(sc_right, ATIVGARegs),
+        VMSTATE_UINT16(src_sc_bottom, ATIVGARegs),
+        VMSTATE_UINT16(src_sc_right, ATIVGARegs),
+        VMSTATE_UINT32(dp_cntl, ATIVGARegs),
+        VMSTATE_UINT32(dp_datatype, ATIVGARegs),
+        VMSTATE_UINT32(dp_mix, ATIVGARegs),
+        VMSTATE_UINT32(dp_write_mask, ATIVGARegs),
+        VMSTATE_UINT32(default_offset, ATIVGARegs),
+        VMSTATE_UINT32(default_pitch, ATIVGARegs),
+        VMSTATE_UINT16(default_sc_bottom, ATIVGARegs),
+        VMSTATE_UINT16(default_sc_right, ATIVGARegs),
+        VMSTATE_UINT32(default_tile, ATIVGARegs),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_ati_host_data = {
+    .name = "ati-vga/host-data",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(active, ATIHostDataState),
+        VMSTATE_UINT32(row, ATIHostDataState),
+        VMSTATE_UINT32(col, ATIHostDataState),
+        VMSTATE_UINT32(next, ATIHostDataState),
+        VMSTATE_UINT32_ARRAY(acc, ATIHostDataState, 4),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_ati_bitbang_i2c = {
+    .name = "ati-vga/bitbang-i2c",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_SINGLE(state, bitbang_i2c_interface, 0,
+                       vmstate_info_int32, bitbang_i2c_state),
+        VMSTATE_INT32(last_data, bitbang_i2c_interface),
+        VMSTATE_INT32(last_clock, bitbang_i2c_interface),
+        VMSTATE_INT32(device_out, bitbang_i2c_interface),
+        VMSTATE_UINT8(buffer, bitbang_i2c_interface),
+        VMSTATE_INT32(current_addr, bitbang_i2c_interface),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int ati_vga_post_load(void *opaque, int version_id)
+{
+    ATIVGAState *s = opaque;
+    bool cursor_enabled = s->regs.crtc_gen_cntl & CRTC2_CUR_EN;
+
+    if (s->host_data.next >= ARRAY_SIZE(s->host_data.acc) ||
+        s->bbi2c.state < STOPPED || s->bbi2c.state > SENT_NACK) {
+        return -EINVAL;
+    }
+
+    s->mode = s->regs.crtc_gen_cntl & CRTC2_EXT_DISP_EN ?
+              EXT_MODE : VGA_MODE;
+    s->vga.graphic_mode = -1;
+    if (s->cursor_guest_mode) {
+        s->vga.force_shadow = cursor_enabled;
+        s->cursor_size = UINT16_MAX;
+    } else {
+        s->vga.force_shadow = false;
+        if (cursor_enabled) {
+            ati_cursor_define(s);
+        }
+        dpy_mouse_set(s->vga.con, s->regs.cur_hv_pos >> 16,
+                      s->regs.cur_hv_pos & 0xffff, cursor_enabled);
+    }
+    ati_vga_update_irq(s);
+    graphic_hw_invalidate(s->vga.con);
+    return 0;
+}
+
+static const VMStateDescription vmstate_ati_vga = {
+    .name = "ati-vga",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = ati_vga_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_PCI_DEVICE(dev, ATIVGAState),
+        VMSTATE_STRUCT(vga, ATIVGAState, 0,
+                       vmstate_vga_common, VGACommonState),
+        VMSTATE_STRUCT(regs, ATIVGAState, 0,
+                       vmstate_ati_vga_regs, ATIVGARegs),
+        VMSTATE_STRUCT(host_data, ATIVGAState, 0,
+                       vmstate_ati_host_data, ATIHostDataState),
+        VMSTATE_STRUCT(bbi2c, ATIVGAState, 0,
+                       vmstate_ati_bitbang_i2c, bitbang_i2c_interface),
+        VMSTATE_TIMER(vblank_timer, ATIVGAState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void ati_vga_realize(PCIDevice *dev, Error **errp)
 {
     ATIVGAState *s = ATI_VGA(dev);
@@ -1206,6 +1351,7 @@ static void ati_vga_class_init(ObjectClass *klass, const void *data)
 
     device_class_set_legacy_reset(dc, ati_vga_reset);
     device_class_set_props(dc, ati_vga_properties);
+    dc->vmsd = &vmstate_ati_vga;
     dc->hotpluggable = false;
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 

@@ -41,6 +41,7 @@
 #include "hw/ia64/ia64_loader.h"
 #include "hw/ia64/ia64_pci.h"
 #include "hw/ia64/ia64_iosapic.h"
+#include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "system/rtc.h"
 #include "system/runstate.h"
@@ -425,6 +426,7 @@ struct IA64VpcMachineState {
     qemu_irq isa_irqs[ISA_NUM_IRQS];
     Notifier powerdown_notifier;
     Notifier done_notifier;
+    bool vmstate_registered;
 };
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -1833,6 +1835,86 @@ static void ia64_vpc_powerdown_req(Notifier *n, void *opaque)
     }
 }
 
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+static const VMStateDescription vmstate_ia64_int10_registers = {
+    .name = "ia64-vpc/int10-registers",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT16(ax, IA64Int10Registers),
+        VMSTATE_UINT16(bx, IA64Int10Registers),
+        VMSTATE_UINT16(cx, IA64Int10Registers),
+        VMSTATE_UINT16(dx, IA64Int10Registers),
+        VMSTATE_UINT16(di, IA64Int10Registers),
+        VMSTATE_UINT16(es, IA64Int10Registers),
+        VMSTATE_END_OF_LIST()
+    }
+};
+#endif
+
+static int ia64_vpc_post_load(void *opaque, int version_id)
+{
+    IA64VpcMachineState *s = opaque;
+    uint16_t pm_enable = s->acpi_regs.pm1.evt.en;
+
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+    if (s->int10_response_length > sizeof(s->int10_response) ||
+        s->int10_response_offset > s->int10_response_length ||
+        s->int10_input_signature_words > 2) {
+        return -EINVAL;
+    }
+#endif
+
+    qemu_system_wakeup_enable(
+        QEMU_WAKEUP_REASON_RTC,
+        (pm_enable & ACPI_BITMASK_RT_CLOCK_ENABLE) != 0);
+    qemu_system_wakeup_enable(
+        QEMU_WAKEUP_REASON_PMTIMER,
+        (pm_enable & ACPI_BITMASK_TIMER_ENABLE) != 0);
+    ia64_vpc_acpi_update_sci(&s->acpi_regs);
+    return 0;
+}
+
+static const VMStateDescription vmstate_ia64_vpc = {
+    .name = "ia64-vpc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = ia64_vpc_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64(watchdog_timeout, IA64VpcMachineState),
+        VMSTATE_UINT64(watchdog_code, IA64VpcMachineState),
+        VMSTATE_TIMER_PTR(watchdog_timer, IA64VpcMachineState),
+        VMSTATE_UINT8_ARRAY(nvram_data, IA64VpcMachineState,
+                            IA64_NVRAM_SIZE),
+
+        VMSTATE_UINT16(acpi_regs.pm1.evt.sts, IA64VpcMachineState),
+        VMSTATE_UINT16(acpi_regs.pm1.evt.en, IA64VpcMachineState),
+        VMSTATE_UINT16(acpi_regs.pm1.cnt.cnt, IA64VpcMachineState),
+        VMSTATE_TIMER_PTR(acpi_regs.tmr.timer, IA64VpcMachineState),
+        VMSTATE_INT64(acpi_regs.tmr.overflow_time, IA64VpcMachineState),
+        VMSTATE_BUFFER_POINTER_UNSAFE(acpi_regs.gpe.sts,
+                                      IA64VpcMachineState, 1, 2),
+        VMSTATE_BUFFER_POINTER_UNSAFE(acpi_regs.gpe.en,
+                                      IA64VpcMachineState, 1, 2),
+
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+        VMSTATE_STRUCT(int10_request, IA64VpcMachineState, 1,
+                       vmstate_ia64_int10_registers, IA64Int10Registers),
+        VMSTATE_STRUCT(int10_result, IA64VpcMachineState, 1,
+                       vmstate_ia64_int10_registers, IA64Int10Registers),
+        VMSTATE_UINT32(int10_input_signature, IA64VpcMachineState),
+        VMSTATE_UINT8_ARRAY(int10_response, IA64VpcMachineState, 512),
+        VMSTATE_UINT16(int10_response_length, IA64VpcMachineState),
+        VMSTATE_UINT16(int10_response_offset, IA64VpcMachineState),
+        VMSTATE_UINT8(int10_input_signature_words, IA64VpcMachineState),
+        VMSTATE_UINT8(int10_dpms_state, IA64VpcMachineState),
+        VMSTATE_UINT8(int10_legacy_mode, IA64VpcMachineState),
+        VMSTATE_UINT8(int10_legacy_columns, IA64VpcMachineState),
+#endif
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static uint64_t ia64_vpc_lsapic_read(void *opaque, hwaddr addr,
                                        unsigned size)
 {
@@ -2890,6 +2972,11 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     s->pci_fixup_reset = object_new(TYPE_IA64_PCI_FIXUP_RESET);
     IA64_PCI_FIXUP_RESET(s->pci_fixup_reset)->machine = s;
     qemu_register_resettable(s->pci_fixup_reset);
+    if (vmstate_register_with_alias_id(NULL, 0, &vmstate_ia64_vpc, s,
+                                       -1, 0, errp) < 0) {
+        return false;
+    }
+    s->vmstate_registered = true;
     return true;
 }
 
@@ -2924,6 +3011,9 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
+    if (s->vmstate_registered) {
+        vmstate_unregister(NULL, &vmstate_ia64_vpc, s);
+    }
     g_free(s->nvram_path);
     g_free(s->nvram_resolved_path);
 }
