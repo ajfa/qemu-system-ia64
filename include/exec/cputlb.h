@@ -224,6 +224,17 @@ void tlb_flush_range_by_mmuidx(CPUState *cpu, vaddr addr,
                                vaddr len, MMUIdxMap idxmap,
                                unsigned bits);
 
+/**
+ * tlb_flush_range_by_mmuidx_no_jmp_cache
+ *
+ * Flush the same softmmu entries as tlb_flush_range_by_mmuidx(), but retain
+ * translated-block jump-cache hints.  A target may use this only when the
+ * architectural invalidation cannot change instruction translation.
+ */
+void tlb_flush_range_by_mmuidx_no_jmp_cache(CPUState *cpu, vaddr addr,
+                                            vaddr len, MMUIdxMap idxmap,
+                                            unsigned bits);
+
 /* Similarly, with broadcast and syncing. */
 void tlb_flush_range_by_mmuidx_all_cpus_synced(CPUState *cpu,
                                                vaddr addr,
@@ -274,6 +285,12 @@ tlb_flush_page_bits_by_mmuidx_all_cpus_synced(CPUState *cpu, vaddr addr,
 static inline void tlb_flush_range_by_mmuidx(CPUState *cpu, vaddr addr,
                                              vaddr len, MMUIdxMap idxmap,
                                              unsigned bits)
+{
+}
+static inline void
+tlb_flush_range_by_mmuidx_no_jmp_cache(CPUState *cpu, vaddr addr,
+                                       vaddr len, MMUIdxMap idxmap,
+                                       unsigned bits)
 {
 }
 static inline void tlb_flush_range_by_mmuidx_all_cpus_synced(CPUState *cpu,

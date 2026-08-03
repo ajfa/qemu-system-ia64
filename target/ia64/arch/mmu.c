@@ -110,7 +110,8 @@ static bool ia64_tlb_entry_overlaps(const IA64TlbEntry *entry,
 }
 
 static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
-                                      const IA64TlbEntry *entry)
+                                      const IA64TlbEntry *entry,
+                                      bool is_data)
 {
     uint64_t base;
     uint8_t region;
@@ -127,9 +128,21 @@ static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
 
         uint64_t va = ((uint64_t)region << IA64_REGION_SHIFT) | base;
 
-        tlb_flush_range_by_mmuidx(env_cpu(env), va, entry->ps,
-                                  MMU_IDX_TRANSLATED_MASK,
-                                  TARGET_LONG_BITS);
+        if (is_data) {
+            /*
+             * IA-64 has separate data and instruction translation caches.
+             * Clearing QEMU's unified softmmu entry is still required, but
+             * an architecturally data-only change cannot stale a translated
+             * code block or its jump-cache hint.
+             */
+            tlb_flush_range_by_mmuidx_no_jmp_cache(
+                env_cpu(env), va, entry->ps, MMU_IDX_TRANSLATED_MASK,
+                TARGET_LONG_BITS);
+        } else {
+            tlb_flush_range_by_mmuidx(env_cpu(env), va, entry->ps,
+                                      MMU_IDX_TRANSLATED_MASK,
+                                      TARGET_LONG_BITS);
+        }
     }
 }
 
@@ -292,8 +305,8 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
         if (tlb[i].is_tr) {
             continue;
         }
-        if (ia64_tlb_entry_overlaps(&tlb[i], start, end, rid)) {
-            ia64_qemu_tlb_flush_entry(env, &tlb[i]);
+        if (ia64_tlb_entry_overlaps(&tlb[i], start, ps, rid)) {
+            ia64_qemu_tlb_flush_entry(env, &tlb[i], is_data);
             ia64_discard_pending_purge(&tlb[i], pending_count);
             tlb[i].valid = 0;
             ia64_tlb_bump_slot_generation(env, !is_data, i);
@@ -441,7 +454,7 @@ static bool ia64_complete_pending_purges(CPUIA64State *env,
                           kind, i, tlb[i].is_tr ? "TR" : "TC",
                           tlb[i].va, tlb[i].rid, tlb[i].pa, tlb[i].ps);
             if (targeted) {
-                ia64_qemu_tlb_flush_entry(env, &tlb[i]);
+                ia64_qemu_tlb_flush_entry(env, &tlb[i], !is_ifetch);
             }
             tlb[i].pending_purge = 0;
             g_assert(*pending_count > 0);
@@ -673,7 +686,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     ia64_purge_tc_entries(env, tlb, cnt, pending_count, va, ps, rid,
                           is_data, NULL, NULL);
     if (old_tr.valid && !old_tr.is_tr) {
-        ia64_qemu_tlb_flush_entry(env, &old_tr);
+        ia64_qemu_tlb_flush_entry(env, &old_tr, is_data);
     }
     cached_old_tr = ia64_cache_replaced_tr(env, tlb, cnt, next_replace,
                                            pending_count, &old_tr,
@@ -2068,7 +2081,7 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
         return NULL;
     }
 
-    ia64_qemu_tlb_flush_entry(env, &tlb[slot]);
+    ia64_qemu_tlb_flush_entry(env, &tlb[slot], !is_ifetch);
     ia64_discard_pending_purge(&tlb[slot], pending_count);
     tlb[slot].va = base_va;
     tlb[slot].pa = base_pa;
@@ -2102,7 +2115,7 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
      * for a different RID than a cached same-VA host entry, so discard the
      * host translation range covered by the installed TC.
      */
-    ia64_qemu_tlb_flush_entry(env, &tlb[slot]);
+    ia64_qemu_tlb_flush_entry(env, &tlb[slot], !is_ifetch);
     return &tlb[slot];
 }
 
@@ -2399,7 +2412,7 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
     if (slot < 0) {
         return;
     }
-    ia64_qemu_tlb_flush_entry(env, &tlb[slot]);
+    ia64_qemu_tlb_flush_entry(env, &tlb[slot], is_data);
     ia64_discard_pending_purge(&tlb[slot], pending_count);
 
     tlb[slot].va = va;
@@ -2433,5 +2446,5 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
      * emulator-provided firmware/SAL identity mappings can exist in the
      * QEMU TLB without a corresponding modeled TC entry.
      */
-    ia64_qemu_tlb_flush_entry(env, &tlb[slot]);
+    ia64_qemu_tlb_flush_entry(env, &tlb[slot], is_data);
 }

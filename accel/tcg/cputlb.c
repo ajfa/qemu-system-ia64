@@ -662,7 +662,7 @@ void tlb_flush_page_all_cpus_synced(CPUState *src, vaddr addr)
 
 static void tlb_flush_range_locked(CPUState *cpu, int midx,
                                    vaddr addr, vaddr len,
-                                   unsigned bits)
+                                   unsigned bits, int64_t *full_flush_now)
 {
     CPUTLBDesc *d = &cpu->neg.tlb.d[midx];
     CPUTLBDescFast *f = cpu_tlb_fast(cpu, midx);
@@ -682,7 +682,11 @@ static void tlb_flush_range_locked(CPUState *cpu, int midx,
         tlb_debug("forcing full flush midx %d ("
                   "%016" VADDR_PRIx "/%016" VADDR_PRIx "+%016" VADDR_PRIx ")\n",
                   midx, addr, mask, len);
-        tlb_flush_one_mmuidx_locked(cpu, midx, get_clock_realtime());
+        if (*full_flush_now < 0) {
+            *full_flush_now = get_clock_realtime();
+        }
+        tlb_flush_one_mmuidx_locked(cpu, midx, *full_flush_now);
+        cpu->neg.tlb.c.dirty &= ~(1 << midx);
         return;
     }
 
@@ -695,7 +699,11 @@ static void tlb_flush_range_locked(CPUState *cpu, int midx,
         tlb_debug("forcing full flush midx %d ("
                   "%016" VADDR_PRIx "/%016" VADDR_PRIx ")\n",
                   midx, d->large_page_addr, d->large_page_mask);
-        tlb_flush_one_mmuidx_locked(cpu, midx, get_clock_realtime());
+        if (*full_flush_now < 0) {
+            *full_flush_now = get_clock_realtime();
+        }
+        tlb_flush_one_mmuidx_locked(cpu, midx, *full_flush_now);
+        cpu->neg.tlb.c.dirty &= ~(1 << midx);
         return;
     }
 
@@ -715,11 +723,13 @@ typedef struct {
     vaddr len;
     MMUIdxMap idxmap;
     unsigned bits;
+    bool flush_jmp_cache;
 } TLBFlushRangeData;
 
 static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
                                               TLBFlushRangeData d)
 {
+    int64_t full_flush_now = -1;
     int mmu_idx;
 
     assert_cpu_is_self(cpu);
@@ -729,11 +739,28 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
-        if ((d.idxmap >> mmu_idx) & 1) {
-            tlb_flush_range_locked(cpu, mmu_idx, d.addr, d.len, d.bits);
+        if (((d.idxmap & cpu->neg.tlb.c.dirty) >> mmu_idx) & 1) {
+            /*
+             * A range can force a full flush in several MMU modes.  Reuse
+             * one timestamp for their resize decisions: the modes are all
+             * flushed while holding the same lock and no guest execution
+             * can occur between them.
+             */
+            tlb_flush_range_locked(cpu, mmu_idx, d.addr, d.len, d.bits,
+                                   &full_flush_now);
         }
     }
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+
+    /*
+     * Some targets have architecturally separate instruction and data
+     * translation caches.  A data-only invalidation still has to discard
+     * the unified softmmu entry, but cannot make an already translated TB
+     * stale.  Preserve the jump-cache hint in that case.
+     */
+    if (!d.flush_jmp_cache) {
+        return;
+    }
 
     /*
      * If the length is larger than the jump cache size, then it will take
@@ -790,7 +817,24 @@ void tlb_flush_range_by_mmuidx(CPUState *cpu, vaddr addr,
     d.len = len;
     d.idxmap = idxmap;
     d.bits = bits;
+    d.flush_jmp_cache = true;
 
+    tlb_flush_range_by_mmuidx_async_0(cpu, d);
+}
+
+void tlb_flush_range_by_mmuidx_no_jmp_cache(CPUState *cpu, vaddr addr,
+                                            vaddr len, MMUIdxMap idxmap,
+                                            unsigned bits)
+{
+    TLBFlushRangeData d = {
+        .addr = addr & TARGET_PAGE_MASK,
+        .len = len,
+        .idxmap = idxmap,
+        .bits = bits,
+        .flush_jmp_cache = false,
+    };
+
+    assert_cpu_is_self(cpu);
     tlb_flush_range_by_mmuidx_async_0(cpu, d);
 }
 
@@ -828,6 +872,7 @@ void tlb_flush_range_by_mmuidx_all_cpus_synced(CPUState *src_cpu,
     d.len = len;
     d.idxmap = idxmap;
     d.bits = bits;
+    d.flush_jmp_cache = true;
 
     /* Allocate a separate data block for each destination cpu.  */
     CPU_FOREACH(dst_cpu) {
