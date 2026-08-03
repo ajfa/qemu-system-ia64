@@ -1675,7 +1675,12 @@ ia64_firmware_debug_state_const(const CPUIA64State *env)
 
 static inline IA64CPUClass *ia64_env_cpu_class(CPUIA64State *env)
 {
-    return IA64_CPU_GET_CLASS(ia64_cpu_from_cpu_state(env_cpu(env)));
+    /*
+     * CPUState caches CPUClass during its parent instance initialization
+     * specifically so hot paths do not repeat QOM's dynamic type lookup.
+     * That initialization precedes every IA64CPU instance callback.
+     */
+    return container_of(env_cpu(env)->cc, IA64CPUClass, parent_class);
 }
 
 #endif
