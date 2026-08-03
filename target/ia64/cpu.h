@@ -56,7 +56,15 @@
 #define IA64_CPUID4_SD   (1ULL << 1)  /* spontaneous deferral */
 #define IA64_CPUID4_AO   (1ULL << 2)  /* ld16/st16/cmp8xchg16 atomics */
 
-#define IA64_MICRO_TLB_SIZE 4
+/*
+ * Direct-mapped lookup for modeled TR/TC entries.  IA-64's minimum page is
+ * 4 KiB; hashing at that granularity lets separate softmmu pages covered by
+ * one large architected translation retain independent hints.  Four buckets
+ * per maximum modeled TR/TC entry keep collision misses low without adding
+ * another comparison to the hit path.
+ */
+#define IA64_MICRO_TLB_PAGE_SHIFT 12
+#define IA64_MICRO_TLB_SIZE 512
 #define IA64_SUPPRESSED_TLB_MAX 4
 
 #define IA64_REGION_BITS 3
@@ -742,6 +750,11 @@ typedef struct IA64TlbEntry {
     uint32_t rid;
     uint32_t key;
     uint16_t slot;
+    /*
+     * Derived version for micro-TLB validation.  This occupies existing
+     * tail padding and is deliberately omitted from migration state.
+     */
+    uint32_t micro_generation;
 } IA64TlbEntry;
 
 typedef struct IA64MicroTlbEntry {
@@ -749,9 +762,21 @@ typedef struct IA64MicroTlbEntry {
     uint64_t page_mask;
     uint32_t rid;
     uint32_t generation;
+    uint32_t slot_generation;
     uint16_t slot;
     bool valid;
 } IA64MicroTlbEntry;
+
+typedef struct IA64CodeTlbEdCache {
+    uint64_t va;
+    uint64_t page_mask;
+    uint32_t rid;
+    uint32_t generation;
+    uint32_t slot_generation;
+    uint16_t slot;
+    bool ed;
+    bool valid;
+} IA64CodeTlbEdCache;
 
 /*
  * The EFI 1.10 native debug-support ABI uses a fixed 1192-byte IA-64
@@ -1032,6 +1057,8 @@ static inline uint64_t ia64_pkr_mask(const CPUIA64State *env)
 }
 
 void ia64_tlb_bump_generation(CPUIA64State *env, bool is_ifetch);
+void ia64_tlb_bump_slot_generation(CPUIA64State *env, bool is_ifetch,
+                                   uint16_t slot);
 const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
                                        uint32_t rid, bool is_ifetch);
 
@@ -1184,6 +1211,15 @@ static inline bool ia64_tlb_match(const IA64TlbEntry *entry, uint64_t va,
     return ((va ^ entry->va) & entry->page_mask) == 0;
 }
 
+static inline QEMU_ALWAYS_INLINE uint16_t
+ia64_micro_tlb_index(uint64_t va, uint32_t rid)
+{
+    uint64_t page = va >> IA64_MICRO_TLB_PAGE_SHIFT;
+
+    return (page ^ (page >> 17) ^ (page >> 32) ^ rid) &
+           (IA64_MICRO_TLB_SIZE - 1);
+}
+
 static inline QEMU_ALWAYS_INLINE const IA64TlbEntry *
 ia64_tlb_find_cached(CPUIA64State *env, uint64_t va, uint32_t rid,
                      bool is_ifetch)
@@ -1191,21 +1227,14 @@ ia64_tlb_find_cached(CPUIA64State *env, uint64_t va, uint32_t rid,
     IA64TlbEntry *tlb = is_ifetch ? env->mmu.tlb_inst : env->mmu.tlb_data;
     IA64MicroTlbEntry *micro = is_ifetch ? env->mmu.tlb_inst_micro :
                                            env->mmu.tlb_data_micro;
-    uint8_t next = is_ifetch ? env->mmu.tlb_inst_micro_next :
-                               env->mmu.tlb_data_micro_next;
+    IA64MicroTlbEntry *cached = &micro[ia64_micro_tlb_index(va, rid)];
     uint32_t generation = is_ifetch ? env->mmu.tlb_inst_generation :
                                       env->mmu.tlb_data_generation;
-    uint16_t i;
 
-    for (i = 0; i < IA64_MICRO_TLB_SIZE; i++) {
-        uint16_t slot = (next - 1 - i) & (IA64_MICRO_TLB_SIZE - 1);
-        IA64MicroTlbEntry *cached = &micro[slot];
-
-        if (!cached->valid || cached->generation != generation ||
-            cached->rid != rid ||
-            ((va ^ cached->va) & cached->page_mask) != 0) {
-            continue;
-        }
+    if (cached->valid && cached->generation == generation &&
+        cached->rid == rid &&
+        ((va ^ cached->va) & cached->page_mask) == 0 &&
+        cached->slot_generation == tlb[cached->slot].micro_generation) {
         return &tlb[cached->slot];
     }
 
@@ -1251,7 +1280,9 @@ static inline uint32_t ia64_region_rid(const CPUIA64State *env, uint64_t va)
 
 static inline bool ia64_current_code_tlb_ed(CPUIA64State *env)
 {
+    IA64CodeTlbEdCache *cached = &env->mmu.code_tlb_ed;
     const IA64TlbEntry *entry;
+    uint32_t generation;
     uint32_t rid;
 
     if (!(env->psr & IA64_PSR_IT)) {
@@ -1259,8 +1290,32 @@ static inline bool ia64_current_code_tlb_ed(CPUIA64State *env)
     }
 
     rid = ia64_region_rid(env, env->ip);
+    generation = env->mmu.tlb_inst_generation;
+    if (cached->valid && cached->generation == generation &&
+        cached->rid == rid &&
+        ((env->ip ^ cached->va) & cached->page_mask) == 0 &&
+        cached->slot_generation ==
+            env->mmu.tlb_inst[cached->slot].micro_generation) {
+        return cached->ed;
+    }
+
     entry = ia64_tlb_find_cached(env, env->ip, rid, true);
-    return entry && (entry->pte & IA64_PTE_ED);
+    if (!entry) {
+        cached->valid = false;
+        return false;
+    }
+
+    *cached = (IA64CodeTlbEdCache) {
+        .va = entry->va,
+        .page_mask = entry->page_mask,
+        .rid = entry->rid,
+        .generation = generation,
+        .slot_generation = entry->micro_generation,
+        .slot = entry->slot,
+        .ed = (entry->pte & IA64_PTE_ED) != 0,
+        .valid = true,
+    };
+    return cached->ed;
 }
 
 static inline uint64_t ia64_region_itir(const CPUIA64State *env, uint64_t va)

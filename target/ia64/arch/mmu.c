@@ -296,6 +296,7 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
             ia64_qemu_tlb_flush_entry(env, &tlb[i]);
             ia64_discard_pending_purge(&tlb[i], pending_count);
             tlb[i].valid = 0;
+            ia64_tlb_bump_slot_generation(env, !is_data, i);
             if (insert_slot && empty < 0) {
                 empty = i;
             }
@@ -323,10 +324,6 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
         if (*insert_slot >= 0) {
             *next_replace = (*insert_slot + 1) % IA64_TLB_MAX;
         }
-    }
-
-    if (purged) {
-        ia64_tlb_bump_generation(env, !is_data);
     }
 
     return purged;
@@ -450,16 +447,13 @@ static bool ia64_complete_pending_purges(CPUIA64State *env,
             g_assert(*pending_count > 0);
             (*pending_count)--;
             tlb[i].valid = 0;
+            ia64_tlb_bump_slot_generation(env, is_ifetch, i);
             purged = true;
         }
     }
 
     while (*count > 0 && !tlb[*count - 1].valid) {
         (*count)--;
-    }
-
-    if (purged) {
-        ia64_tlb_bump_generation(env, is_ifetch);
     }
 
     return purged;
@@ -559,11 +553,14 @@ static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb,
     return -1;
 }
 
-static bool ia64_cache_replaced_tr(IA64TlbEntry *tlb, uint16_t *cnt,
+static bool ia64_cache_replaced_tr(CPUIA64State *env, IA64TlbEntry *tlb,
+                                   uint16_t *cnt,
                                    uint16_t *next_replace,
                                    uint16_t *pending_count,
-                                   const IA64TlbEntry *old_tr)
+                                   const IA64TlbEntry *old_tr,
+                                   bool is_ifetch)
 {
+    uint32_t micro_generation;
     bool matched;
     int slot;
 
@@ -592,9 +589,12 @@ static bool ia64_cache_replaced_tr(IA64TlbEntry *tlb, uint16_t *cnt,
                   " ps=0x%016" PRIx64 "\n",
                   slot, old_tr->va, old_tr->rid, old_tr->pa, old_tr->ps);
     ia64_discard_pending_purge(&tlb[slot], pending_count);
+    micro_generation = tlb[slot].micro_generation;
     tlb[slot] = *old_tr;
+    tlb[slot].micro_generation = micro_generation;
     tlb[slot].is_tr = 0;
     tlb[slot].slot = slot;
+    ia64_tlb_bump_slot_generation(env, is_ifetch, slot);
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
@@ -675,8 +675,9 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     if (old_tr.valid && !old_tr.is_tr) {
         ia64_qemu_tlb_flush_entry(env, &old_tr);
     }
-    cached_old_tr = ia64_cache_replaced_tr(tlb, cnt, next_replace,
-                                           pending_count, &old_tr);
+    cached_old_tr = ia64_cache_replaced_tr(env, tlb, cnt, next_replace,
+                                           pending_count, &old_tr,
+                                           !is_data);
     if (!cached_old_tr) {
         ia64_discard_pending_purge(&tlb[slot], pending_count);
     }
@@ -698,7 +699,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
-    ia64_tlb_bump_generation(env, !is_data);
+    ia64_tlb_bump_slot_generation(env, !is_data, slot);
     ia64_assert_pending_purge_counts(env);
     qemu_log_mask(CPU_LOG_MMU,
                   "ia64 itr.%c slot=%u va=0x%016" PRIx64
@@ -2086,7 +2087,7 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
-    ia64_tlb_bump_generation(env, is_ifetch);
+    ia64_tlb_bump_slot_generation(env, is_ifetch, slot);
     ia64_assert_pending_purge_counts(env);
     qemu_log_mask(CPU_LOG_MMU,
                   "ia64 vhpt install tc.%c slot=%d va=0x%016" PRIx64
@@ -2418,7 +2419,7 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
-    ia64_tlb_bump_generation(env, !is_data);
+    ia64_tlb_bump_slot_generation(env, !is_data, slot);
     ia64_assert_pending_purge_counts(env);
     qemu_log_mask(CPU_LOG_MMU,
                   "ia64 itc.%c %s slot=%u va=0x%016" PRIx64

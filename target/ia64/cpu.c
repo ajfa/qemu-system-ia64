@@ -102,14 +102,29 @@ void ia64_tlb_bump_generation(CPUIA64State *env, bool is_ifetch)
                                            env->mmu.tlb_data_micro;
     uint32_t *generation = is_ifetch ? &env->mmu.tlb_inst_generation :
                                        &env->mmu.tlb_data_generation;
-    uint8_t *next = is_ifetch ? &env->mmu.tlb_inst_micro_next :
-                                &env->mmu.tlb_data_micro_next;
 
     (*generation)++;
     if (*generation == 0) {
         *generation = 1;
         memset(micro, 0, sizeof(*micro) * IA64_MICRO_TLB_SIZE);
-        *next = 0;
+    }
+}
+
+void ia64_tlb_bump_slot_generation(CPUIA64State *env, bool is_ifetch,
+                                   uint16_t slot)
+{
+    IA64TlbEntry *tlb = is_ifetch ? env->mmu.tlb_inst :
+                                    env->mmu.tlb_data;
+
+    g_assert(slot < IA64_TLB_MAX);
+    if (++tlb[slot].micro_generation == 0) {
+        /*
+         * A wrapped slot version could validate a very old hint.  Make the
+         * wrap unambiguous by invalidating all hints before reusing version
+         * one.  This path requires over four billion changes to one slot.
+         */
+        tlb[slot].micro_generation = 1;
+        ia64_tlb_bump_generation(env, is_ifetch);
     }
 }
 
@@ -119,8 +134,6 @@ const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
     IA64TlbEntry *tlb = is_ifetch ? env->mmu.tlb_inst : env->mmu.tlb_data;
     IA64MicroTlbEntry *micro = is_ifetch ? env->mmu.tlb_inst_micro :
                                            env->mmu.tlb_data_micro;
-    uint8_t *next = is_ifetch ? &env->mmu.tlb_inst_micro_next :
-                                &env->mmu.tlb_data_micro_next;
     uint16_t tlb_count = is_ifetch ? env->mmu.tlb_inst_count :
                                      env->mmu.tlb_data_count;
     uint32_t generation = is_ifetch ? env->mmu.tlb_inst_generation :
@@ -131,15 +144,15 @@ const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
         IA64TlbEntry *entry = &tlb[i];
 
         if (ia64_tlb_match(entry, va, rid)) {
-            micro[*next] = (IA64MicroTlbEntry) {
+            micro[ia64_micro_tlb_index(va, rid)] = (IA64MicroTlbEntry) {
                 .va = entry->va,
                 .page_mask = entry->page_mask,
                 .rid = entry->rid,
                 .generation = generation,
+                .slot_generation = entry->micro_generation,
                 .slot = i,
                 .valid = true,
             };
-            *next = (*next + 1) % IA64_MICRO_TLB_SIZE;
             return entry;
         }
     }
