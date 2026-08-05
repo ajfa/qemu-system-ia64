@@ -105,7 +105,13 @@
 #define IA64_VGA_LEGACY_SIZE   0x00020000U
 #ifdef CONFIG_IA64_VPC_GRAPHICS
 #define IA64_INT10_ROM_BASE     0x000c0000U
-#define IA64_INT10_ROM_SIZE     0x00000200U
+/*
+ * At least 2 KB: the XP inbox Rage 128 miniport validates the option ROM's
+ * size byte and rejects images smaller than 4 x 512 bytes
+ * (.GetVgaEnabledRomImage compares size_byte << 9 against 2048 and logs
+ * event 0xC1010002 UniqueId 26 on failure).
+ */
+#define IA64_INT10_ROM_SIZE     0x00000800U
 /*
  * PCIR sits above the ATI data blocks.  A real Rage 128 Pro BIOS keeps it
  * at 16Ch, well clear of both the ATI ROM signature at 30h and the legacy

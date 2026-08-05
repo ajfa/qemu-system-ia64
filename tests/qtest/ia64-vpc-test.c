@@ -48,7 +48,11 @@
 #define IA64_IOSAPIC_RTE_LEVEL       BIT(15)
 #define IA64_TEST_RAM_SIZE           (256 * MiB)
 #define IA64_INT10_ROM_BASE          0x000c0000ULL
-#define IA64_INT10_ROM_SIZE          0x00000200U
+/*
+ * 2 KB: the XP inbox Rage 128 miniport rejects option ROMs whose size byte
+ * declares less than 2048 bytes.  Keep in sync with hw/ia64/ia64_vpc.c.
+ */
+#define IA64_INT10_ROM_SIZE          0x00000800U
 #define IA64_INT10_VECTOR_ADDR       0x00000040ULL
 #define IA64_INT10_ROM_PCIR_OFFSET   0x00e0U
 #define IA64_INT10_ROM_ATI_SIG_OFFSET 0x0030U
@@ -313,7 +317,7 @@ static void test_int10_rom(void)
     qtest_memread(qts, IA64_INT10_ROM_BASE, rom, sizeof(rom));
     g_assert_cmphex(rom[0], ==, 0x55);
     g_assert_cmphex(rom[1], ==, 0xaa);
-    g_assert_cmphex(rom[2], ==, 1);
+    g_assert_cmphex(rom[2], ==, IA64_INT10_ROM_SIZE / 512);
     g_assert_cmphex(lduw_le_p(rom + 0x0d), ==,
                     IA64_INT10_ROM_HANDLER_OFFSET);
     g_assert_cmphex(lduw_le_p(rom + 0x13), ==,
