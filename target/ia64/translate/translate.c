@@ -2156,10 +2156,13 @@ static uint32_t ia64_insn_fp_read_sets(const Ia64Instruction *insn)
         return ia64_fp_reg_set(insn->operands.common.source1);
 
     case IA64_OP_CHK_S:
-    case IA64_OP_CHK_A:
-    case IA64_OP_CHK_A_CLR:
         return insn->check_fp ?
             ia64_fp_reg_set(insn->operands.common.source1) : 0;
+
+    case IA64_OP_CHK_A:
+    case IA64_OP_CHK_A_CLR:
+        /* A floating chk.a uses the FR number only as an ALAT tag. */
+        return 0;
 
     case IA64_OP_FCMP:
         return ia64_fp_reg_set(insn->operands.common.source1) |

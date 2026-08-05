@@ -68,6 +68,7 @@ bsw1_sets_bn_bit
 bsw_restores_banked_nat
 bsw_switches_r16_r31_bank
 cdboot_word_add_cloop_decode
+chk_a_clr_f_ignores_psr_dfh
 chk_a_clr_removes_entry
 chk_a_m_branches_on_miss
 chk_a_nc_m_decode
