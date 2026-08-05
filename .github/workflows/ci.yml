@@ -129,6 +129,11 @@ jobs:
         run: |
           DESTDIR=$PWD/dist ninja -C build install
           cp build/roms/ia64-firmware/ia64-firmware.bin dist/usr/local/share/qemu/
+          # Link-time only: headers plus libfdt.a and its pkg-config file.
+          # libexec/qemu-bridge-helper stays — it is used at runtime by
+          # -netdev bridge.
+          rm -rf dist/usr/local/include dist/usr/local/lib \
+                 dist/usr/local/lib64
 
       - name: Upload Linux package
         uses: actions/upload-artifact@v4
@@ -219,6 +224,10 @@ jobs:
         run: |
           DESTDIR=$PWD/dist ninja -C build install
           cp build/roms/ia64-firmware/ia64-firmware.bin dist/qemu/share/
+          # Link-time only: headers plus libfdt.a and libslirp.dll.a. The
+          # slirp DLL the emulator actually loads is libslirp-0.dll at the
+          # package root and is not affected.
+          rm -rf dist/qemu/include dist/qemu/lib
           MINGW_PREFIX=/usr/x86_64-w64-mingw32/sys-root/mingw
           SYSROOT=$MINGW_PREFIX/bin
           # GTK needs its GSettings schemas at runtime or dialogs can abort;
