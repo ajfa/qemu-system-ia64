@@ -827,7 +827,19 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         int aux = ati_init_aux_slot(addr);
 
         if (aux >= 0) {
-            val = ati_reg_read_offs(s->regs.init_aux[aux], addr & 3, size);
+            uint32_t v = s->regs.init_aux[aux];
+
+            if ((addr & ~3ULL) == 0x0140) {
+                /*
+                 * MEM_CNTL bits 22:20 are read-only status
+                 * (MEM_CTLR_STATUS / MEM_SEQNCR_STATUS / MEM_ARBITER_STATUS),
+                 * 0 = idle.  The memory controller in this model is never
+                 * busy, and a driver that wrote those bits and then polled
+                 * for them to clear would otherwise wait forever.
+                 */
+                v &= ~(7u << 20);
+            }
+            val = ati_reg_read_offs(v, addr & 3, size);
         }
         break;
     }
@@ -1711,6 +1723,8 @@ static void ati_vga_reset(DeviceState *dev)
     memset(s->regs.init_aux, 0, sizeof(s->regs.init_aux));
     s->regs.init_aux[ati_init_aux_slot(0x0030)] = 0x880f0f41; /* BUS_CNTL */
     s->regs.init_aux[ati_init_aux_slot(0x0034)] = 0x0000001f; /* BUS_CNTL1 */
+    /* MEM_CNTL: MEM_LATENCY = 3 clocks, MEM_REFRESH_DIS set out of reset. */
+    s->regs.init_aux[ati_init_aux_slot(0x0140)] = 0x08000300;
 
     /* reset vga */
     vga_common_reset(&s->vga);
