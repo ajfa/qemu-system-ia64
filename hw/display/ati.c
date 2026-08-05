@@ -331,16 +331,18 @@ static const uint16_t ati_init_aux_offs[] = {
     0x0120, 0x0124, 0x0128,
     0x0130, /* HOST_PATH_CNTL    */
     0x0140, /* MEM_CNTL          */
-    0x0144, /* MEM_TIMING_CNTL   */
-    0x0148, /* MC_FB_LOCATION    */
-    0x014c, /* MC_AGP_LOCATION   */
-    0x0150, 0x0154,
+    0x0144, /* EXT_MEM_CNTL      */
+    0x0148, /* MEM_ADDR_CONFIG   */
+    0x014c, /* MEM_INTF_CNTL     */
+    0x0150, /* MEM_STR_CNTL      */
+    0x0154, /* MEM_INIT_LAT_TIMER */
     0x0158, /* MEM_SDRAM_MODE_REG */
-    0x0168,
+    0x0168, /* PAD_CTLR_STRENGTH */
     0x0170, /* AGP_BASE          */
     0x0174, /* AGP_CNTL          */
     0x0180, /* PC_NGUI_MODE      */
     0x0184, /* PC_NGUI_CTLSTAT   */
+    0x017c, /* PCI_GART_PAGE     */
     0x02e0, 0x02e4, 0x02e8, 0x02ec, /* BIOS header scratch group */
     0x0700, /* PM4_BUFFER_OFFSET  */
     0x0704, /* PM4_BUFFER_CNTL    */
