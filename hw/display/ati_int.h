@@ -40,6 +40,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(ATIVGAState, ATI_VGA)
 
 typedef struct ATIVGARegs {
     uint32_t mm_index;
+    uint32_t clock_cntl_index;
+    uint32_t pll_regs[32];
+    uint32_t init_aux[40];
+    uint32_t pm4_dl_rptr;
+    uint32_t pm4_dl_wptr;
+    uint32_t crtc_vblank_ack_frame;
     uint32_t bios_scratch[8];
     uint32_t gen_int_cntl;
     uint32_t gen_int_status;

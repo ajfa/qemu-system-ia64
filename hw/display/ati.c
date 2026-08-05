@@ -268,6 +268,44 @@ static void ati_vga_vblank_irq(void *opaque)
     ati_vga_update_irq(s);
 }
 
+/*
+ * Synthetic CRTC raster timing, derived from virtual time: a fixed 60 Hz
+ * frame of 525 lines with the last 45 in vertical blank (VGA-ish 480-line
+ * visible raster).  Drivers poll these instead of taking the vblank
+ * interrupt: XP's ati2draa spins on CRTC_STATUS (0x5C) waiting for the
+ * vblank bits to change, and a constant readback becomes bugcheck 0xEA.
+ */
+#define ATI_FRAME_NS   (NANOSECONDS_PER_SECOND / 60)
+#define ATI_FRAME_LINES 525
+#define ATI_VISIBLE_LINES 480
+
+static uint64_t ati_crtc_frame_count(void)
+{
+    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / ATI_FRAME_NS;
+}
+
+static uint32_t ati_crtc_current_line(void)
+{
+    uint64_t in_frame = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) % ATI_FRAME_NS;
+
+    return in_frame * ATI_FRAME_LINES / ATI_FRAME_NS;
+}
+
+static uint32_t ati_crtc_status(ATIVGAState *s)
+{
+    uint32_t val = 0;
+
+    /* bit 0: currently inside vertical blank */
+    if (ati_crtc_current_line() >= ATI_VISIBLE_LINES) {
+        val |= 1;
+    }
+    /* bit 1: a vblank happened since it was last acknowledged (W1C) */
+    if ((uint32_t)ati_crtc_frame_count() != s->regs.crtc_vblank_ack_frame) {
+        val |= 2;
+    }
+    return val;
+}
+
 static inline uint32_t ati_reg_read_offs(uint32_t reg, int offs,
                                          unsigned int size)
 {
@@ -275,6 +313,88 @@ static inline uint32_t ati_reg_read_offs(uint32_t reg, int offs,
         return reg;
     } else {
         return extract32(reg, offs * BITS_PER_BYTE, size * BITS_PER_BYTE);
+    }
+}
+
+/*
+ * Registers the XP inbox Rage 128 miniport programs during HwFindAdapter /
+ * HwInitialize that carry no device-visible behaviour we model yet.  They
+ * must store writes and read them back (the driver programs the memory
+ * controller and PLL and verifies by readback); silently dropping the
+ * writes made the init fail.  Offsets and reset values follow the RAGE 128
+ * PRO Register Reference Guide.
+ */
+static const uint16_t ati_init_aux_offs[] = {
+    0x0030, /* BUS_CNTL          */
+    0x0034, /* BUS_CNTL1         */
+    0x00f0, /* GEN_RESET_CNTL    */
+    0x0120, 0x0124, 0x0128,
+    0x0130, /* HOST_PATH_CNTL    */
+    0x0140, /* MEM_CNTL          */
+    0x0144, /* MEM_TIMING_CNTL   */
+    0x0148, /* MC_FB_LOCATION    */
+    0x014c, /* MC_AGP_LOCATION   */
+    0x0150, 0x0154,
+    0x0158, /* MEM_SDRAM_MODE_REG */
+    0x0168,
+    0x0170, /* AGP_BASE          */
+    0x0174, /* AGP_CNTL          */
+    0x0180, /* PC_NGUI_MODE      */
+    0x0184, /* PC_NGUI_CTLSTAT   */
+    0x02e0, 0x02e4, 0x02e8, 0x02ec, /* BIOS header scratch group */
+    0x0700, /* PM4_BUFFER_OFFSET  */
+    0x0704, /* PM4_BUFFER_CNTL    */
+    0x0708, /* PM4_BUFFER_WM_CTL  */
+    0x070c, /* PM4_BUFFER_DL_RPTR_ADDR */
+    0x07d4, /* PM4_MICRO_CNTL     */
+    0x07dc, /* PM4_MICROCODE_ADDR */
+    0x07e0, /* PM4_MICRODE_DATAH/L group */
+    0x0b00,
+};
+
+static int ati_init_aux_slot(hwaddr addr)
+{
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(ati_init_aux_offs); i++) {
+        if (ati_init_aux_offs[i] == (addr & ~3ULL)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/*
+ * CLOCK_CNTL_INDEX (0x08) / CLOCK_CNTL_DATA (0x0c) indirect PLL file.
+ * Index layout on Rage 128: PLL_ADDR in the low bits (drivers mask 0x1f or
+ * 0x3f), PLL_WR_EN at bit 7, PPLL_DIV_SEL at bits 9:8.  The only handshake
+ * on this chip is PPLL_ATOMIC_UPDATE: bit 15 of PPLL_REF_DIV (0x03) and of
+ * PPLL_DIV_0..3 (0x04..0x07) reads as "update pending" and hardware clears
+ * it when the divider update lands; we complete updates instantly, so those
+ * reads mask bit 15.
+ */
+static uint32_t ati_pll_read(ATIVGAState *s)
+{
+    unsigned idx = s->regs.clock_cntl_index & 0x3f;
+    uint32_t val;
+
+    if (idx >= ARRAY_SIZE(s->regs.pll_regs)) {
+        return 0;
+    }
+    val = s->regs.pll_regs[idx];
+    if (idx >= 0x03 && idx <= 0x07) {
+        val &= ~0x8000u;
+    }
+    return val;
+}
+
+static void ati_pll_write(ATIVGAState *s, uint32_t data)
+{
+    unsigned idx = s->regs.clock_cntl_index & 0x3f;
+
+    if ((s->regs.clock_cntl_index & 0x80) &&
+        idx < ARRAY_SIZE(s->regs.pll_regs)) {
+        s->regs.pll_regs[idx] = data;
     }
 }
 
@@ -286,6 +406,31 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
     switch (addr) {
     case MM_INDEX:
         val = s->regs.mm_index;
+        break;
+    case CLOCK_CNTL_INDEX ... CLOCK_CNTL_INDEX + 3:
+        val = ati_reg_read_offs(s->regs.clock_cntl_index,
+                                addr - CLOCK_CNTL_INDEX, size);
+        break;
+    case CLOCK_CNTL_DATA ... CLOCK_CNTL_DATA + 3:
+        val = ati_reg_read_offs(ati_pll_read(s), addr - CLOCK_CNTL_DATA,
+                                size);
+        break;
+    case 0x710 ... 0x713: /* PM4_BUFFER_DL_RPTR */
+        val = ati_reg_read_offs(s->regs.pm4_dl_rptr, addr - 0x710, size);
+        break;
+    case 0x714 ... 0x717: /* PM4_BUFFER_DL_WPTR */
+        val = ati_reg_read_offs(s->regs.pm4_dl_wptr, addr - 0x714, size);
+        break;
+    case 0x05c ... 0x05f: /* CRTC_STATUS */
+        val = ati_reg_read_offs(ati_crtc_status(s), addr - 0x05c, size);
+        break;
+    case 0x210 ... 0x213: /* CRTC_VLINE_CRNT_VLINE */
+        val = ati_reg_read_offs(ati_crtc_current_line() << 16,
+                                addr - 0x210, size);
+        break;
+    case 0x214 ... 0x217: /* CRTC_CRNT_FRAME */
+        val = ati_reg_read_offs(ati_crtc_frame_count() & 0x1fffff,
+                                addr - 0x214, size);
         break;
     case MM_DATA ... MM_DATA + 3:
         /* indexed access to regs or memory */
@@ -558,7 +703,14 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
                       "Read from write-only register 0x%x\n", (unsigned)addr);
         break;
     default:
+    {
+        int aux = ati_init_aux_slot(addr);
+
+        if (aux >= 0) {
+            val = ati_reg_read_offs(s->regs.init_aux[aux], addr & 3, size);
+        }
         break;
+    }
     }
     if (addr < CUR_OFFSET || addr > CUR_CLR1 || ATI_DEBUG_HW_CURSOR) {
         trace_ati_mm_read(size, addr, ati_reg_name(addr & ~3ULL), val);
@@ -586,6 +738,49 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         trace_ati_mm_write(size, addr, ati_reg_name(addr & ~3ULL), data);
     }
     switch (addr) {
+    case CLOCK_CNTL_INDEX ... CLOCK_CNTL_INDEX + 3:
+        ati_reg_write_offs(&s->regs.clock_cntl_index,
+                           addr - CLOCK_CNTL_INDEX, data, size);
+        break;
+    case CLOCK_CNTL_DATA ... CLOCK_CNTL_DATA + 3:
+    {
+        uint32_t cur = ati_pll_read(s);
+
+        ati_reg_write_offs(&cur, addr - CLOCK_CNTL_DATA, data, size);
+        ati_pll_write(s, cur);
+        break;
+    }
+    case 0x710 ... 0x713: /* PM4_BUFFER_DL_RPTR */
+        ati_reg_write_offs(&s->regs.pm4_dl_rptr, addr - 0x710, data, size);
+        break;
+    case 0x05c: /* CRTC_STATUS: bit 1 is write-1-to-clear */
+        if (data & 2) {
+            s->regs.crtc_vblank_ack_frame = ati_crtc_frame_count();
+        }
+        break;
+    case 0x714 ... 0x717: /* PM4_BUFFER_DL_WPTR */
+        /*
+         * CCE ring-buffer submission.  This model executes nothing from the
+         * ring yet; consume it instantly so a driver polling the read
+         * pointer (XP's ati2draa spins on PM4_BUFFER_DL_RPTR until it
+         * catches up with its write pointer, and the kernel watchdog turns
+         * a stall into bugcheck 0xEA) sees the engine keep up.  Mirror the
+         * new read pointer through the ring read-pointer writeback address
+         * if the driver configured one (PM4_BUFFER_DL_RPTR_ADDR).
+         */
+        ati_reg_write_offs(&s->regs.pm4_dl_wptr, addr - 0x714, data, size);
+        s->regs.pm4_dl_rptr = s->regs.pm4_dl_wptr;
+        {
+            int slot = ati_init_aux_slot(0x070c);
+            uint32_t wb = slot >= 0 ? s->regs.init_aux[slot] : 0;
+
+            if (wb & ~3u) {
+                uint32_t le = cpu_to_le32(s->regs.pm4_dl_rptr);
+
+                pci_dma_write(&s->dev, wb & ~3u, &le, sizeof(le));
+            }
+        }
+        break;
     case MM_INDEX:
         s->regs.mm_index = data & ~3;
         break;
@@ -1067,7 +1262,14 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         }
         break;
     default:
+    {
+        int aux = ati_init_aux_slot(addr);
+
+        if (aux >= 0) {
+            ati_reg_write_offs(&s->regs.init_aux[aux], addr & 3, data, size);
+        }
         break;
+    }
     }
 }
 
@@ -1075,6 +1277,43 @@ static const MemoryRegionOps ati_mm_ops = {
     .read = ati_mm_read,
     .write = ati_mm_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static bool ati_init_regs_needed(void *opaque)
+{
+    ATIVGARegs *r = opaque;
+    unsigned i;
+
+    if (r->clock_cntl_index) {
+        return true;
+    }
+    for (i = 0; i < ARRAY_SIZE(r->pll_regs); i++) {
+        if (r->pll_regs[i]) {
+            return true;
+        }
+    }
+    for (i = 0; i < ARRAY_SIZE(r->init_aux); i++) {
+        if (r->init_aux[i]) {
+            return true;
+        }
+    }
+    return r->pm4_dl_rptr || r->pm4_dl_wptr;
+}
+
+static const VMStateDescription vmstate_ati_vga_init_regs = {
+    .name = "ati-vga/regs/init",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ati_init_regs_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(clock_cntl_index, ATIVGARegs),
+        VMSTATE_UINT32_ARRAY(pll_regs, ATIVGARegs, 32),
+        VMSTATE_UINT32_ARRAY(init_aux, ATIVGARegs, 40),
+        VMSTATE_UINT32(pm4_dl_rptr, ATIVGARegs),
+        VMSTATE_UINT32(pm4_dl_wptr, ATIVGARegs),
+        VMSTATE_UINT32(crtc_vblank_ack_frame, ATIVGARegs),
+        VMSTATE_END_OF_LIST()
+    }
 };
 
 static const VMStateDescription vmstate_ati_vga_regs = {
@@ -1140,6 +1379,10 @@ static const VMStateDescription vmstate_ati_vga_regs = {
         VMSTATE_UINT32(default_tile, ATIVGARegs),
         VMSTATE_END_OF_LIST()
     },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_ati_vga_init_regs,
+        NULL
+    }
 };
 
 static const VMStateDescription vmstate_ati_host_data = {
@@ -1325,6 +1568,24 @@ static void ati_vga_reset(DeviceState *dev)
     timer_del(&s->vblank_timer);
     ati_vga_update_irq(s);
 
+    /*
+     * PLL and init-register power-up values from the RAGE 128 PRO Register
+     * Reference Guide.  PLL indices follow the chip's PLL address space:
+     * 0x01 CLK_PIN_CNTL, 0x02 PPLL_CNTL, 0x0b XPLL_CNTL, 0x0c XDLL_CNTL,
+     * 0x0e MPLL_CNTL, 0x10 AGP_PLL_CNTL.
+     */
+    s->regs.clock_cntl_index = 0;
+    memset(s->regs.pll_regs, 0, sizeof(s->regs.pll_regs));
+    s->regs.pll_regs[0x01] = 0x000000f7;
+    s->regs.pll_regs[0x02] = 0x0000cc03;
+    s->regs.pll_regs[0x0b] = 0x0000cc03;
+    s->regs.pll_regs[0x0c] = 0x000b000b;
+    s->regs.pll_regs[0x0e] = 0x0000cc03;
+    s->regs.pll_regs[0x10] = 0x7a770000;
+    memset(s->regs.init_aux, 0, sizeof(s->regs.init_aux));
+    s->regs.init_aux[ati_init_aux_slot(0x0030)] = 0x880f0f41; /* BUS_CNTL */
+    s->regs.init_aux[ati_init_aux_slot(0x0034)] = 0x0000001f; /* BUS_CNTL1 */
+
     /* reset vga */
     vga_common_reset(&s->vga);
     s->mode = VGA_MODE;
@@ -1359,6 +1620,7 @@ static void ati_vga_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+
 
     device_class_set_legacy_reset(dc, ati_vga_reset);
     device_class_set_props(dc, ati_vga_properties);
