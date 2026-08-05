@@ -388,6 +388,106 @@ static uint32_t ati_pll_read(ATIVGAState *s)
     return val;
 }
 
+static void ati_mm_write(void *opaque, hwaddr addr, uint64_t data,
+                         unsigned int size);
+
+#define R128_PM4_BUFFER_DL_DONE  (1u << 31)
+
+/*
+ * Concurrent Command Engine ring buffer.
+ *
+ * The XP inbox display driver (ati2draa) and the r128 DRM submit most 2D
+ * work as PM4 packets through a ring buffer in bus-addressable memory:
+ * PM4_BUFFER_OFFSET holds the ring base, PM4_BUFFER_CNTL carries the mode
+ * bits plus log2(ring size in qwords), and PM4_BUFFER_DL_WPTR (a dword
+ * index, bit 31 = "list done" flag) advances the tail.  Type-0/1 packets
+ * are register writes and replay through the ordinary MMIO path, driving
+ * the same blitter the PIO path uses.  Unknown type-3 opcodes are skipped
+ * by their length field.  Packet encodings follow the RAGE 128 PM4
+ * specification as used by XFree86 4.x r128_reg.h and the Linux r128 DRM.
+ */
+static uint32_t ati_cce_ring_dword(ATIVGAState *s, uint32_t base,
+                                   uint32_t mask, uint32_t idx)
+{
+    uint32_t le;
+
+    pci_dma_read(&s->dev, base + ((idx & mask) << 2), &le, sizeof(le));
+    return le32_to_cpu(le);
+}
+
+static void ati_cce_execute(ATIVGAState *s, uint32_t rptr, uint32_t wptr)
+{
+    int off_slot = ati_init_aux_slot(0x0700);
+    int cntl_slot = ati_init_aux_slot(0x0704);
+    uint32_t base, mask;
+    unsigned l2qw;
+
+    if (off_slot < 0 || cntl_slot < 0) {
+        return;
+    }
+    base = s->regs.init_aux[off_slot] & ~0x03u;
+    l2qw = s->regs.init_aux[cntl_slot] & 0x3f;
+    if (!base || l2qw > 17) {
+        return;
+    }
+    mask = (2u << l2qw) - 1;    /* ring size in dwords, power of two */
+    rptr &= mask;
+    wptr &= mask;
+
+    while (rptr != wptr) {
+        uint32_t hdr = ati_cce_ring_dword(s, base, mask, rptr++);
+        uint32_t count = ((hdr >> 16) & 0x3fff) + 1;
+        unsigned i;
+
+        switch (hdr >> 30) {
+        case 0: /* type 0: write count registers starting at bits 12:0 */
+        {
+            uint32_t reg = (hdr & 0x1fff) << 2;
+            bool one_reg = hdr & 0x8000; /* all data to the same register */
+
+            for (i = 0; i < count && rptr != wptr; i++) {
+                uint32_t data = ati_cce_ring_dword(s, base, mask, rptr++);
+
+                ati_mm_write(s, reg + (one_reg ? 0 : i * 4), data, 4);
+            }
+            break;
+        }
+        case 1: /* type 1: two scattered register writes */
+        {
+            uint32_t reg0 = (hdr & 0x7ff) << 2;
+            uint32_t reg1 = ((hdr >> 11) & 0x7ff) << 2;
+
+            if (rptr != wptr) {
+                ati_mm_write(s, reg0, ati_cce_ring_dword(s, base, mask,
+                                                         rptr++), 4);
+            }
+            if (rptr != wptr) {
+                ati_mm_write(s, reg1, ati_cce_ring_dword(s, base, mask,
+                                                         rptr++), 4);
+            }
+            break;
+        }
+        case 2: /* type 2: filler */
+            break;
+        case 3: /* type 3: engine command, skip by length */
+        {
+            static uint32_t warned[8];
+            uint32_t op = (hdr >> 8) & 0xff;
+
+            if (!(warned[op >> 5] & (1u << (op & 31)))) {
+                warned[op >> 5] |= 1u << (op & 31);
+                qemu_log_mask(LOG_UNIMP,
+                              "ati: unhandled CCE type-3 packet 0x%02x\n",
+                              op);
+            }
+            rptr = (rptr + count) & mask;
+            break;
+        }
+        }
+        rptr &= mask;
+    }
+}
+
 static void ati_pll_write(ATIVGAState *s, uint32_t data)
 {
     unsigned idx = s->regs.clock_cntl_index & 0x3f;
@@ -769,7 +869,9 @@ static void ati_mm_write(void *opaque, hwaddr addr,
          * if the driver configured one (PM4_BUFFER_DL_RPTR_ADDR).
          */
         ati_reg_write_offs(&s->regs.pm4_dl_wptr, addr - 0x714, data, size);
-        s->regs.pm4_dl_rptr = s->regs.pm4_dl_wptr;
+        ati_cce_execute(s, s->regs.pm4_dl_rptr,
+                        s->regs.pm4_dl_wptr & ~R128_PM4_BUFFER_DL_DONE);
+        s->regs.pm4_dl_rptr = s->regs.pm4_dl_wptr & ~R128_PM4_BUFFER_DL_DONE;
         {
             int slot = ati_init_aux_slot(0x070c);
             uint32_t wb = slot >= 0 ? s->regs.init_aux[slot] : 0;
