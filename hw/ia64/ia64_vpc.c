@@ -2302,6 +2302,16 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
     if (pcir != 0 && pcir + 0x18U <= declared &&
         memcmp(rom + pcir, "PCIR", 4) == 0) {
         stw_le_p(rom + pcir + 0x10, declared / 512U);
+        /*
+         * The shipped image is a SeaVGABIOS build whose PCIR data structure
+         * still advertises 1002:5159 (Radeon RV100).  EFI 1.10 §12.4 requires
+         * the PCIR vendor/device ID to match the adapter's configuration
+         * header, and a driver that validates the ROM against the device it
+         * bound to will reject an image belonging to another chip.  We only
+         * get here when the header really is 1002:5046, so restate that.
+         */
+        stw_le_p(rom + pcir + 0x04, IA64_ATI_VENDOR_ID);
+        stw_le_p(rom + pcir + 0x06, IA64_ATI_RAGE128_PF_ID);
     }
     rom[declared - 1] = 0;
     for (i = 0; i < declared - 1U; i++) {
@@ -2315,6 +2325,17 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
     if (pci_dev == NULL) {
         return;
     }
+
+    /*
+     * QEMU's generic 1af4:1100 subsystem ID is not a value this chip can
+     * report.  A Rage 128 loads the subsystem ID from the video BIOS on an
+     * add-in card; with none loaded the documented hardware fallback is
+     * SVID = vendor, SID = device (RAGE 128 PRO Register Reference Guide,
+     * configuration space chapter).  Drivers index board tables by it.
+     */
+    pci_set_word(pci_dev->config + PCI_SUBSYSTEM_VENDOR_ID,
+                 IA64_ATI_VENDOR_ID);
+    pci_set_word(pci_dev->config + PCI_SUBSYSTEM_ID, IA64_ATI_RAGE128_PF_ID);
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
                              IA64_VGA_FB_PCI_BASE, 4);
