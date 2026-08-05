@@ -503,6 +503,12 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
     ATIVGAState *s = opaque;
     uint32_t val = 0;
 
+    /* Register Aperture 1: the upper half of BAR2 mirrors the register file
+     * (RRG 2.2.1; CONFIG_REG_APER_SIZE reports 8 KB, the BAR covers 16). */
+    if (addr >= 0x2000 && addr < 0x4000) {
+        addr -= 0x2000;
+    }
+
     switch (addr) {
     case MM_INDEX:
         val = s->regs.mm_index;
@@ -561,6 +567,18 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         break;
     case GEN_INT_STATUS:
         val = s->regs.gen_int_status;
+        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+            /*
+             * GUI_IDLE_INT_STAT (bit 19) is a level-ish engine-idle status:
+             * it powers up set - the only GEN_INT_STATUS bit that does - and
+             * reasserts whenever the engine is idle (RAGE 128 PRO Register
+             * Reference Guide).  Every operation in this model completes
+             * synchronously, so the engine is always idle; a driver that
+             * acknowledges the bit and waits for it to come back (the XP
+             * display driver's engine-liveness test) must see it set again.
+             */
+            val |= BIT(19);
+        }
         break;
     case CRTC_GEN_CNTL ... CRTC_GEN_CNTL + 3:
         val = ati_reg_read_offs(s->regs.crtc_gen_cntl,
@@ -833,6 +851,10 @@ static void ati_mm_write(void *opaque, hwaddr addr,
                            uint64_t data, unsigned int size)
 {
     ATIVGAState *s = opaque;
+
+    if (addr >= 0x2000 && addr < 0x4000) {
+        addr -= 0x2000; /* Register Aperture 1 mirror */
+    }
 
     if (addr < CUR_OFFSET || addr > CUR_CLR1 || ATI_DEBUG_HW_CURSOR) {
         trace_ati_mm_write(size, addr, ati_reg_name(addr & ~3ULL), data);
