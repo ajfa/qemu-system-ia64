@@ -52,6 +52,11 @@
 #include "target/ia64/cpu.h"
 
 #define IA64_FW_BASE    0x0000000000100000ULL
+/*
+ * Firmware image loaded when no -bios is given.  It is installed beside the
+ * binary (share/), so an unpacked package runs without naming it every time.
+ */
+#define IA64_VPC_DEFAULT_FIRMWARE "ia64-firmware.bin"
 #define IA64_LOW_RAM_LIMIT 0x0000000080000000ULL
 #define IA64_HIGH_RAM_BASE 0x0000000080200000ULL
 #define IA64_FIRMWARE_ADDRESS_SPACE_BASE 0x00000000ff000000ULL
@@ -2679,7 +2684,7 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
     (void)data;
     ia64_vpc_configure_platform_pci(s);
 
-    if (!machine->firmware || s->firmware_size == 0) {
+    if (s->firmware_size == 0) {
         return;
     }
 
@@ -2726,32 +2731,42 @@ static bool ia64_vpc_load_firmware(IA64VpcMachineState *s,
                                    MachineState *machine, Error **errp)
 {
     g_autofree char *firmware_path = NULL;
+    const char *firmware = machine->firmware;
     Error *local_err = NULL;
     int64_t firmware_size;
 
-    if (machine->firmware == NULL) {
-        return true;
-    }
-
-    firmware_path = qemu_find_file(QEMU_FILE_TYPE_BIOS, machine->firmware);
-    if (firmware_path == NULL) {
-        firmware_path = g_strdup(machine->firmware);
+    if (firmware == NULL) {
+        /*
+         * Fall back to the shipped image.  Not finding it is not an error:
+         * qtest brings this machine up with no firmware at all.
+         */
+        firmware_path = qemu_find_file(QEMU_FILE_TYPE_BIOS,
+                                       IA64_VPC_DEFAULT_FIRMWARE);
+        if (firmware_path == NULL) {
+            return true;
+        }
+        firmware = IA64_VPC_DEFAULT_FIRMWARE;
+    } else {
+        firmware_path = qemu_find_file(QEMU_FILE_TYPE_BIOS, firmware);
+        if (firmware_path == NULL) {
+            firmware_path = g_strdup(firmware);
+        }
     }
     firmware_size = get_image_size(firmware_path, &local_err);
     if (local_err != NULL) {
         error_prepend(&local_err, "failed to inspect firmware '%s': ",
-                      machine->firmware);
+                      firmware);
         error_propagate(errp, local_err);
         return false;
     }
     if (firmware_size <= 0 ||
         (uint64_t)firmware_size > machine->ram_size - IA64_FW_BASE) {
         error_setg(errp, "invalid firmware image size for '%s'",
-                   machine->firmware);
+                   firmware);
         return false;
     }
-    if (rom_add_file_fixed(machine->firmware, IA64_FW_BASE, -1)) {
-        error_setg(errp, "failed to load firmware '%s'", machine->firmware);
+    if (rom_add_file_fixed(firmware, IA64_FW_BASE, -1)) {
+        error_setg(errp, "failed to load firmware '%s'", firmware);
         return false;
     }
     s->firmware_size = firmware_size;
