@@ -2356,10 +2356,46 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
      */
     if (pci_dev->io_regions[PCI_ROM_SLOT].size != 0) {
         ia64_vpc_install_ati_rom_tables(pci_dev);
+        /*
+         * Assign the ROM BAR but leave its enable bit CLEAR.  With the bit
+         * set at enumeration time, Windows' pci.sys generates a fourth
+         * memory resource for the devnode (busdrv/pci device.c/enum.c), and
+         * XP's inbox Rage 128 miniport calls VideoPortGetAccessRanges with a
+         * three-entry array: videoprt's copy loop filters only legacy VGA
+         * ranges, so the ROM range overflows the array and the call fails
+         * with ERROR_MORE_DATA - silently, no event log - and HwFindAdapter
+         * returns 234 (captured live: VideoPortGetAccessRanges RVA 0x33180
+         * -> ati2mpaa .GetResources -> .FindAdapter -> Code 10).
+         *
+         * Readers of the ROM image do not need the bit set at handoff:
+         * videoprt/pci.sys enable ROM decode transiently around
+         * VideoPortGetRomImage (busdrv/pci romimage.c), which is how build
+         * 2462's miniport reads the BIOS tables through BAR6.
+         */
         pci_default_write_config(pci_dev, PCI_ROM_ADDRESS,
-                                 IA64_VGA_ROM_PCI_BASE |
-                                 PCI_ROM_ADDRESS_ENABLE, 4);
+                                 IA64_VGA_ROM_PCI_BASE, 4);
     }
+    /*
+     * Both decodes on.  Windows XP's inbox Rage 128 miniport branches on
+     * (Command & 3) == 3 in .GetResources (ati2mpaa.sys VMA 0x9375c) and only
+     * then treats itself as the VGA device, so it is tempting to advertise
+     * something else and take the "VGA disabled" path, which claims no legacy
+     * VGA resources and reads the video BIOS from the ROM BAR instead of from
+     * the 0xC0000 shadow (which this machine does provide - see
+     * ia64_vpc_install_int10()).
+     *
+     * That does not work, and the reason is worth recording so it is not
+     * retried: the miniport claims all three BARs as access ranges, and BAR1
+     * is an I/O BAR.  videoprt's CheckIoEnabled (WSRV03 drivers/video/ms/port/
+     * registry.c:2114) walks the claimed ranges and fails the whole call if a
+     * RangeInIoSpace range is claimed while PCI_ENABLE_IO_SPACE is clear -
+     * or, symmetrically, a memory range while PCI_ENABLE_MEMORY_SPACE is
+     * clear.  VideoPortVerifyAccessRanges then returns ERROR_INVALID_PARAMETER
+     * (registry.c:1966) *silently*, with no event logged, and the device stops
+     * with Code 10 before touching a single register.  Any Command value that
+     * satisfies CheckIoEnabled for a device with both I/O and memory BARs is
+     * therefore exactly 3, which is also what real hardware presents.
+     */
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY, 2);
 
