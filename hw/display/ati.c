@@ -352,6 +352,7 @@ static const uint16_t ati_init_aux_offs[] = {
     0x07dc, /* PM4_MICROCODE_ADDR */
     0x07e0, /* PM4_MICRODE_DATAH/L group */
     0x0b00,
+    0x0a18, /* BM_CHUNK_0_VAL (bits 21-23 force bus mastering to PCI) */
 };
 
 static int ati_init_aux_slot(hwaddr addr)
@@ -408,13 +409,188 @@ static void ati_mm_write(void *opaque, hwaddr addr, uint64_t data,
  * by their length field.  Packet encodings follow the RAGE 128 PM4
  * specification as used by XFree86 4.x r128_reg.h and the Linux r128 DRM.
  */
+/*
+ * PM4 addresses are card "VM space" addresses, not bus addresses.  When the
+ * PCI pseudo-GART is configured (PCI_GART_PAGE points at a page table of
+ * little-endian physical page addresses), ring fetches translate through it:
+ * the XP inbox driver runs the ring at VM offset 0 with the bus-master
+ * force-to-PCI bits set (BM_CHUNK_0_VAL bits 21-23), the r128 DRM addresses
+ * the same window at VM 0x02000000 (R128_AGP_OFFSET).  Without a GART, low
+ * addresses are local video memory.
+ */
+static uint32_t ati_cce_vm_dword(ATIVGAState *s, uint32_t vm)
+{
+    int gart_slot = ati_init_aux_slot(0x017c); /* PCI_GART_PAGE */
+    uint32_t gart = gart_slot >= 0 ? s->regs.init_aux[gart_slot] & ~0xfffu : 0;
+    uint32_t le;
+
+    if (gart) {
+        uint32_t off = vm >= 0x02000000 ? vm - 0x02000000 : vm;
+        uint32_t ent;
+
+        pci_dma_read(&s->dev, gart + (off >> 12) * 4, &ent, sizeof(ent));
+        ent = le32_to_cpu(ent);
+        pci_dma_read(&s->dev, (ent & ~0xfffu) | (off & 0xfff), &le,
+                     sizeof(le));
+        return le32_to_cpu(le);
+    }
+    if (vm < s->vga.vram_size - 3) {
+        return ldl_le_p(s->vga.vram_ptr + vm);
+    }
+    pci_dma_read(&s->dev, vm, &le, sizeof(le));
+    return le32_to_cpu(le);
+}
+
 static uint32_t ati_cce_ring_dword(ATIVGAState *s, uint32_t base,
                                    uint32_t mask, uint32_t idx)
 {
-    uint32_t le;
+    return ati_cce_vm_dword(s, base + ((idx & mask) << 2));
+}
 
-    pci_dma_read(&s->dev, base + ((idx & mask) << 2), &le, sizeof(le));
-    return le32_to_cpu(le);
+/*
+ * Type-3 engine-command packets, as emitted by the XP inbox ati2draa
+ * display driver (measured from a live ring) and the r128 DRM
+ * (Linux 2.4.18 drivers/char/drm/r128_state.c).  Payload dwords are the
+ * values of documented GUI registers, so each packet decomposes into the
+ * same ati_mm_write() sequence a PIO client would issue; the write to the
+ * width/height register fires the blit.
+ *
+ * Layout common to the CNTL ops: DP_GUI_MASTER_CNTL first, and its low
+ * bits announce which state dwords follow: bit 0 = SRC_PITCH_OFFSET,
+ * bit 1 = DST_PITCH_OFFSET, bit 3 = SC_TOP_LEFT + SC_BOTTOM_RIGHT.
+ * The brush field then decides brush colour dwords (solid = one
+ * DP_BRUSH_FRGD_CLR; none = nothing), and the trailing dwords are
+ * per-rectangle coordinates.  NEXT_CHAR carries no GMC at all - it draws
+ * one glyph with the state a preceding HOSTDATA_BLT packet loaded.
+ */
+typedef struct ATICCEReader {
+    ATIVGAState *s;
+    uint32_t base;
+    uint32_t mask;
+    uint32_t rptr;
+    uint32_t count;
+    uint32_t pos;
+} ATICCEReader;
+
+static uint32_t ati_cce_next(ATICCEReader *r)
+{
+    if (r->pos >= r->count) {
+        return 0;
+    }
+    return ati_cce_ring_dword(r->s, r->base, r->mask, r->rptr + r->pos++);
+}
+
+static bool ati_cce_has(const ATICCEReader *r, unsigned n)
+{
+    return r->pos + n <= r->count;
+}
+
+static bool ati_cce_gmc_prefix(ATIVGAState *s, ATICCEReader *rd,
+                               uint32_t *gmc_out)
+{
+    uint32_t gmc = ati_cce_next(rd);
+
+    ati_mm_write(s, DP_GUI_MASTER_CNTL, gmc, 4);
+    if (gmc & GMC_SRC_PITCH_OFFSET_CNTL) {
+        ati_mm_write(s, SRC_PITCH_OFFSET, ati_cce_next(rd), 4);
+    }
+    if (gmc & GMC_DST_PITCH_OFFSET_CNTL) {
+        ati_mm_write(s, DST_PITCH_OFFSET, ati_cce_next(rd), 4);
+    }
+    if (gmc & GMC_SRC_CLIPPING) {
+        return false;   /* not emitted by known clients; layout unverified */
+    }
+    if (gmc & GMC_DST_CLIPPING) {
+        ati_mm_write(s, SC_TOP_LEFT, ati_cce_next(rd), 4);
+        ati_mm_write(s, SC_BOTTOM_RIGHT, ati_cce_next(rd), 4);
+    }
+    *gmc_out = gmc;
+    return true;
+}
+
+static void ati_cce_host_data(ATIVGAState *s, ATICCEReader *rd)
+{
+    while (rd->pos < rd->count) {
+        ati_mm_write(s, HOST_DATA0, ati_cce_next(rd), 4);
+    }
+    ati_host_data_finish(s);
+}
+
+static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
+                                  uint32_t mask, uint32_t rptr,
+                                  uint32_t count, uint32_t op)
+{
+    ATICCEReader rd = { s, base, mask, rptr, count, 0 };
+    uint32_t gmc, brush;
+
+    switch (op) {
+    case 0x19: /* NEXT_CHAR: (y,x), (h,w), inline monochrome bits */
+        if (!ati_cce_has(&rd, 2)) {
+            return false;
+        }
+        ati_mm_write(s, DST_Y_X, ati_cce_next(&rd), 4);
+        ati_mm_write(s, DST_HEIGHT_WIDTH, ati_cce_next(&rd), 4);
+        ati_cce_host_data(s, &rd);
+        return true;
+    case 0x1e: /* SET_SCISSORS */
+        if (!ati_cce_has(&rd, 2)) {
+            return false;
+        }
+        ati_mm_write(s, SC_TOP_LEFT, ati_cce_next(&rd), 4);
+        ati_mm_write(s, SC_BOTTOM_RIGHT, ati_cce_next(&rd), 4);
+        return true;
+    case 0x91: /* CNTL_PAINT */
+    case 0x9a: /* CNTL_PAINT_MULTI: rects as (x<<16|y), (w<<16|h) */
+        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+            return false;
+        }
+        brush = (gmc >> 4) & 0xf;
+        if (brush == 0xd) {         /* solid colour */
+            ati_mm_write(s, DP_BRUSH_FRGD_CLR, ati_cce_next(&rd), 4);
+        } else if (brush != 0xf) {  /* pattern brush layouts unverified */
+            return false;
+        }
+        while (ati_cce_has(&rd, 2)) {
+            ati_mm_write(s, DST_X_Y, ati_cce_next(&rd), 4);
+            ati_mm_write(s, DST_WIDTH_HEIGHT, ati_cce_next(&rd), 4);
+        }
+        return true;
+    case 0x28: /* CNTL_BITBLT as used by ati2draa's glyph cache */
+    case 0x92: /* CNTL_BITBLT */
+    case 0x9b: /* CNTL_BITBLT_MULTI */
+        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+            return false;
+        }
+        while (ati_cce_has(&rd, 3)) {
+            ati_mm_write(s, SRC_X_Y, ati_cce_next(&rd), 4);
+            ati_mm_write(s, DST_X_Y, ati_cce_next(&rd), 4);
+            ati_mm_write(s, DST_WIDTH_HEIGHT, ati_cce_next(&rd), 4);
+        }
+        return true;
+    case 0x94: /* CNTL_HOSTDATA_BLT: colours, then optional rect + data */
+        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+            return false;
+        }
+        if (!ati_cce_has(&rd, 2)) {
+            return false;
+        }
+        ati_mm_write(s, DP_SRC_FRGD_CLR, ati_cce_next(&rd), 4);
+        ati_mm_write(s, DP_SRC_BKGD_CLR, ati_cce_next(&rd), 4);
+        /*
+         * ati2draa emits this with no trailing rect purely to load the
+         * text state that subsequent NEXT_CHAR packets use; the r128 DRM
+         * appends (y,x), (h,w), a dword count and the host data itself.
+         */
+        if (ati_cce_has(&rd, 3)) {
+            ati_mm_write(s, DST_Y_X, ati_cce_next(&rd), 4);
+            ati_mm_write(s, DST_HEIGHT_WIDTH, ati_cce_next(&rd), 4);
+            ati_cce_next(&rd);      /* dword count, implied by the rect */
+            ati_cce_host_data(s, &rd);
+        }
+        return true;
+    default:
+        return false;
+    }
 }
 
 static void ati_cce_execute(ATIVGAState *s, uint32_t rptr, uint32_t wptr)
@@ -429,7 +605,12 @@ static void ati_cce_execute(ATIVGAState *s, uint32_t rptr, uint32_t wptr)
     }
     base = s->regs.init_aux[off_slot] & ~0x03u;
     l2qw = s->regs.init_aux[cntl_slot] & 0x3f;
-    if (!base || l2qw > 17) {
+    /*
+     * Mode 0 in PM4_BUFFER_CNTL bits 31:28 is PM4_NONPM4 - no command
+     * engine.  A base of 0 is valid: the XP driver runs its ring at card
+     * VM address 0 (translated through the PCI GART).
+     */
+    if (!((s->regs.init_aux[cntl_slot] >> 28) & 0xf) || l2qw > 17) {
         return;
     }
     mask = (2u << l2qw) - 1;    /* ring size in dwords, power of two */
@@ -471,16 +652,19 @@ static void ati_cce_execute(ATIVGAState *s, uint32_t rptr, uint32_t wptr)
         }
         case 2: /* type 2: filler */
             break;
-        case 3: /* type 3: engine command, skip by length */
+        case 3: /* type 3: engine command */
         {
-            static uint32_t warned[8];
             uint32_t op = (hdr >> 8) & 0xff;
 
-            if (!(warned[op >> 5] & (1u << (op & 31)))) {
-                warned[op >> 5] |= 1u << (op & 31);
-                qemu_log_mask(LOG_UNIMP,
-                              "ati: unhandled CCE type-3 packet 0x%02x\n",
-                              op);
+            if (!ati_cce_execute_type3(s, base, mask, rptr, count, op)) {
+                static uint32_t warned[8];
+
+                if (!(warned[op >> 5] & (1u << (op & 31)))) {
+                    warned[op >> 5] |= 1u << (op & 31);
+                    qemu_log_mask(LOG_UNIMP,
+                                  "ati: unhandled CCE type-3 packet 0x%02x\n",
+                                  op);
+                }
             }
             rptr = (rptr + count) & mask;
             break;
