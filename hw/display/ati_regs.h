@@ -193,6 +193,10 @@
 #define BRUSH_Y_X                               0x1474
 #define DP_BRUSH_BKGD_CLR                       0x1478
 #define DP_BRUSH_FRGD_CLR                       0x147c
+#define BRUSH_DATA0                             0x1480
+#define BRUSH_DATA1                             0x1484
+#define DST_LINE_START                          0x1600
+#define DST_LINE_END                            0x1604
 #define DST_WIDTH_X                             0x1588
 #define DST_HEIGHT_WIDTH_8                      0x158c
 #define SRC_X_Y                                 0x1590

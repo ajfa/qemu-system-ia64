@@ -143,19 +143,42 @@ static void ati_cursor_define(ATIVGAState *s)
 {
     uint64_t data[128];
     uint32_t srcoff;
+    unsigned hoff, voff;
 
     if ((s->regs.cur_offset & BIT(31)) || s->cursor_guest_mode) {
         return; /* Do not update cursor if locked or rendered by guest */
     }
-    /* FIXME handle cur_hv_offs correctly */
-    srcoff = (s->regs.cur_offset & 0x07fffff0) - (s->regs.cur_hv_offs >> 16) -
-             (s->regs.cur_hv_offs & 0xffff) * 16;
+    /*
+     * CUR_HORZ_VERT_OFF crops the 64x64 image down to the pointer the guest
+     * actually wants to show: the high half skips that many leading columns
+     * and the low half shortens it to 64 - v lines.  Measured against the XP
+     * driver, which stores a 32x32 pointer in the top-right quadrant and
+     * programs (32, 32): its unused left half is AND=0 XOR=0, i.e. *opaque
+     * black*, so failing to crop paints a black square over the screen.  The
+     * cropped-away part is padded transparent (AND=1, XOR=0).
+     */
+    hoff = (s->regs.cur_hv_offs >> 16) & 0x3f;
+    voff = s->regs.cur_hv_offs & 0x3f;
+    srcoff = s->regs.cur_offset & 0x07fffff0;
     if (srcoff > s->vga.vram_size - 64 * 16) {
         return;
     }
-    for (int i = 0; i < 64; i++, srcoff += 16) {
-        data[i] = ldq_le_p(&s->vga.vram_ptr[srcoff]);
-        data[i + 64] = ldq_le_p(&s->vga.vram_ptr[srcoff + 8]);
+    for (unsigned i = 0; i < 64; i++) {
+        uint64_t and_row = ~0ULL, xor_row = 0;
+
+        if (i + voff < 64) {
+            const uint8_t *src = &s->vga.vram_ptr[srcoff + i * 16];
+
+            /* Bit 7 of byte 0 is the leftmost pixel: shift big-endian. */
+            and_row = ldq_be_p(src);
+            xor_row = ldq_be_p(src + 8);
+            if (hoff) {
+                and_row = (and_row << hoff) | ((1ULL << hoff) - 1);
+                xor_row <<= hoff;
+            }
+        }
+        stq_be_p(&data[i], and_row);
+        stq_be_p(&data[i + 64], xor_row);
     }
     if (!s->cursor) {
         s->cursor = cursor_alloc(64, 64);
@@ -516,12 +539,40 @@ static void ati_cce_host_data(ATIVGAState *s, ATICCEReader *rd)
     ati_host_data_finish(s);
 }
 
+/*
+ * Brush-payload dwords after the GMC prefix, by GMC brush type: solid
+ * colour carries DP_BRUSH_FRGD_CLR; 8x8 monochrome patterns carry
+ * background/foreground colours (register-ascending order), the two
+ * pattern dwords and the brush origin; brush "none" carries nothing.
+ */
+static bool ati_cce_paint_brush(ATIVGAState *s, ATICCEReader *rd,
+                                uint32_t gmc)
+{
+    switch ((gmc >> 4) & 0xf) {
+    case 0x0: /* 8x8 mono fg/bg */
+    case 0x1: /* 8x8 mono fg/leave-alone */
+        ati_mm_write(s, DP_BRUSH_BKGD_CLR, ati_cce_next(rd), 4);
+        ati_mm_write(s, DP_BRUSH_FRGD_CLR, ati_cce_next(rd), 4);
+        ati_mm_write(s, BRUSH_DATA0, ati_cce_next(rd), 4);
+        ati_mm_write(s, BRUSH_DATA1, ati_cce_next(rd), 4);
+        ati_mm_write(s, BRUSH_Y_X, ati_cce_next(rd), 4);
+        return true;
+    case 0xd: /* solid colour */
+        ati_mm_write(s, DP_BRUSH_FRGD_CLR, ati_cce_next(rd), 4);
+        return true;
+    case 0xf: /* none */
+        return true;
+    default:  /* 32x32 and colour brush layouts unverified */
+        return false;
+    }
+}
+
 static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
                                   uint32_t mask, uint32_t rptr,
                                   uint32_t count, uint32_t op)
 {
     ATICCEReader rd = { s, base, mask, rptr, count, 0 };
-    uint32_t gmc, brush;
+    uint32_t gmc;
 
     switch (op) {
     case 0x19: /* NEXT_CHAR: (y,x), (h,w), inline monochrome bits */
@@ -544,16 +595,47 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
         if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
             return false;
         }
-        brush = (gmc >> 4) & 0xf;
-        if (brush == 0xd) {         /* solid colour */
-            ati_mm_write(s, DP_BRUSH_FRGD_CLR, ati_cce_next(&rd), 4);
-        } else if (brush != 0xf) {  /* pattern brush layouts unverified */
+        if (!ati_cce_paint_brush(s, &rd, gmc)) {
             return false;
         }
         while (ati_cce_has(&rd, 2)) {
             ati_mm_write(s, DST_X_Y, ati_cce_next(&rd), 4);
             ati_mm_write(s, DST_WIDTH_HEIGHT, ati_cce_next(&rd), 4);
         }
+        return true;
+    case 0x95: /* CNTL_POLYLINE: brush colour, then points as (y<<16|x) */
+        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+            return false;
+        }
+        if (!ati_cce_paint_brush(s, &rd, gmc)) {
+            return false;
+        }
+        if (!ati_cce_has(&rd, 2)) {
+            return false;
+        }
+        ati_mm_write(s, DST_LINE_START, ati_cce_next(&rd), 4);
+        while (ati_cce_has(&rd, 1)) {
+            ati_mm_write(s, DST_LINE_END, ati_cce_next(&rd), 4);
+        }
+        return true;
+    case 0x9c: /* CNTL_TRANS_BITBLT: colour-keyed copy (masked icons) */
+        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+            return false;
+        }
+        if (!ati_cce_has(&rd, 6)) {
+            return false;
+        }
+        ati_mm_write(s, CLR_CMP_CNTL, ati_cce_next(&rd), 4);
+        ati_mm_write(s, CLR_CMP_CLR_SRC, ati_cce_next(&rd), 4);
+        ati_mm_write(s, CLR_CMP_CLR_DST, ati_cce_next(&rd), 4);
+        ati_mm_write(s, SRC_X_Y, ati_cce_next(&rd), 4);
+        ati_mm_write(s, DST_X_Y, ati_cce_next(&rd), 4);
+        ati_mm_write(s, DST_WIDTH_HEIGHT, ati_cce_next(&rd), 4);
+        /*
+         * The compare stays programmed in the register file, so clear it
+         * again: ordinary blits that follow must not be colour-keyed.
+         */
+        ati_mm_write(s, CLR_CMP_CNTL, 0, 4);
         return true;
     case 0x28: /* CNTL_BITBLT as used by ati2draa's glyph cache */
     case 0x92: /* CNTL_BITBLT */
@@ -1494,6 +1576,34 @@ static void ati_mm_write(void *opaque, hwaddr addr,
     case DP_BRUSH_FRGD_CLR:
         s->regs.dp_brush_frgd_clr = data;
         break;
+    case BRUSH_Y_X:
+        s->regs.brush_y_x = data & 0x1f001f;
+        break;
+    case BRUSH_DATA0:
+        s->regs.brush_data0 = data;
+        break;
+    case BRUSH_DATA1:
+        s->regs.brush_data1 = data;
+        break;
+    case CLR_CMP_CNTL:
+        s->regs.clr_cmp_cntl = data;
+        break;
+    case CLR_CMP_CLR_SRC:
+        s->regs.clr_cmp_clr_src = data;
+        break;
+    case CLR_CMP_CLR_DST:
+        s->regs.clr_cmp_clr_dst = data;
+        break;
+    case CLR_CMP_MASK:
+        s->regs.clr_cmp_msk = data;
+        break;
+    case DST_LINE_START:
+        s->regs.dst_line_start = data;
+        break;
+    case DST_LINE_END:
+        ati_2d_line(s, s->regs.dst_line_start, data);
+        s->regs.dst_line_start = data;
+        break;
     case DP_CNTL:
         s->regs.dp_cntl = data;
         break;
@@ -1638,6 +1748,33 @@ static const VMStateDescription vmstate_ati_vga_init_regs = {
     }
 };
 
+static bool ati_brush_regs_needed(void *opaque)
+{
+    ATIVGARegs *r = opaque;
+
+    return r->brush_y_x || r->brush_data0 || r->brush_data1 ||
+           r->dst_line_start || r->clr_cmp_cntl || r->clr_cmp_clr_src ||
+           r->clr_cmp_clr_dst || r->clr_cmp_msk;
+}
+
+static const VMStateDescription vmstate_ati_vga_brush_regs = {
+    .name = "ati-vga/regs/brush",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ati_brush_regs_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(brush_y_x, ATIVGARegs),
+        VMSTATE_UINT32(brush_data0, ATIVGARegs),
+        VMSTATE_UINT32(brush_data1, ATIVGARegs),
+        VMSTATE_UINT32(dst_line_start, ATIVGARegs),
+        VMSTATE_UINT32(clr_cmp_cntl, ATIVGARegs),
+        VMSTATE_UINT32(clr_cmp_clr_src, ATIVGARegs),
+        VMSTATE_UINT32(clr_cmp_clr_dst, ATIVGARegs),
+        VMSTATE_UINT32(clr_cmp_msk, ATIVGARegs),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_ati_vga_regs = {
     .name = "ati-vga/regs",
     .version_id = 1,
@@ -1703,6 +1840,7 @@ static const VMStateDescription vmstate_ati_vga_regs = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_ati_vga_init_regs,
+        &vmstate_ati_vga_brush_regs,
         NULL
     }
 };

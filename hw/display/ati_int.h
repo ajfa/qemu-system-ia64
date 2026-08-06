@@ -84,8 +84,16 @@ typedef struct ATIVGARegs {
     uint32_t dp_gui_master_cntl;
     uint32_t dp_brush_bkgd_clr;
     uint32_t dp_brush_frgd_clr;
+    uint32_t brush_y_x;
+    uint32_t brush_data0;
+    uint32_t brush_data1;
+    uint32_t dst_line_start;
     uint32_t dp_src_frgd_clr;
     uint32_t dp_src_bkgd_clr;
+    uint32_t clr_cmp_cntl;
+    uint32_t clr_cmp_clr_src;
+    uint32_t clr_cmp_clr_dst;
+    uint32_t clr_cmp_msk;
     uint16_t sc_top;
     uint16_t sc_left;
     uint16_t sc_bottom;
@@ -136,6 +144,7 @@ struct ATIVGAState {
 const char *ati_reg_name(int num);
 
 void ati_2d_blt(ATIVGAState *s);
+void ati_2d_line(ATIVGAState *s, uint32_t start_yx, uint32_t end_yx);
 bool ati_host_data_flush(ATIVGAState *s);
 void ati_host_data_finish(ATIVGAState *s);
 

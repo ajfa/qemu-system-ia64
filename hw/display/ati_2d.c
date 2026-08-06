@@ -53,6 +53,21 @@ typedef struct {
     bool top_to_bottom;
     bool need_swap;
     uint32_t frgd_clr;
+    uint32_t bkgd_clr;
+    /*
+     * Source colour-key compare (CLR_CMP_*).  Function 5 draws only where
+     * the masked source colour differs from the key, which is how the
+     * Windows driver blits masked icons and other transparent bitmaps
+     * (RRG 3-178: 0 = always draw, 1 = never, 4 = draw on equal,
+     * 5 = draw on not-equal).
+     */
+    unsigned cmp_fn;
+    uint32_t cmp_clr;
+    uint32_t cmp_msk;
+    unsigned brush_type;
+    uint32_t brush_data[2];
+    unsigned brush_x;
+    unsigned brush_y;
     QemuRect scissor;
 
     QemuRect dst;
@@ -121,6 +136,15 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
     ctx->top_to_bottom = s->regs.dp_cntl & DST_Y_TOP_TO_BOTTOM;
     ctx->need_swap = (HOST_BIG_ENDIAN != s->vga.big_endian_fb);
     ctx->frgd_clr = s->regs.dp_brush_frgd_clr;
+    ctx->bkgd_clr = s->regs.dp_brush_bkgd_clr;
+    ctx->cmp_fn = s->regs.clr_cmp_cntl & 7;
+    ctx->cmp_clr = s->regs.clr_cmp_clr_src;
+    ctx->cmp_msk = s->regs.clr_cmp_msk;
+    ctx->brush_type = (s->regs.dp_datatype & DP_BRUSH_DATATYPE) >> 8;
+    ctx->brush_data[0] = s->regs.brush_data0;
+    ctx->brush_data[1] = s->regs.brush_data1;
+    ctx->brush_x = s->regs.brush_y_x & 7;
+    ctx->brush_y = (s->regs.brush_y_x >> 16) & 7;
     ctx->dst_offset = s->regs.dst_offset;
 
     ctx->scissor.width = s->regs.sc_right - s->regs.sc_left + 1;
@@ -167,6 +191,90 @@ static uint32_t make_filler(int bpp, uint32_t color)
         }
     }
     return color;
+}
+
+/*
+ * ROP3 codes that combine only source and destination (the pattern bits of
+ * the code are dont-care).  Bitwise, so they work on raw pixel bytes at any
+ * depth.
+ */
+/* True when this source pixel passes the colour-key test and may be drawn. */
+static bool ati_cmp_pass(const ATI2DCtx *ctx, uint32_t src)
+{
+    switch (ctx->cmp_fn) {
+    case 1:
+        return false;
+    case 4:
+        return (src & ctx->cmp_msk) == (ctx->cmp_clr & ctx->cmp_msk);
+    case 5:
+    case 7:
+        return (src & ctx->cmp_msk) != (ctx->cmp_clr & ctx->cmp_msk);
+    default:
+        return true;
+    }
+}
+
+static bool ati_rop_is_src_dst(uint32_t rop3)
+{
+    switch (rop3 >> 16) {
+    case 0x11: case 0x22: case 0x33: case 0x44: case 0x55:
+    case 0x66: case 0x77: case 0x88: case 0x99: case 0xaa:
+    case 0xbb: case 0xdd: case 0xee:
+        return true;
+    }
+    return false;
+}
+
+static uint32_t ati_rop_src_dst(uint32_t rop3, uint32_t src, uint32_t dst)
+{
+    switch (rop3 >> 16) {
+    case 0x11: return ~(src | dst);         /* NOTSRCERASE */
+    case 0x22: return dst & ~src;
+    case 0x33: return ~src;                 /* NOTSRCCOPY */
+    case 0x44: return src & ~dst;           /* SRCERASE */
+    case 0x55: return ~dst;                 /* DSTINVERT */
+    case 0x66: return src ^ dst;            /* SRCINVERT */
+    case 0x77: return ~(src & dst);
+    case 0x88: return src & dst;            /* SRCAND */
+    case 0x99: return ~(src ^ dst);
+    case 0xaa: return dst;
+    case 0xbb: return dst | ~src;           /* MERGEPAINT */
+    case 0xdd: return src | ~dst;
+    case 0xee: return src | dst;            /* SRCPAINT */
+    }
+    return src;
+}
+
+/*
+ * Brush pixel at destination coordinates (x,y).  Returns false when the
+ * pixel is transparent (FG_LA brushes leave the destination untouched on
+ * background bits).  Only monochrome 8x8 patterns and solid colours are
+ * modelled; 32x32 and colour brushes fall back to the foreground colour.
+ */
+static bool ati_brush_pixel(const ATI2DCtx *ctx, unsigned x, unsigned y,
+                            uint32_t *color)
+{
+    unsigned row, bit;
+
+    switch (ctx->brush_type) {
+    case 0: /* 8x8 mono, fg/bg */
+    case 1: /* 8x8 mono, fg/leave-alone */
+        row = (y + ctx->brush_y) & 7;
+        bit = (ctx->brush_data[row >> 2] >> (((row & 3) * 8) +
+                                             ((x + ctx->brush_x) & 7))) & 1;
+        if (bit) {
+            *color = ctx->frgd_clr;
+            return true;
+        }
+        if (ctx->brush_type == 1) {
+            return false;
+        }
+        *color = ctx->bkgd_clr;
+        return true;
+    default:
+        *color = ctx->frgd_clr;
+        return true;
+    }
 }
 
 static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
@@ -239,7 +347,7 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
 #ifdef CONFIG_PIXMAN
         int src_stride_words = ctx->src_stride / sizeof(uint32_t);
         int dst_stride_words = ctx->dst_stride / sizeof(uint32_t);
-        if ((use_pixman & BIT(1)) && !ctx->src_fg_mask &&
+        if ((use_pixman & BIT(1)) && !ctx->src_fg_mask && !ctx->cmp_fn &&
             ctx->left_to_right && ctx->top_to_bottom) {
             fallback = !pixman_blt((uint32_t *)ctx->src_bits,
                                    (uint32_t *)ctx->dst_bits, src_stride_words,
@@ -265,15 +373,26 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
                 i += (ctx->top_to_bottom ? vis_dst.y + y :
                       vis_dst.y + vis_dst.height - 1 - y) * ctx->dst_stride;
                 j += src_row * ctx->src_stride;
-                if (ctx->src_fg_mask) {
-                    /* Transparent: copy only foreground (mask) pixels. */
-                    const uint8_t *mrow = ctx->src_fg_mask +
-                                          src_row * mask_stride + vis_src.x;
+                if (ctx->src_fg_mask || ctx->cmp_fn) {
+                    /*
+                     * Transparent: copy only pixels that are foreground in
+                     * the mono-expansion mask and pass the colour key.
+                     */
+                    const uint8_t *mrow = ctx->src_fg_mask ?
+                                          ctx->src_fg_mask +
+                                          src_row * mask_stride + vis_src.x :
+                                          NULL;
                     for (x = 0; x < vis_dst.width; x++) {
-                        if (mrow[x]) {
-                            memcpy(&ctx->dst_bits[i + x * bypp],
-                                   &ctx->src_bits[j + x * bypp], bypp);
+                        const uint8_t *sp = &ctx->src_bits[j + x * bypp];
+
+                        if (mrow && !mrow[x]) {
+                            continue;
                         }
+                        if (ctx->cmp_fn &&
+                            !ati_cmp_pass(ctx, ldn_he_p(sp, bypp))) {
+                            continue;
+                        }
+                        memcpy(&ctx->dst_bits[i + x * bypp], sp, bypp);
                     }
                 } else {
                     memmove(&ctx->dst_bits[i], &ctx->src_bits[j],
@@ -293,6 +412,31 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
         if (ctx->bpp == 24) {
             qemu_log_mask(LOG_UNIMP, "Fill blt unsupported in 24 bits\n");
             return false;
+        }
+        if (ctx->rop3 == ROP3_PATCOPY &&
+            (ctx->brush_type == 0 || ctx->brush_type == 1)) {
+            /* 8x8 monochrome pattern fill */
+            uint32_t fg = make_filler(ctx->bpp, ctx->frgd_clr);
+            uint32_t bg = make_filler(ctx->bpp, ctx->bkgd_clr);
+
+            if (ctx->need_swap) {
+                bswap32s(&fg);
+                bswap32s(&bg);
+            }
+            for (y = 0; y < vis_dst.height; y++) {
+                unsigned dy = vis_dst.y + y;
+
+                i = vis_dst.x * bypp + dy * ctx->dst_stride;
+                for (x = 0; x < vis_dst.width; x++, i += bypp) {
+                    uint32_t c;
+
+                    if (ati_brush_pixel(ctx, vis_dst.x + x, dy, &c)) {
+                        stn_he_p(&ctx->dst_bits[i], bypp,
+                                 c == ctx->frgd_clr ? fg : bg);
+                    }
+                }
+            }
+            break;
         }
         switch (ctx->rop3) {
         case ROP3_PATCOPY:
@@ -332,6 +476,93 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
         break;
     }
     default:
+        if (ctx->rop3 >> 16 == 0xaa) {
+            /* destination no-op */
+            break;
+        }
+        if (ati_rop_is_src_dst(ctx->rop3)) {
+            bool need_src = ctx->rop3 >> 16 != 0x55;
+            unsigned mask_stride = ctx->src_stride / bypp;
+
+            if (need_src) {
+                if (!ctx->src_stride) {
+                    qemu_log_mask(LOG_GUEST_ERROR, "Zero source pitch\n");
+                    return false;
+                }
+                if (!ctx->host_data_active &&
+                    (vis_src.x > 0x3fff || vis_src.y > 0x3fff ||
+                    ctx->src_bits >= vram_end - bypp ||
+                    ctx->src_bits + vis_src.x * bypp +
+                    (vis_src.y + vis_dst.height) * ctx->src_stride >=
+                    vram_end - bypp)) {
+                    qemu_log_mask(LOG_UNIMP,
+                                  "blt outside vram not implemented\n");
+                    return false;
+                }
+            }
+            for (y = 0; y < vis_dst.height; y++) {
+                unsigned dst_row, src_row;
+
+                if (ctx->top_to_bottom) {
+                    dst_row = vis_dst.y + y;
+                    src_row = vis_src.y + y;
+                } else {
+                    dst_row = vis_dst.y + vis_dst.height - 1 - y;
+                    src_row = vis_src.y + vis_dst.height - 1 - y;
+                }
+                for (x = 0; x < vis_dst.width; x++) {
+                    unsigned dst_col = ctx->left_to_right ?
+                                       x : vis_dst.width - 1 - x;
+                    uint8_t *dp = &ctx->dst_bits[(vis_dst.x + dst_col) *
+                                                 bypp +
+                                                 dst_row * ctx->dst_stride];
+                    uint32_t sv = 0, dv;
+
+                    if (need_src) {
+                        if (ctx->src_fg_mask &&
+                            !ctx->src_fg_mask[src_row * mask_stride +
+                                              vis_src.x + dst_col]) {
+                            continue;
+                        }
+                        sv = ldn_he_p(&ctx->src_bits[(vis_src.x + dst_col) *
+                                                     bypp +
+                                                     src_row *
+                                                     ctx->src_stride], bypp);
+                        if (ctx->cmp_fn && !ati_cmp_pass(ctx, sv)) {
+                            continue;
+                        }
+                    }
+                    dv = ldn_he_p(dp, bypp);
+                    stn_he_p(dp, bypp, ati_rop_src_dst(ctx->rop3, sv, dv));
+                }
+            }
+            break;
+        }
+        if (ctx->rop3 >> 16 == 0x5a) {
+            /* PATINVERT: dst ^= pattern */
+            uint32_t fg = make_filler(ctx->bpp, ctx->frgd_clr);
+            uint32_t bg = make_filler(ctx->bpp, ctx->bkgd_clr);
+
+            if (ctx->need_swap) {
+                bswap32s(&fg);
+                bswap32s(&bg);
+            }
+            for (y = 0; y < vis_dst.height; y++) {
+                unsigned dy = vis_dst.y + y;
+
+                i = vis_dst.x * bypp + dy * ctx->dst_stride;
+                for (x = 0; x < vis_dst.width; x++, i += bypp) {
+                    uint32_t c;
+
+                    if (ati_brush_pixel(ctx, vis_dst.x + x, dy, &c)) {
+                        stn_he_p(&ctx->dst_bits[i], bypp,
+                                 ldn_he_p(&ctx->dst_bits[i], bypp) ^
+                                 (c == ctx->frgd_clr ? fg : bg));
+                    }
+                }
+            }
+            break;
+        }
         qemu_log_mask(LOG_UNIMP, "Unimplemented ati_2d blt op %x\n",
                       ctx->rop3 >> 16);
         return false;
@@ -493,4 +724,77 @@ void ati_host_data_finish(ATIVGAState *s)
                       "HOST_DATA blit ended before all data was written\n");
     }
     s->host_data.active = false;
+}
+
+/*
+ * Bresenham line from start to end (both packed (y << 16) | x), excluding
+ * the final pixel as the hardware does by default.  Draws with the solid
+ * foreground colour; ROP 0x66/0x5A XOR the destination instead, which is
+ * what rubber-band lines use.
+ */
+void ati_2d_line(ATIVGAState *s, uint32_t start_yx, uint32_t end_yx)
+{
+    ATI2DCtx ctx;
+    int x0 = start_yx & 0x3fff, y0 = (start_yx >> 16) & 0x3fff;
+    int x1 = end_yx & 0x3fff, y1 = (end_yx >> 16) & 0x3fff;
+    int dx, dy, sx, sy, err;
+    unsigned bypp;
+    uint32_t color;
+    bool xor_rop;
+    const uint8_t *vram_end;
+    QemuRect dirty;
+
+    ati_host_data_finish(s);
+    setup_2d_blt_ctx(s, &ctx);
+    if (!ctx.bpp || ctx.bpp == 24 || !ctx.dst_stride) {
+        qemu_log_mask(LOG_UNIMP, "line: unsupported state\n");
+        return;
+    }
+    bypp = ctx.bpp / 8;
+    vram_end = ctx.vga->vram_ptr + ctx.vga->vram_size;
+    xor_rop = (ctx.rop3 >> 16) == 0x66 || (ctx.rop3 >> 16) == 0x5a;
+    color = make_filler(ctx.bpp, ctx.frgd_clr);
+    if (ctx.need_swap) {
+        bswap32s(&color);
+    }
+
+    dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    dy = y1 > y0 ? y1 - y0 : y0 - y1;
+    sx = x0 < x1 ? 1 : -1;
+    sy = y0 < y1 ? 1 : -1;
+    err = (dx > dy ? dx : -dy) / 2;
+
+    while (x0 != x1 || y0 != y1) {
+        int e2;
+
+        if (x0 >= ctx.scissor.x && x0 < ctx.scissor.x + ctx.scissor.width &&
+            y0 >= ctx.scissor.y && y0 < ctx.scissor.y + ctx.scissor.height) {
+            uint8_t *dp = ctx.dst_bits + x0 * bypp + y0 * ctx.dst_stride;
+
+            if (dp >= ctx.vga->vram_ptr && dp + bypp <= vram_end) {
+                if (xor_rop) {
+                    stn_he_p(dp, bypp, ldn_he_p(dp, bypp) ^ color);
+                } else {
+                    stn_he_p(dp, bypp, color);
+                }
+            }
+        }
+        e2 = err;
+        if (e2 > -dx) {
+            err -= dy;
+            x0 += sx;
+        }
+        if (e2 < dy) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+
+    /* Dirty the bounding box of the segment. */
+    dirty.x = MIN(start_yx & 0x3fff, x1);
+    dirty.y = MIN((start_yx >> 16) & 0x3fff, y1);
+    dirty.width = dx + 1;
+    dirty.height = dy + 1;
+    ctx.dst = dirty;
+    ati_set_dirty(&ctx);
 }
