@@ -566,6 +566,10 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
     uint32_t gmc;
 
     switch (op) {
+    case 0x10: /* NOP: no payload, no effect.  The ring padder and DRM sync
+                * paths emit type-3 NOPs; handle it explicitly so it is not
+                * counted (and logged once) as an unhandled packet. */
+        return true;
     case 0x19: /* NEXT_CHAR: (y,x), (h,w), inline monochrome bits */
         if (!ati_cce_has(&rd, 2)) {
             return false;
