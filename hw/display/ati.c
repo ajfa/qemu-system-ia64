@@ -581,7 +581,31 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
         ati_mm_write(s, SC_TOP_LEFT, ati_cce_next(&rd), 4);
         ati_mm_write(s, SC_BOTTOM_RIGHT, ati_cce_next(&rd), 4);
         return true;
-    case 0x91: /* CNTL_PAINT */
+    case 0x91: /* CNTL_PAINT: one rect given as two corners (like SET_SCISSORS),
+                * top-left then bottom-right, each packed (y << 16) | x.  The
+                * Windows DirectDraw colour-fill (DdBlt DDBLT_COLORFILL) uses
+                * this packet; PAINT_MULTI below instead carries (x,y)+(w,h),
+                * so the two must be decoded differently. */
+        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+            return false;
+        }
+        if (!ati_cce_paint_brush(s, &rd, gmc)) {
+            return false;
+        }
+        while (ati_cce_has(&rd, 2)) {
+            uint32_t tl = ati_cce_next(&rd);
+            uint32_t br = ati_cce_next(&rd);
+            int w = (int)(br & 0x3fff) - (int)(tl & 0x3fff);
+            int h = (int)((br >> 16) & 0x3fff) - (int)((tl >> 16) & 0x3fff);
+
+            if (w <= 0 || h <= 0) {
+                continue;
+            }
+            ati_mm_write(s, DST_Y_X, tl, 4);
+            ati_mm_write(s, DST_HEIGHT_WIDTH,
+                         ((uint32_t)h << 16) | (uint32_t)w, 4);
+        }
+        return true;
     case 0x9a: /* CNTL_PAINT_MULTI: rects as (x<<16|y), (w<<16|h) */
         if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
             return false;
