@@ -163,7 +163,15 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
     ctx->dst_stride = s->regs.dst_pitch;
     ctx->dst_bits = s->vga.vram_ptr + s->regs.dst_offset;
     if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
-        ctx->dst_stride *= ctx->bpp;
+        /*
+         * DST_PITCH is in units of 8 pixels, so the byte stride is
+         * pitch * 8 * bytes_per_pixel == pitch * bpp -- except at 24bpp, where
+         * the driver folds the *3 into the register itself (the RAGE 128 2D
+         * engine treats a 24bpp surface as byte-wide, see r128 XAA
+         * R128AccelInit: pitch = (width/8) * (cpp==3 ? 3 : 1)).  Multiplying by
+         * bpp there would triple-count it, so use *8.
+         */
+        ctx->dst_stride *= (ctx->bpp == 24) ? 8 : ctx->bpp;
     }
 
     ctx->src.x = (ctx->left_to_right ?
@@ -175,7 +183,7 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
     ctx->src_stride = s->regs.src_pitch;
     ctx->src_bits = s->vga.vram_ptr + s->regs.src_offset;
     if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
-        ctx->src_stride *= ctx->bpp;
+        ctx->src_stride *= (ctx->bpp == 24) ? 8 : ctx->bpp;
     }
     DPRINTF("%d %d %d, %d %d %d, (%d,%d) -> (%d,%d) %dx%d %c %c\n",
             s->regs.src_offset, s->regs.dst_offset, s->regs.default_offset,

@@ -187,7 +187,12 @@ static void ati_dst_surface(ATIVGAState *s, unsigned dst_type, ATISurface *d)
     d->bypp = ati_datatype_bypp(dst_type);
     d->bits = s->vga.vram_ptr + off;
     d->cbits = d->bits;
-    d->stride = s->regs.dst_pitch * (d->bypp * 8); /* pitch is in 8-px units */
+    /*
+     * pitch is in 8-pixel units, so stride = pitch * 8 * bypp -- except at
+     * 24bpp, where the driver folds the *3 into the pitch register (see
+     * setup_2d_blt_ctx / r128 XAA), so use *8 to avoid triple-counting.
+     */
+    d->stride = s->regs.dst_pitch * (d->bypp == 3 ? 8 : d->bypp * 8);
     /* Bounds are checked relative to the surface base, so store the number
      * of bytes remaining from dst_offset to the end of VRAM. */
     d->vram_size = off < s->vga.vram_size ? s->vga.vram_size - off : 0;
