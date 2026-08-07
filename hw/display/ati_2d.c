@@ -443,8 +443,17 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
         const uint8_t *palette = ctx->vga->palette;
         uint32_t filler = 0;
 
-        if (ctx->bpp == 24) {
-            qemu_log_mask(LOG_UNIMP, "Fill blt unsupported in 24 bits\n");
+        /*
+         * 24bpp fills write three bytes per pixel through the byte-loop
+         * fallback below (make_filler returns the 24-bit value unchanged and
+         * pixman, which has no 24bpp format, is skipped).  The one case that
+         * cannot be served this way is a byte-swapped framebuffer, where the
+         * 32-bit bswap of the filler does not reduce to a 3-byte store; no
+         * IA-64 guest uses a big-endian framebuffer, so leave it unimplemented.
+         */
+        if (ctx->bpp == 24 && ctx->need_swap) {
+            qemu_log_mask(LOG_UNIMP,
+                          "24bpp fill on a byte-swapped framebuffer\n");
             return false;
         }
         if (ctx->rop3 == ROP3_PATCOPY &&
@@ -492,7 +501,7 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
             bswap32s(&filler);
         }
 #ifdef CONFIG_PIXMAN
-        if (!(use_pixman & BIT(0)) ||
+        if (!(use_pixman & BIT(0)) || ctx->bpp == 24 ||
             !pixman_fill((uint32_t *)ctx->dst_bits,
                          ctx->dst_stride / sizeof(uint32_t), ctx->bpp,
                          vis_dst.x, vis_dst.y, vis_dst.width, vis_dst.height,
