@@ -109,6 +109,20 @@ typedef struct ATIVGARegs {
     uint16_t default_sc_bottom;
     uint16_t default_sc_right;
     uint32_t default_tile;
+    /*
+     * 2D setup engine (SCALE_3D_CNTL 0x1a00, SETUP_CNTL 0x1bc4) and its
+     * per-channel colour DDA (0x1a40-0x1a60).  The Windows driver draws
+     * window-caption gradients by filling a rectangle with COLOR_FCN=Gouraud:
+     * each channel c has a value at the primitive origin plus screen-space
+     * slopes, all signed 16.16.  su_gouraud_armed is set when a fresh colour
+     * plane is loaded and consumed by the next rectangle fill.
+     */
+    uint32_t scale_3d_cntl;
+    uint32_t setup_cntl;
+    int32_t su_color_dx[3];   /* R,G,B  d(colour)/dx, 16.16 */
+    int32_t su_color_dy[3];   /* R,G,B  d(colour)/dy, 16.16 */
+    int32_t su_color_val[3];  /* R,G,B  colour at primitive origin, 16.16 */
+    bool su_gouraud_armed;
 } ATIVGARegs;
 
 typedef struct ATIHostDataState {
@@ -171,5 +185,6 @@ bool ati_cce_has(const ATICCEReader *r, unsigned n);
 void ati_scale_blt(ATIVGAState *s, uint32_t gmc, const uint32_t db[11],
                    bool trans);
 bool ati_3d_gen_prim(ATIVGAState *s, ATICCEReader *rd, bool indexed);
+bool ati_setup_gouraud_fill(ATIVGAState *s);
 
 #endif /* ATI_INT_H */

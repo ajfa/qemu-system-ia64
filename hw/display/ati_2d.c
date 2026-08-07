@@ -587,6 +587,15 @@ void ati_2d_blt(ATIVGAState *s)
         s->host_data.row = 0;
         return;
     }
+    /*
+     * A rectangle paint immediately following a setup-engine Gouraud colour
+     * plane is a caption gradient: fill it with the interpolated colour
+     * instead of a solid brush.  ati_setup_gouraud_fill() consumes the paint
+     * only when the plane is armed and the engine is in Gouraud mode.
+     */
+    if (ati_setup_gouraud_fill(s)) {
+        return;
+    }
     setup_2d_blt_ctx(s, &ctx);
     if (ati_2d_do_blt(&ctx, s->use_pixman)) {
         ati_set_dirty(&ctx);

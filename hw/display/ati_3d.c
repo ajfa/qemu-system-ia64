@@ -532,6 +532,98 @@ static void ati_raster_tri(ATIVGAState *s, ATISurface *d,
     }
 }
 
+/*
+ * 2D setup-engine Gouraud rectangle fill (SETUP_CNTL COLOR_FCN = Gouraud).
+ *
+ * The Windows ati2draa driver draws window-caption gradients not through the
+ * CCE 3D packets above but through the 2D setup engine: it programs a
+ * per-channel colour DDA (0x1a40-0x1a60) and then issues an ordinary solid
+ * rectangle paint (DST_X_Y + DST_HEIGHT_WIDTH).  With SCALE_3D_CNTL enabled
+ * and SETUP_CNTL COLOR_FCN = Gouraud, the engine replaces the solid brush with
+ * the interpolated colour, giving the classic dark->light caption ramp.
+ *
+ * Colour plane per channel c (16.16, signed):
+ *   colour_c(x,y) = val_c + dx_c*(x - dst_x) + dy_c*(y - dst_y)
+ * val_c is the colour at the primitive origin (the rectangle's top-left, which
+ * is the gradient's dark endpoint); for a horizontal gradient dy_c = 0.
+ *
+ * Returns true if it consumed the paint (so the caller skips the solid fill),
+ * false if this is not an armed Gouraud fill and normal 2D handling applies.
+ */
+bool ati_setup_gouraud_fill(ATIVGAState *s)
+{
+    ATISurface d;
+    int x0, y0, w, h, scx0, scy0, scx1, scy1, x, y;
+
+    if (!s->regs.su_gouraud_armed) {
+        return false;
+    }
+    s->regs.su_gouraud_armed = false;   /* single-shot: consume the plane */
+
+    /* SCALE_3D_CNTL[7:6] gates the setup block; require it enabled. */
+    if (((s->regs.scale_3d_cntl >> 6) & 3) == 0) {
+        return false;
+    }
+    /* SETUP_CNTL[5:3] COLOR_FCN must be 4 (Gouraud, all-vertex colour). */
+    if (((s->regs.setup_cntl >> 3) & 7) != 4) {
+        return false;
+    }
+
+    ati_dst_surface(s, s->regs.dp_datatype & 0xf, &d);
+    if (!d.bypp || !d.stride) {
+        return true;    /* armed but undrawable: still count as consumed */
+    }
+
+    x0 = s->regs.dst_x;
+    y0 = s->regs.dst_y;
+    w = s->regs.dst_width;
+    h = s->regs.dst_height;
+    if (w <= 0 || h <= 0) {
+        return true;
+    }
+
+    /* Scissor rectangle; SC_* right/bottom are inclusive. */
+    scx0 = s->regs.sc_left;
+    scy0 = s->regs.sc_top;
+    scx1 = s->regs.sc_right;
+    scy1 = s->regs.sc_bottom;
+
+    for (y = y0; y < y0 + h; y++) {
+        if (y < scy0 || y > scy1) {
+            continue;
+        }
+        for (x = x0; x < x0 + w; x++) {
+            uint32_t argb = 0xff000000u;
+            uint8_t *dp;
+            int c;
+
+            if (x < scx0 || x > scx1) {
+                continue;
+            }
+            for (c = 0; c < 3; c++) {
+                int64_t v = (int64_t)s->regs.su_color_val[c] +
+                            (int64_t)s->regs.su_color_dx[c] * (x - x0) +
+                            (int64_t)s->regs.su_color_dy[c] * (y - y0);
+                int iv = (int)(v >> 16);
+
+                if (iv < 0) {
+                    iv = 0;
+                } else if (iv > 255) {
+                    iv = 255;
+                }
+                argb |= (uint32_t)iv << (16 - c * 8); /* c: 0=R,1=G,2=B */
+            }
+            dp = ati_surf_wo(&d, x, y);
+            if (dp) {
+                ati_argb_to_pixel(&d, dp, argb);
+            }
+        }
+    }
+    ati_set_dirty(s, s->regs.dst_offset + (uint32_t)y0 * d.stride,
+                  (uint32_t)h * d.stride);
+    return true;
+}
+
 /* Context for pulling vertex dwords from the CCE ring. */
 static uint32_t ati_next_ring(void *ctx)
 {

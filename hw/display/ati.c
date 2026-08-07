@@ -1705,6 +1705,32 @@ static void ati_mm_write(void *opaque, hwaddr addr,
             s->host_data.next = 0;
         }
         break;
+    case SCALE_3D_CNTL ... SCALE_3D_CNTL + 3:
+        ati_reg_write_offs(&s->regs.scale_3d_cntl,
+                           addr - SCALE_3D_CNTL, data, size);
+        break;
+    case SETUP_CNTL ... SETUP_CNTL + 3:
+        ati_reg_write_offs(&s->regs.setup_cntl,
+                           addr - SETUP_CNTL, data, size);
+        break;
+    case 0x1a40 ... 0x1a63:
+    {
+        /*
+         * Setup-engine per-channel colour DDA.  Three channels (R,G,B) on a
+         * 12-byte stride, each {dx, dy, value} at +0/+4/+8 (signed 16.16).
+         * A write arms a one-shot Gouraud fill consumed by the next paint.
+         */
+        unsigned off = addr - 0x1a40;
+        unsigned ch = off / 0xc;
+        unsigned field = off % 0xc;
+        int32_t *reg = field < 4 ? &s->regs.su_color_dx[ch] :
+                       field < 8 ? &s->regs.su_color_dy[ch] :
+                                   &s->regs.su_color_val[ch];
+
+        ati_reg_write_offs((uint32_t *)reg, addr & 3, data, size);
+        s->regs.su_gouraud_armed = true;
+        break;
+    }
     default:
     {
         int aux = ati_init_aux_slot(addr);
@@ -1787,6 +1813,38 @@ static const VMStateDescription vmstate_ati_vga_brush_regs = {
     }
 };
 
+static bool ati_setup_regs_needed(void *opaque)
+{
+    ATIVGARegs *r = opaque;
+    unsigned i;
+
+    if (r->scale_3d_cntl || r->setup_cntl || r->su_gouraud_armed) {
+        return true;
+    }
+    for (i = 0; i < 3; i++) {
+        if (r->su_color_dx[i] || r->su_color_dy[i] || r->su_color_val[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const VMStateDescription vmstate_ati_vga_setup_regs = {
+    .name = "ati-vga/regs/setup",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ati_setup_regs_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(scale_3d_cntl, ATIVGARegs),
+        VMSTATE_UINT32(setup_cntl, ATIVGARegs),
+        VMSTATE_INT32_ARRAY(su_color_dx, ATIVGARegs, 3),
+        VMSTATE_INT32_ARRAY(su_color_dy, ATIVGARegs, 3),
+        VMSTATE_INT32_ARRAY(su_color_val, ATIVGARegs, 3),
+        VMSTATE_BOOL(su_gouraud_armed, ATIVGARegs),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_ati_vga_regs = {
     .name = "ati-vga/regs",
     .version_id = 1,
@@ -1853,6 +1911,7 @@ static const VMStateDescription vmstate_ati_vga_regs = {
     .subsections = (const VMStateDescription * const []) {
         &vmstate_ati_vga_init_regs,
         &vmstate_ati_vga_brush_regs,
+        &vmstate_ati_vga_setup_regs,
         NULL
     }
 };
@@ -2059,6 +2118,14 @@ static void ati_vga_reset(DeviceState *dev)
     s->regs.init_aux[ati_init_aux_slot(0x0034)] = 0x0000001f; /* BUS_CNTL1 */
     /* MEM_CNTL: MEM_LATENCY = 3 clocks, MEM_REFRESH_DIS set out of reset. */
     s->regs.init_aux[ati_init_aux_slot(0x0140)] = 0x08000300;
+
+    /* 2D setup engine (caption-gradient colour interpolator). */
+    s->regs.scale_3d_cntl = 0;
+    s->regs.setup_cntl = 0;
+    s->regs.su_gouraud_armed = false;
+    memset(s->regs.su_color_dx, 0, sizeof(s->regs.su_color_dx));
+    memset(s->regs.su_color_dy, 0, sizeof(s->regs.su_color_dy));
+    memset(s->regs.su_color_val, 0, sizeof(s->regs.su_color_val));
 
     /* reset vga */
     vga_common_reset(&s->vga);
