@@ -198,6 +198,43 @@ static uint32_t make_filler(int bpp, uint32_t color)
 }
 
 /*
+ * Host-endian pixel load/store that also handle the 3-byte (24bpp) case, which
+ * ldn_he_p/stn_he_p do not (they assert on any size other than 1/2/4/8).  For
+ * 24bpp the low three bytes of the value are the pixel, in the same order a
+ * 4-byte host-endian access would place them, so copies, fills and scanout
+ * (VGA draw_line24) all agree.  Byte-swapped framebuffers are handled by the
+ * callers bailing out before reaching here (see ati_2d_do_blt et al.).
+ */
+static inline uint32_t ati_ldpix(const uint8_t *p, unsigned bypp)
+{
+    if (bypp == 3) {
+#if HOST_BIG_ENDIAN
+        return ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+#else
+        return p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+#endif
+    }
+    return ldn_he_p(p, bypp);
+}
+
+static inline void ati_stpix(uint8_t *p, unsigned bypp, uint32_t v)
+{
+    if (bypp == 3) {
+#if HOST_BIG_ENDIAN
+        p[0] = v >> 16;
+        p[1] = v >> 8;
+        p[2] = v;
+#else
+        p[0] = v;
+        p[1] = v >> 8;
+        p[2] = v >> 16;
+#endif
+        return;
+    }
+    stn_he_p(p, bypp, v);
+}
+
+/*
  * ROP3 codes that combine only source and destination (the pattern bits of
  * the code are dont-care).  Bitwise, so they work on raw pixel bytes at any
  * depth.
@@ -289,6 +326,16 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
 
     if (!ctx->bpp) {
         qemu_log_mask(LOG_GUEST_ERROR, "Invalid bpp\n");
+        return false;
+    }
+    /*
+     * 24bpp pixels are three bytes and are read/written through ati_ldpix/
+     * ati_stpix.  The one case those cannot serve is a byte-swapped
+     * framebuffer, where the callers' 32-bit filler bswap does not reduce to a
+     * 3-byte store; no IA-64 guest uses a big-endian framebuffer.
+     */
+    if (bypp == 3 && ctx->need_swap) {
+        qemu_log_mask(LOG_UNIMP, "24bpp blt on a byte-swapped framebuffer\n");
         return false;
     }
     if (!ctx->dst_stride) {
@@ -423,7 +470,7 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
                             continue;
                         }
                         if (ctx->cmp_fn &&
-                            !ati_cmp_pass(ctx, ldn_he_p(sp, bypp))) {
+                            !ati_cmp_pass(ctx, ati_ldpix(sp, bypp))) {
                             continue;
                         }
                         memcpy(&ctx->dst_bits[i + x * bypp], sp, bypp);
@@ -443,19 +490,6 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
         const uint8_t *palette = ctx->vga->palette;
         uint32_t filler = 0;
 
-        /*
-         * 24bpp fills write three bytes per pixel through the byte-loop
-         * fallback below (make_filler returns the 24-bit value unchanged and
-         * pixman, which has no 24bpp format, is skipped).  The one case that
-         * cannot be served this way is a byte-swapped framebuffer, where the
-         * 32-bit bswap of the filler does not reduce to a 3-byte store; no
-         * IA-64 guest uses a big-endian framebuffer, so leave it unimplemented.
-         */
-        if (ctx->bpp == 24 && ctx->need_swap) {
-            qemu_log_mask(LOG_UNIMP,
-                          "24bpp fill on a byte-swapped framebuffer\n");
-            return false;
-        }
         if (ctx->rop3 == ROP3_PATCOPY &&
             (ctx->brush_type == 0 || ctx->brush_type == 1)) {
             /* 8x8 monochrome pattern fill */
@@ -474,8 +508,8 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
                     uint32_t c;
 
                     if (ati_brush_pixel(ctx, vis_dst.x + x, dy, &c)) {
-                        stn_he_p(&ctx->dst_bits[i], bypp,
-                                 c == ctx->frgd_clr ? fg : bg);
+                        ati_stpix(&ctx->dst_bits[i], bypp,
+                                  c == ctx->frgd_clr ? fg : bg);
                     }
                 }
             }
@@ -512,7 +546,7 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
             for (y = 0; y < vis_dst.height; y++) {
                 i = vis_dst.x * bypp + (vis_dst.y + y) * ctx->dst_stride;
                 for (x = 0; x < vis_dst.width; x++, i += bypp) {
-                    stn_he_p(&ctx->dst_bits[i], bypp, filler);
+                    ati_stpix(&ctx->dst_bits[i], bypp, filler);
                 }
             }
         }
@@ -567,7 +601,7 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
                                               vis_src.x + dst_col]) {
                             continue;
                         }
-                        sv = ldn_he_p(&ctx->src_bits[(vis_src.x + dst_col) *
+                        sv = ati_ldpix(&ctx->src_bits[(vis_src.x + dst_col) *
                                                      bypp +
                                                      src_row *
                                                      ctx->src_stride], bypp);
@@ -575,8 +609,8 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
                             continue;
                         }
                     }
-                    dv = ldn_he_p(dp, bypp);
-                    stn_he_p(dp, bypp, ati_rop_src_dst(ctx->rop3, sv, dv));
+                    dv = ati_ldpix(dp, bypp);
+                    ati_stpix(dp, bypp, ati_rop_src_dst(ctx->rop3, sv, dv));
                 }
             }
             break;
@@ -598,8 +632,8 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
                     uint32_t c;
 
                     if (ati_brush_pixel(ctx, vis_dst.x + x, dy, &c)) {
-                        stn_he_p(&ctx->dst_bits[i], bypp,
-                                 ldn_he_p(&ctx->dst_bits[i], bypp) ^
+                        ati_stpix(&ctx->dst_bits[i], bypp,
+                                  ati_ldpix(&ctx->dst_bits[i], bypp) ^
                                  (c == ctx->frgd_clr ? fg : bg));
                     }
                 }
@@ -678,9 +712,9 @@ bool ati_host_data_flush(ATIVGAState *s)
                       "host_data_blt: invalid bpp from datatype\n");
         return false;
     }
-    if (ctx.bpp == 24) {
+    if (ctx.bpp == 24 && ctx.need_swap) {
         qemu_log_mask(LOG_UNIMP,
-                      "host_data_blt: unsupported in 24 bits mode\n");
+                      "host_data_blt: 24bpp on a byte-swapped framebuffer\n");
         return false;
     }
     if (!ctx.left_to_right || !ctx.top_to_bottom) {
@@ -713,7 +747,7 @@ bool ati_host_data_flush(ATIVGAState *s)
                 for (int i = 0; i < 8; i++) {
                     bool is_fg = byte_val & BIT(byte_pix_order ? i : 7 - i);
                     fg_mask[idx / bypp] = is_fg;
-                    stn_he_p(&pix_buf[idx], bypp, is_fg ? fg : bg);
+                    ati_stpix(&pix_buf[idx], bypp, is_fg ? fg : bg);
                     idx += bypp;
                 }
             }
@@ -798,7 +832,7 @@ void ati_2d_line(ATIVGAState *s, uint32_t start_yx, uint32_t end_yx)
 
     ati_host_data_finish(s);
     setup_2d_blt_ctx(s, &ctx);
-    if (!ctx.bpp || ctx.bpp == 24 || !ctx.dst_stride) {
+    if (!ctx.bpp || (ctx.bpp == 24 && ctx.need_swap) || !ctx.dst_stride) {
         qemu_log_mask(LOG_UNIMP, "line: unsupported state\n");
         return;
     }
@@ -825,9 +859,9 @@ void ati_2d_line(ATIVGAState *s, uint32_t start_yx, uint32_t end_yx)
 
             if (dp >= ctx.vga->vram_ptr && dp + bypp <= vram_end) {
                 if (xor_rop) {
-                    stn_he_p(dp, bypp, ldn_he_p(dp, bypp) ^ color);
+                    ati_stpix(dp, bypp, ati_ldpix(dp, bypp) ^ color);
                 } else {
-                    stn_he_p(dp, bypp, color);
+                    ati_stpix(dp, bypp, color);
                 }
             }
         }
