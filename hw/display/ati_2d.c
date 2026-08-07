@@ -155,9 +155,11 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
     ctx->dst.width = s->regs.dst_width;
     ctx->dst.height = s->regs.dst_height;
     ctx->dst.x = (ctx->left_to_right ?
-                 s->regs.dst_x : s->regs.dst_x + 1 - ctx->dst.width);
+                 ati_sext14(s->regs.dst_x) :
+                 ati_sext14(s->regs.dst_x) + 1 - ctx->dst.width);
     ctx->dst.y = (ctx->top_to_bottom ?
-                 s->regs.dst_y : s->regs.dst_y + 1 - ctx->dst.height);
+                 ati_sext14(s->regs.dst_y) :
+                 ati_sext14(s->regs.dst_y) + 1 - ctx->dst.height);
     ctx->dst_stride = s->regs.dst_pitch;
     ctx->dst_bits = s->vga.vram_ptr + s->regs.dst_offset;
     if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
@@ -165,9 +167,11 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
     }
 
     ctx->src.x = (ctx->left_to_right ?
-                 s->regs.src_x : s->regs.src_x + 1 - ctx->dst.width);
+                 ati_sext14(s->regs.src_x) :
+                 ati_sext14(s->regs.src_x) + 1 - ctx->dst.width);
     ctx->src.y = (ctx->top_to_bottom ?
-                 s->regs.src_y : s->regs.src_y + 1 - ctx->dst.height);
+                 ati_sext14(s->regs.src_y) :
+                 ati_sext14(s->regs.src_y) + 1 - ctx->dst.height);
     ctx->src_stride = s->regs.src_pitch;
     ctx->src_bits = s->vga.vram_ptr + s->regs.src_offset;
     if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
@@ -344,6 +348,36 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
                 ctx->dst_stride / sizeof(uint32_t),
                 ctx->bpp, ctx->bpp, vis_src.x, vis_src.y, vis_dst.x, vis_dst.y,
                 vis_dst.width, vis_dst.height);
+        /*
+         * A same-surface copy whose source and destination rectangles overlap
+         * is a screen-to-screen window move or scroll.  The hardware buffers a
+         * scanline at a time, so horizontal overlap is always safe regardless
+         * of DST_X_LEFT_TO_RIGHT; only the vertical walk direction matters, and
+         * the Windows driver leaves the horizontal direction bit fixed.
+         * pixman_blt() is undefined for overlapping regions (it shears such
+         * copies), so handle this case directly: memmove each row (overlap-safe
+         * within a row) walking rows away from the destination, a direction
+         * derived from geometry rather than trusted from DP_CNTL.
+         */
+        if (ctx->src_bits == ctx->dst_bits && !ctx->src_fg_mask &&
+            !ctx->cmp_fn &&
+            vis_src.x < vis_dst.x + (int)vis_dst.width &&
+            vis_dst.x < vis_src.x + (int)vis_dst.width &&
+            vis_src.y < vis_dst.y + (int)vis_dst.height &&
+            vis_dst.y < vis_src.y + (int)vis_dst.height) {
+            bool top_down = vis_dst.y <= vis_src.y;
+
+            for (y = 0; y < vis_dst.height; y++) {
+                unsigned r = top_down ? y : vis_dst.height - 1 - y;
+
+                memmove(ctx->dst_bits + vis_dst.x * bypp +
+                            (vis_dst.y + r) * ctx->dst_stride,
+                        ctx->src_bits + vis_src.x * bypp +
+                            (vis_src.y + r) * ctx->src_stride,
+                        vis_dst.width * bypp);
+            }
+            break;
+        }
 #ifdef CONFIG_PIXMAN
         int src_stride_words = ctx->src_stride / sizeof(uint32_t);
         int dst_stride_words = ctx->dst_stride / sizeof(uint32_t);
@@ -744,8 +778,8 @@ void ati_host_data_finish(ATIVGAState *s)
 void ati_2d_line(ATIVGAState *s, uint32_t start_yx, uint32_t end_yx)
 {
     ATI2DCtx ctx;
-    int x0 = start_yx & 0x3fff, y0 = (start_yx >> 16) & 0x3fff;
-    int x1 = end_yx & 0x3fff, y1 = (end_yx >> 16) & 0x3fff;
+    int x0 = ati_sext14(start_yx), y0 = ati_sext14(start_yx >> 16);
+    int x1 = ati_sext14(end_yx), y1 = ati_sext14(end_yx >> 16);
     int dx, dy, sx, sy, err;
     unsigned bypp;
     uint32_t color;
@@ -800,8 +834,8 @@ void ati_2d_line(ATIVGAState *s, uint32_t start_yx, uint32_t end_yx)
     }
 
     /* Dirty the bounding box of the segment. */
-    dirty.x = MIN(start_yx & 0x3fff, x1);
-    dirty.y = MIN((start_yx >> 16) & 0x3fff, y1);
+    dirty.x = MIN(ati_sext14(start_yx), x1);
+    dirty.y = MIN(ati_sext14(start_yx >> 16), y1);
     dirty.width = dx + 1;
     dirty.height = dy + 1;
     ctx.dst = dirty;

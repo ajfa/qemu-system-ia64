@@ -574,8 +574,8 @@ bool ati_setup_gouraud_fill(ATIVGAState *s)
         return true;    /* armed but undrawable: still count as consumed */
     }
 
-    x0 = s->regs.dst_x;
-    y0 = s->regs.dst_y;
+    x0 = ati_sext14(s->regs.dst_x);   /* 14-bit signed: negative when off-edge */
+    y0 = ati_sext14(s->regs.dst_y);
     w = s->regs.dst_width;
     h = s->regs.dst_height;
     if (w <= 0 || h <= 0) {

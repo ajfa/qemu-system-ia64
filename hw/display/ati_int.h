@@ -157,6 +157,17 @@ struct ATIVGAState {
 
 const char *ati_reg_name(int num);
 
+/*
+ * The 2D engine's X/Y coordinate registers are 14-bit signed (RRG: DST_X/DST_Y
+ * "range -8192 to 8191").  A window dragged off the top or left edge produces
+ * negative coordinates, so sign-extend bit 13 rather than treating the field
+ * as unsigned.
+ */
+static inline int ati_sext14(unsigned v)
+{
+    return ((int)(v & 0x3fff) ^ 0x2000) - 0x2000;
+}
+
 void ati_2d_blt(ATIVGAState *s);
 void ati_2d_line(ATIVGAState *s, uint32_t start_yx, uint32_t end_yx);
 bool ati_host_data_flush(ATIVGAState *s);
