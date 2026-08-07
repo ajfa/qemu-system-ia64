@@ -558,6 +558,32 @@ static bool ati_cce_paint_brush(ATIVGAState *s, ATICCEReader *rd,
     }
 }
 
+/*
+ * A 2D drawing packet's opcode bit 7 (the "CNTL_" 0x9x form) selects whether
+ * the packet carries a leading SETTINGS block (SDK Table 4-14/4-15): the GUI
+ * control word (DP_GUI_MASTER_CNTL) and its optional SETUP_BODY (pitch/offset,
+ * scissor, brush).  The plain 0x1x form omits SETTINGS and the engine draws
+ * with the already-programmed registers.  The ATI-private glyph-cache blit
+ * 0x28 also carries a SETTINGS block despite bit 7 being clear.
+ *
+ * Returns the effective GUI control word: the one just parsed from the packet
+ * for the SETTINGS form, or the programmed DP_GUI_MASTER_CNTL otherwise.
+ */
+static bool ati_cce_has_settings(uint32_t op)
+{
+    return (op & 0x80) || op == 0x28;
+}
+
+static bool ati_cce_settings(ATIVGAState *s, ATICCEReader *rd, uint32_t op,
+                             uint32_t *gmc_out)
+{
+    if (ati_cce_has_settings(op)) {
+        return ati_cce_gmc_prefix(s, rd, gmc_out);
+    }
+    *gmc_out = s->regs.dp_gui_master_cntl;
+    return true;
+}
+
 static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
                                   uint32_t mask, uint32_t rptr,
                                   uint32_t count, uint32_t op)
@@ -579,6 +605,11 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
                 * it is not misreported as unhandled. */
         return true;
     case 0x19: /* NEXT_CHAR: (y,x), (h,w), inline monochrome bits */
+    case 0x99: /* CNTL_NEXT_CHAR: as NEXT_CHAR with a leading SETTINGS block */
+        if (ati_cce_has_settings(op) &&
+            !ati_cce_gmc_prefix(s, &rd, &gmc)) {
+            return false;
+        }
         if (!ati_cce_has(&rd, 2)) {
             return false;
         }
@@ -593,13 +624,14 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
         ati_mm_write(s, SC_TOP_LEFT, ati_cce_next(&rd), 4);
         ati_mm_write(s, SC_BOTTOM_RIGHT, ati_cce_next(&rd), 4);
         return true;
+    case 0x18: /* POLYSCANLINES: plain form, no SETTINGS */
     case 0x98: /* CNTL_POLYSCANLINES: solid-fill a polygon as horizontal spans.
                 * This packet carries only the setup (GMC prefix + the fill
                 * colour); the spans themselves arrive in the PLY_NEXTSCAN
                 * (0x1d) packets that follow.  The Windows user32 DrawEdge draws
                 * 3D window borders (e.g. Internet Explorer's client edge) this
                 * way, so without it those borders go unrendered. */
-        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
             return false;
         }
         if (ati_cce_has(&rd, 1)) {
@@ -634,15 +666,16 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
         }
         return true;
     }
+    case 0x11: /* PAINT: plain form, no SETTINGS */
     case 0x91: /* CNTL_PAINT: one rect given as two corners (like SET_SCISSORS),
                 * top-left then bottom-right, each packed (y << 16) | x.  The
                 * Windows DirectDraw colour-fill (DdBlt DDBLT_COLORFILL) uses
                 * this packet; PAINT_MULTI below instead carries (x,y)+(w,h),
                 * so the two must be decoded differently. */
-        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
             return false;
         }
-        if (!ati_cce_paint_brush(s, &rd, gmc)) {
+        if (ati_cce_has_settings(op) && !ati_cce_paint_brush(s, &rd, gmc)) {
             return false;
         }
         while (ati_cce_has(&rd, 2)) {
@@ -659,11 +692,12 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
                          ((uint32_t)h << 16) | (uint32_t)w, 4);
         }
         return true;
+    case 0x1a: /* PAINT_MULTI: plain form, no SETTINGS */
     case 0x9a: /* CNTL_PAINT_MULTI: rects as (x<<16|y), (w<<16|h) */
-        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
             return false;
         }
-        if (!ati_cce_paint_brush(s, &rd, gmc)) {
+        if (ati_cce_has_settings(op) && !ati_cce_paint_brush(s, &rd, gmc)) {
             return false;
         }
         while (ati_cce_has(&rd, 2)) {
@@ -671,11 +705,12 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
             ati_mm_write(s, DST_WIDTH_HEIGHT, ati_cce_next(&rd), 4);
         }
         return true;
+    case 0x15: /* POLYLINE: plain form, no SETTINGS */
     case 0x95: /* CNTL_POLYLINE: brush colour, then points as (y<<16|x) */
-        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
             return false;
         }
-        if (!ati_cce_paint_brush(s, &rd, gmc)) {
+        if (ati_cce_has_settings(op) && !ati_cce_paint_brush(s, &rd, gmc)) {
             return false;
         }
         if (!ati_cce_has(&rd, 2)) {
@@ -705,10 +740,13 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
          */
         ati_mm_write(s, CLR_CMP_CNTL, 0, 4);
         return true;
-    case 0x28: /* CNTL_BITBLT as used by ati2draa's glyph cache */
+    case 0x12: /* BITBLT: plain form, no SETTINGS */
+    case 0x1b: /* BITBLT_MULTI: plain form, no SETTINGS */
+    case 0x28: /* CNTL_BITBLT as used by ati2draa's glyph cache (carries
+                * SETTINGS despite bit 7 being clear) */
     case 0x92: /* CNTL_BITBLT */
     case 0x9b: /* CNTL_BITBLT_MULTI */
-        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
             return false;
         }
         while (ati_cce_has(&rd, 3)) {
@@ -717,8 +755,9 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
             ati_mm_write(s, DST_WIDTH_HEIGHT, ati_cce_next(&rd), 4);
         }
         return true;
+    case 0x14: /* HOSTDATA_BLT: plain form, no SETTINGS */
     case 0x94: /* CNTL_HOSTDATA_BLT: colours, then optional rect + data */
-        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
             return false;
         }
         if (!ati_cce_has(&rd, 2)) {
@@ -738,12 +777,14 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
             ati_cce_host_data(s, &rd);
         }
         return true;
+    case 0x16: /* SCALING: plain form, no SETTINGS */
+    case 0x17: /* TRANS_SCALING: plain form, no SETTINGS */
     case 0x96: /* SCALE: stretch a source bitmap into a destination rect */
     case 0x97: { /* TRANS_SCALE: as SCALE, with a source colour key */
         uint32_t db[11];
         unsigned i;
 
-        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
             return false;
         }
         if (!ati_cce_has(&rd, 11)) {
@@ -752,7 +793,7 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
         for (i = 0; i < 11; i++) {
             db[i] = ati_cce_next(&rd);
         }
-        ati_scale_blt(s, gmc, db, op == 0x97);
+        ati_scale_blt(s, gmc, db, op == 0x97 || op == 0x17);
         return true;
     }
     case 0x25: /* 3D_RNDR_GEN_PRIM: vertices inline in the ring */
