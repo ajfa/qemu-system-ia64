@@ -581,6 +581,47 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
         ati_mm_write(s, SC_TOP_LEFT, ati_cce_next(&rd), 4);
         ati_mm_write(s, SC_BOTTOM_RIGHT, ati_cce_next(&rd), 4);
         return true;
+    case 0x98: /* CNTL_POLYSCANLINES: solid-fill a polygon as horizontal spans.
+                * This packet carries only the setup (GMC prefix + the fill
+                * colour); the spans themselves arrive in the PLY_NEXTSCAN
+                * (0x1d) packets that follow.  The Windows user32 DrawEdge draws
+                * 3D window borders (e.g. Internet Explorer's client edge) this
+                * way, so without it those borders go unrendered. */
+        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+            return false;
+        }
+        if (ati_cce_has(&rd, 1)) {
+            ati_mm_write(s, DP_BRUSH_FRGD_CLR, ati_cce_next(&rd), 4);
+        }
+        return true;
+    case 0x1d: /* PLY_NEXTSCAN: one polyscanline of the current CNTL_POLYSCANLINES
+                * fill.  dword0 = top | (height << 16); each following dword is a
+                * segment = x_start | (x_end << 16) (SDK F.20).  Fill each segment
+                * as a rectangle with the colour/ROP set up by the 0x98 packet. */
+    {
+        uint32_t yh;
+        int y, h;
+
+        if (!ati_cce_has(&rd, 2)) {
+            return false;
+        }
+        yh = ati_cce_next(&rd);
+        y = yh & 0x3fff;
+        h = (yh >> 16) & 0x3fff;
+        while (ati_cce_has(&rd, 1)) {
+            uint32_t seg = ati_cce_next(&rd);
+            int x0 = seg & 0x3fff;
+            int x1 = (seg >> 16) & 0x3fff;
+
+            if (x1 <= x0 || h <= 0) {
+                continue;
+            }
+            ati_mm_write(s, DST_Y_X, ((uint32_t)y << 16) | (uint32_t)x0, 4);
+            ati_mm_write(s, DST_HEIGHT_WIDTH,
+                         ((uint32_t)h << 16) | (uint32_t)(x1 - x0), 4);
+        }
+        return true;
+    }
     case 0x91: /* CNTL_PAINT: one rect given as two corners (like SET_SCISSORS),
                 * top-left then bottom-right, each packed (y << 16) | x.  The
                 * Windows DirectDraw colour-fill (DdBlt DDBLT_COLORFILL) uses
