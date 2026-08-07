@@ -558,7 +558,7 @@ static void ati_raster_tri(ATIVGAState *s, ATISurface *d,
 bool ati_setup_gouraud_fill(ATIVGAState *s)
 {
     ATISurface d;
-    int x0, y0, w, h, scx0, scy0, scx1, scy1, x, y;
+    int x0, y0, w, h, scx0, scy0, scx1, scy1, x, y, xstep;
 
     if (!s->regs.su_gouraud_armed) {
         return false;
@@ -578,6 +578,14 @@ bool ati_setup_gouraud_fill(ATIVGAState *s)
     if (!d.bypp || !d.stride) {
         return true;    /* armed but undrawable: still count as consumed */
     }
+    /*
+     * At 24bpp the setup engine advances its colour DDA once per byte (three
+     * steps per pixel), so the driver programs dC/dx at a third of the
+     * per-pixel slope (measured: the 24bpp dx is exactly 1/3 of the 32bpp dx
+     * for the same caption).  Scale the per-pixel x displacement by the byte
+     * count to recover the intended slope; 16/32bpp step once per pixel.
+     */
+    xstep = (d.bypp == 3) ? 3 : 1;
 
     x0 = ati_sext14(s->regs.dst_x);   /* 14-bit signed: negative when off-edge */
     y0 = ati_sext14(s->regs.dst_y);
@@ -607,7 +615,7 @@ bool ati_setup_gouraud_fill(ATIVGAState *s)
             }
             for (c = 0; c < 3; c++) {
                 int64_t v = (int64_t)s->regs.su_color_val[c] +
-                            (int64_t)s->regs.su_color_dx[c] * (x - x0) +
+                            (int64_t)s->regs.su_color_dx[c] * (x - x0) * xstep +
                             (int64_t)s->regs.su_color_dy[c] * (y - y0);
                 int iv = (int)(v >> 16);
 
