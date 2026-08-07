@@ -148,4 +148,28 @@ void ati_2d_line(ATIVGAState *s, uint32_t start_yx, uint32_t end_yx);
 bool ati_host_data_flush(ATIVGAState *s);
 void ati_host_data_finish(ATIVGAState *s);
 
+/*
+ * CCE ring reader shared with the 3D/scale engine (ati_3d.c).  A packet
+ * handler consumes payload dwords from the ring through ati_cce_next(),
+ * bounded by ati_cce_has(); ati_cce_vm_dword() reads an arbitrary card
+ * (GART-translated) address, used to fetch indexed vertex buffers.
+ */
+typedef struct ATICCEReader {
+    ATIVGAState *s;
+    uint32_t base;
+    uint32_t mask;
+    uint32_t rptr;
+    uint32_t count;
+    uint32_t pos;
+} ATICCEReader;
+
+uint32_t ati_cce_vm_dword(ATIVGAState *s, uint32_t vm);
+uint32_t ati_cce_next(ATICCEReader *r);
+bool ati_cce_has(const ATICCEReader *r, unsigned n);
+
+/* RAGE 128 3D/scale pipeline (ati_3d.c). */
+void ati_scale_blt(ATIVGAState *s, uint32_t gmc, const uint32_t db[11],
+                   bool trans);
+bool ati_3d_gen_prim(ATIVGAState *s, ATICCEReader *rd, bool indexed);
+
 #endif /* ATI_INT_H */

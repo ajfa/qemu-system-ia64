@@ -441,7 +441,7 @@ static void ati_mm_write(void *opaque, hwaddr addr, uint64_t data,
  * the same window at VM 0x02000000 (R128_AGP_OFFSET).  Without a GART, low
  * addresses are local video memory.
  */
-static uint32_t ati_cce_vm_dword(ATIVGAState *s, uint32_t vm)
+uint32_t ati_cce_vm_dword(ATIVGAState *s, uint32_t vm)
 {
     int gart_slot = ati_init_aux_slot(0x017c); /* PCI_GART_PAGE */
     uint32_t gart = gart_slot >= 0 ? s->regs.init_aux[gart_slot] & ~0xfffu : 0;
@@ -486,16 +486,7 @@ static uint32_t ati_cce_ring_dword(ATIVGAState *s, uint32_t base,
  * per-rectangle coordinates.  NEXT_CHAR carries no GMC at all - it draws
  * one glyph with the state a preceding HOSTDATA_BLT packet loaded.
  */
-typedef struct ATICCEReader {
-    ATIVGAState *s;
-    uint32_t base;
-    uint32_t mask;
-    uint32_t rptr;
-    uint32_t count;
-    uint32_t pos;
-} ATICCEReader;
-
-static uint32_t ati_cce_next(ATICCEReader *r)
+uint32_t ati_cce_next(ATICCEReader *r)
 {
     if (r->pos >= r->count) {
         return 0;
@@ -503,7 +494,7 @@ static uint32_t ati_cce_next(ATICCEReader *r)
     return ati_cce_ring_dword(r->s, r->base, r->mask, r->rptr + r->pos++);
 }
 
-static bool ati_cce_has(const ATICCEReader *r, unsigned n)
+bool ati_cce_has(const ATICCEReader *r, unsigned n)
 {
     return r->pos + n <= r->count;
 }
@@ -670,6 +661,27 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
             ati_cce_host_data(s, &rd);
         }
         return true;
+    case 0x96: /* SCALE: stretch a source bitmap into a destination rect */
+    case 0x97: { /* TRANS_SCALE: as SCALE, with a source colour key */
+        uint32_t db[11];
+        unsigned i;
+
+        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+            return false;
+        }
+        if (!ati_cce_has(&rd, 11)) {
+            return false;
+        }
+        for (i = 0; i < 11; i++) {
+            db[i] = ati_cce_next(&rd);
+        }
+        ati_scale_blt(s, gmc, db, op == 0x97);
+        return true;
+    }
+    case 0x25: /* 3D_RNDR_GEN_PRIM: vertices inline in the ring */
+        return ati_3d_gen_prim(s, &rd, false);
+    case 0x23: /* 3D_RNDR_GEN_INDX_PRIM: vertices in a VRAM buffer */
+        return ati_3d_gen_prim(s, &rd, true);
     default:
         return false;
     }
