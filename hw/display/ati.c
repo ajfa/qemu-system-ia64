@@ -570,6 +570,14 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
                 * paths emit type-3 NOPs; handle it explicitly so it is not
                 * counted (and logged once) as an unhandled packet. */
         return true;
+    case 0x1f: /* SET_MODE24BPP: a single flag dword (1 = set / 0 = clear the
+                * engine microcode's 24bpp flag; SDK F.23, p.F-47).  It sets no
+                * MMIO register -- it toggles an internal microcode flag that
+                * governs HOST_DATA triplication for 24bpp destinations, which
+                * this model does not have and no guest we run selects (XP/2003
+                * desktops are 8/16/32bpp).  Consume it as a documented no-op so
+                * it is not misreported as unhandled. */
+        return true;
     case 0x19: /* NEXT_CHAR: (y,x), (h,w), inline monochrome bits */
         if (!ati_cce_has(&rd, 2)) {
             return false;
