@@ -800,6 +800,36 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
         return ati_3d_gen_prim(s, &rd, false);
     case 0x23: /* 3D_RNDR_GEN_INDX_PRIM: vertices in a VRAM buffer */
         return ati_3d_gen_prim(s, &rd, true);
+    case 0x2c: /* LOAD_PALETTE: a datatype word (1 = 16-entry/4bpp, else
+                * 256-entry/8bpp) then that many RGBQUAD colours
+                * (B[7:0] G[15:8] R[23:16] A[31:24]) loaded from CLUT entry 0
+                * (SDK F.21).  Feed them to the VGA DAC the same way the MMIO
+                * PALETTE_DATA path does; guests normally use that MMIO path,
+                * so this is the documented ring alternative. */
+    {
+        uint32_t dt;
+        unsigned n, i;
+
+        if (!ati_cce_has(&rd, 1)) {
+            return false;
+        }
+        dt = ati_cce_next(&rd);
+        n = dt == 1 ? 16 : 256;
+        vga_ioport_write(&s->vga, VGA_PEL_IW, 0);
+        for (i = 0; i < n && ati_cce_has(&rd, 1); i++) {
+            uint32_t c = ati_cce_next(&rd);
+
+            vga_ioport_write(&s->vga, VGA_PEL_D, (c >> 16) & 0xff); /* R */
+            vga_ioport_write(&s->vga, VGA_PEL_D, (c >> 8) & 0xff);  /* G */
+            vga_ioport_write(&s->vga, VGA_PEL_D, c & 0xff);         /* B */
+        }
+        return true;
+    }
+    case 0x2d: /* PURGE: purge the pixel cache (SDK opcode summary).  This
+                * model executes each packet synchronously and has no pixel
+                * cache, so there is nothing to flush -- treat it as a no-op
+                * rather than an unhandled packet. */
+        return true;
     default:
         return false;
     }
