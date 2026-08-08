@@ -563,14 +563,44 @@ bool ati_setup_gouraud_fill(ATIVGAState *s)
     if (!s->regs.su_gouraud_armed) {
         return false;
     }
-    s->regs.su_gouraud_armed = false;   /* single-shot: consume the plane */
 
-    /* SCALE_3D_CNTL[7:6] gates the setup block; require it enabled. */
-    if (((s->regs.scale_3d_cntl >> 6) & 3) == 0) {
+    /*
+     * The gate must still be Gouraud (SCALE_3D_CNTL[7:6] setup-block enable and
+     * SETUP_CNTL[5:3] COLOR_FCN == 4); if not, the burst is over -- release the
+     * plane and let the blit run normally.
+     */
+    if (((s->regs.scale_3d_cntl >> 6) & 3) == 0 ||
+        ((s->regs.setup_cntl >> 3) & 7) != 4) {
+        s->regs.su_gouraud_armed = false;
+        s->regs.su_gouraud_rect_valid = false;
         return false;
     }
-    /* SETUP_CNTL[5:3] COLOR_FCN must be 4 (Gouraud, all-vertex colour). */
-    if (((s->regs.setup_cntl >> 3) & 7) != 4) {
+
+    x0 = ati_sext14(s->regs.dst_x);
+    y0 = ati_sext14(s->regs.dst_y);
+    w = s->regs.dst_width;
+    h = s->regs.dst_height;
+    /*
+     * GDI emits one gradient as several scissored blits that share the colour
+     * plane and destination rectangle but tile different clip rectangles.  The
+     * driver arms the plane only once, so keep it armed for every blit whose
+     * destination rectangle matches; the first blit records it.  A blit with a
+     * different rectangle ends the burst -- release the plane and run it
+     * normally (this is what stops the following window-content blits, which
+     * would otherwise copy garbage into the caption).
+     */
+    if (!s->regs.su_gouraud_rect_valid) {
+        s->regs.su_gouraud_rect[0] = x0;
+        s->regs.su_gouraud_rect[1] = y0;
+        s->regs.su_gouraud_rect[2] = w;
+        s->regs.su_gouraud_rect[3] = h;
+        s->regs.su_gouraud_rect_valid = true;
+    } else if (s->regs.su_gouraud_rect[0] != x0 ||
+               s->regs.su_gouraud_rect[1] != y0 ||
+               s->regs.su_gouraud_rect[2] != w ||
+               s->regs.su_gouraud_rect[3] != h) {
+        s->regs.su_gouraud_armed = false;
+        s->regs.su_gouraud_rect_valid = false;
         return false;
     }
 
@@ -587,10 +617,6 @@ bool ati_setup_gouraud_fill(ATIVGAState *s)
      */
     xstep = (d.bypp == 3) ? 3 : 1;
 
-    x0 = ati_sext14(s->regs.dst_x);   /* 14-bit signed: negative when off-edge */
-    y0 = ati_sext14(s->regs.dst_y);
-    w = s->regs.dst_width;
-    h = s->regs.dst_height;
     if (w <= 0 || h <= 0) {
         return true;
     }

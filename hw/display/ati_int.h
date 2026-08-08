@@ -115,7 +115,12 @@ typedef struct ATIVGARegs {
      * window-caption gradients by filling a rectangle with COLOR_FCN=Gouraud:
      * each channel c has a value at the primitive origin plus screen-space
      * slopes, all signed 16.16.  su_gouraud_armed is set when a fresh colour
-     * plane is loaded and consumed by the next rectangle fill.
+     * plane is loaded; it stays armed for every clip-rectangle blit of the
+     * same gradient (GDI splits one DrvGradientFill into several scissored
+     * blits that share one colour plane and destination rectangle), and is
+     * released when a blit with a different destination rectangle arrives.
+     * su_gouraud_rect{,_valid} record that shared destination rectangle;
+     * they are transient burst scratch (never span a savevm, so unmigrated).
      */
     uint32_t scale_3d_cntl;
     uint32_t setup_cntl;
@@ -123,6 +128,8 @@ typedef struct ATIVGARegs {
     int32_t su_color_dy[3];   /* R,G,B  d(colour)/dy, 16.16 */
     int32_t su_color_val[3];  /* R,G,B  colour at primitive origin, 16.16 */
     bool su_gouraud_armed;
+    bool su_gouraud_rect_valid;
+    int32_t su_gouraud_rect[4];   /* dst x, y, w, h of the active gradient */
 } ATIVGARegs;
 
 typedef struct ATIHostDataState {

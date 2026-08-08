@@ -1866,7 +1866,8 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         /*
          * Setup-engine per-channel colour DDA.  Three channels (R,G,B) on a
          * 12-byte stride, each {dx, dy, value} at +0/+4/+8 (signed 16.16).
-         * A write arms a one-shot Gouraud fill consumed by the next paint.
+         * A write arms a Gouraud fill; it stays armed across the clip-rect
+         * blits of one gradient (a fresh plane starts a new burst).
          */
         unsigned off = addr - 0x1a40;
         unsigned ch = off / 0xc;
@@ -1877,6 +1878,7 @@ static void ati_mm_write(void *opaque, hwaddr addr,
 
         ati_reg_write_offs((uint32_t *)reg, addr & 3, data, size);
         s->regs.su_gouraud_armed = true;
+        s->regs.su_gouraud_rect_valid = false;
         break;
     }
     default:
@@ -2271,6 +2273,7 @@ static void ati_vga_reset(DeviceState *dev)
     s->regs.scale_3d_cntl = 0;
     s->regs.setup_cntl = 0;
     s->regs.su_gouraud_armed = false;
+    s->regs.su_gouraud_rect_valid = false;
     memset(s->regs.su_color_dx, 0, sizeof(s->regs.su_color_dx));
     memset(s->regs.su_color_dy, 0, sizeof(s->regs.su_color_dy));
     memset(s->regs.su_color_val, 0, sizeof(s->regs.su_color_val));
