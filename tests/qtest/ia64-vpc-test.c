@@ -2010,6 +2010,310 @@ static void test_ati_2d_fill_24bpp(void)
     ati_dev_close(&a);
 }
 
+/* Extra setup-engine / 2D-engine register offsets. */
+#define ATI_DP_BRUSH_BKGD_CLR   0x1478
+#define ATI_BRUSH_Y_X           0x1474
+#define ATI_BRUSH_DATA0         0x1480
+#define ATI_BRUSH_DATA1         0x1484
+#define ATI_SRC_OFFSET          0x15ac
+#define ATI_SRC_PITCH           0x15b0
+#define ATI_SRC_Y_X             0x1434
+#define ATI_SC_TOP_LEFT         0x16ec
+#define ATI_SCALE_3D_CNTL       0x1a00
+#define ATI_SETUP_CNTL          0x1bc4
+#define ATI_SU_DDA_BASE         0x1a40      /* per-channel {dx,dy,val}, 12B/ch */
+#define ATI_GMC_SRC_POC         0x00000001
+#define ATI_ROP3_SRCCOPY        0x00cc0000
+#define ATI_ROP3_SRCINVERT      0x00660000
+#define ATI_ROP3_SRCPAINT       0x00ee0000
+
+static inline void ati_vram_wr32(ATITestDev *a, uint32_t off, uint32_t v)
+{
+    qtest_writel(a->qts, a->fb + off, v);
+}
+
+static inline uint32_t ati_vram_rd32(ATITestDev *a, uint32_t off)
+{
+    return qtest_readl(a->qts, a->fb + off);
+}
+
+/*
+ * Caption gradient: the ati2draa driver programs the 2D setup engine's
+ * per-channel colour DDA (0x1a40..) and issues a solid rectangle paint with
+ * SCALE_3D_CNTL enabled and SETUP_CNTL COLOR_FCN = Gouraud; the engine then
+ * interpolates the colour across the rectangle instead of using the brush.
+ * Colour_c(x,y) = val_c + dx_c*(x-x0)*xstep + dy_c*(y-y0), clamped, where
+ * xstep is 3 at 24bpp (the DDA advances once per byte) and 1 otherwise.  The
+ * test programs a known plane and checks the engine reproduces the formula.
+ */
+static void ati_run_gradient(ATITestDev *a, unsigned datatype, unsigned bypp,
+                             int xstep, const int32_t val[3],
+                             const int32_t dx[3], const int32_t dy[3])
+{
+    const uint32_t dst_off = 0x100000;
+    const unsigned w = 32, h = 4, pitch = (bypp == 3) ? (w / 8) * 3 : w / 8;
+    const uint32_t stride = pitch * ((bypp == 3) ? 8 : bypp * 8);
+    unsigned ch, x, y, b;
+
+    ati_wr(a, ATI_DEFAULT_SC_BR, 0x3fff3fff);
+    ati_wr(a, ATI_SC_TOP_LEFT, 0);
+    ati_wr(a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(a, ATI_DST_OFFSET, dst_off);
+    ati_wr(a, ATI_DST_PITCH, pitch);
+    ati_wr(a, ATI_DP_GUI_MASTER_CNTL, (datatype << 8) | ATI_GMC_DST_POC);
+    ati_wr(a, ATI_SCALE_3D_CNTL, 0x40);               /* setup block enable */
+    ati_wr(a, ATI_SETUP_CNTL, 4 << 3);                /* COLOR_FCN = Gouraud */
+    for (ch = 0; ch < 3; ch++) {
+        ati_wr(a, ATI_SU_DDA_BASE + ch * 0xc + 0, (uint32_t)dx[ch]);
+        ati_wr(a, ATI_SU_DDA_BASE + ch * 0xc + 4, (uint32_t)dy[ch]);
+        ati_wr(a, ATI_SU_DDA_BASE + ch * 0xc + 8, (uint32_t)val[ch]);
+    }
+    ati_wr(a, ATI_DST_Y_X, 0);
+    ati_wr(a, ATI_DST_HEIGHT_WIDTH, (h << 16) | w);   /* triggers the paint */
+
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            uint8_t exp[3];                            /* R,G,B */
+            uint64_t p = a->fb + dst_off + y * stride + x * bypp;
+
+            for (ch = 0; ch < 3; ch++) {
+                int64_t v = (int64_t)val[ch] +
+                            (int64_t)dx[ch] * (int)x * xstep +
+                            (int64_t)dy[ch] * (int)y;
+                int iv = (int)(v >> 16);
+
+                exp[ch] = iv < 0 ? 0 : iv > 255 ? 255 : iv;
+            }
+            if (bypp >= 3) {                            /* stored B,G,R(,A) */
+                g_assert_cmphex(qtest_readb(a->qts, p + 0), ==, exp[2]);
+                g_assert_cmphex(qtest_readb(a->qts, p + 1), ==, exp[1]);
+                g_assert_cmphex(qtest_readb(a->qts, p + 2), ==, exp[0]);
+            } else if (bypp == 2) {                     /* RGB565 */
+                uint16_t px = qtest_readw(a->qts, p);
+                g_assert_cmpuint((px >> 11) & 0x1f, ==, exp[0] >> 3);
+                g_assert_cmpuint((px >> 5) & 0x3f, ==, exp[1] >> 2);
+                g_assert_cmpuint(px & 0x1f, ==, exp[2] >> 3);
+            }
+            (void)b;
+        }
+    }
+}
+
+static void test_ati_gradient_32bpp(void)
+{
+    ATITestDev a;
+    /* horizontal ramp on R, flat G/B (16.16). */
+    const int32_t val[3] = { 16 << 16, 64 << 16, 128 << 16 };
+    const int32_t dx[3]  = { 1 << 16, 0, 0 };
+    const int32_t dy[3]  = { 0, 0, 0 };
+
+    ati_dev_open(&a, NULL);
+    ati_run_gradient(&a, 6, 4, 1, val, dx, dy);
+    ati_dev_close(&a);
+}
+
+static void test_ati_gradient_24bpp(void)
+{
+    ATITestDev a;
+    /* dx is programmed at ~1/3 the slope; the engine multiplies by xstep=3. */
+    const int32_t val[3] = { 16 << 16, 64 << 16, 128 << 16 };
+    const int32_t dx[3]  = { (1 << 16) / 3, 0, 0 };
+    const int32_t dy[3]  = { 0, 0, 0 };
+
+    ati_dev_open(&a, NULL);
+    ati_run_gradient(&a, 5, 3, 3, val, dx, dy);
+    ati_dev_close(&a);
+}
+
+/*
+ * 8x8 monochrome pattern brush (PATCOPY, brush type 0): the pattern bit at
+ * (x,y) selects foreground vs background.  Regresses the pattern-brush fill.
+ */
+static void test_ati_pattern_brush(void)
+{
+    ATITestDev a;
+    const uint32_t dst_off = 0x100000;
+    const unsigned w = 8, h = 4;
+    unsigned x, y;
+
+    ati_dev_open(&a, NULL);
+    ati_wr(&a, ATI_DEFAULT_SC_BR, 0x3fff3fff);
+    ati_wr(&a, ATI_SC_TOP_LEFT, 0);
+    ati_wr(&a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(&a, ATI_DST_OFFSET, dst_off);
+    ati_wr(&a, ATI_DST_PITCH, w / 8);
+    ati_wr(&a, ATI_DP_BRUSH_FRGD_CLR, 0xaa);
+    ati_wr(&a, ATI_DP_BRUSH_BKGD_CLR, 0xbb);
+    ati_wr(&a, ATI_BRUSH_Y_X, 0);
+    ati_wr(&a, ATI_BRUSH_DATA0, 0x55555555);          /* each row 0b01010101 */
+    ati_wr(&a, ATI_BRUSH_DATA1, 0x55555555);
+    /* datatype 8bpp, brush field 0 (8x8 mono), ROP PATCOPY, dst from regs */
+    ati_wr(&a, ATI_DP_GUI_MASTER_CNTL,
+           (2 << 8) | ATI_GMC_ROP3_PATCOPY | ATI_GMC_DST_POC);
+    ati_wr(&a, ATI_DST_Y_X, 0);
+    ati_wr(&a, ATI_DST_HEIGHT_WIDTH, (h << 16) | w);
+
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            uint8_t exp = (x & 1) ? 0xbb : 0xaa;       /* bit0 set on even x */
+            g_assert_cmphex(qtest_readb(a.qts, a.fb + dst_off + y * w + x),
+                            ==, exp);
+        }
+    }
+    ati_dev_close(&a);
+}
+
+/*
+ * Source/destination ROP blits (32bpp): the engine combines a source and the
+ * existing destination per the ROP3 code.  Regresses the general-ROP path
+ * (SRCINVERT was the XOR-trail case, SRCPAINT the OR case).
+ */
+static void ati_rop_case(ATITestDev *a, uint32_t rop3, uint32_t sc,
+                         uint32_t dc, uint32_t expect)
+{
+    const uint32_t src_off = 0x200000, dst_off = 0x100000;
+    const unsigned w = 8, h = 2;
+    const uint32_t stride = (w / 8) * 32;              /* 32bpp byte stride */
+    unsigned x, y;
+
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            ati_vram_wr32(a, src_off + y * stride + x * 4, sc);
+            ati_vram_wr32(a, dst_off + y * stride + x * 4, dc);
+        }
+    }
+    ati_wr(a, ATI_DEFAULT_SC_BR, 0x3fff3fff);
+    ati_wr(a, ATI_SC_TOP_LEFT, 0);
+    ati_wr(a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(a, ATI_SRC_OFFSET, src_off);
+    ati_wr(a, ATI_SRC_PITCH, w / 8);
+    ati_wr(a, ATI_SRC_Y_X, 0);
+    ati_wr(a, ATI_DST_OFFSET, dst_off);
+    ati_wr(a, ATI_DST_PITCH, w / 8);
+    ati_wr(a, ATI_DP_GUI_MASTER_CNTL,
+           (6 << 8) | rop3 | ATI_GMC_SRC_POC | ATI_GMC_DST_POC);
+    ati_wr(a, ATI_DST_Y_X, 0);
+    ati_wr(a, ATI_DST_HEIGHT_WIDTH, (h << 16) | w);
+
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            g_assert_cmphex(ati_vram_rd32(a, dst_off + y * stride + x * 4),
+                            ==, expect);
+        }
+    }
+}
+
+static void test_ati_rop_src_dst(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    ati_rop_case(&a, ATI_ROP3_SRCCOPY, 0x11223344, 0x55667788, 0x11223344);
+    ati_rop_case(&a, ATI_ROP3_SRCINVERT, 0x11223344, 0x0f0f0f0f, 0x1e2d3c4b);
+    ati_rop_case(&a, ATI_ROP3_SRCPAINT, 0x11002200, 0x00330044, 0x11332244);
+    ati_dev_close(&a);
+}
+
+/*
+ * Overlapping same-surface SRCCOPY (a window move / scroll): pixman shears
+ * overlapping copies, so the model memmoves each row walking away from the
+ * destination.  Copy a strip of distinct-per-row values down by two rows and
+ * confirm no row is clobbered before it is read.  Regresses the drag smear.
+ */
+static void test_ati_overlap_copy(void)
+{
+    ATITestDev a;
+    const uint32_t off = 0x100000;
+    const unsigned w = 8, h = 4;
+    const uint32_t stride = (w / 8) * 32;
+    unsigned x, y;
+
+    ati_dev_open(&a, NULL);
+    for (y = 0; y < 6; y++) {                          /* seed 6 distinct rows */
+        for (x = 0; x < w; x++) {
+            ati_vram_wr32(&a, off + y * stride + x * 4, 0x1000 + y);
+        }
+    }
+    ati_wr(&a, ATI_DEFAULT_SC_BR, 0x3fff3fff);
+    ati_wr(&a, ATI_SC_TOP_LEFT, 0);
+    ati_wr(&a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(&a, ATI_SRC_OFFSET, off);
+    ati_wr(&a, ATI_SRC_PITCH, w / 8);
+    ati_wr(&a, ATI_SRC_Y_X, 0);                        /* src rows 0..3 */
+    ati_wr(&a, ATI_DST_OFFSET, off);
+    ati_wr(&a, ATI_DST_PITCH, w / 8);
+    ati_wr(&a, ATI_DP_GUI_MASTER_CNTL,
+           (6 << 8) | ATI_ROP3_SRCCOPY | ATI_GMC_SRC_POC | ATI_GMC_DST_POC);
+    ati_wr(&a, ATI_DST_Y_X, 2 << 16);                  /* dst rows 2..5 */
+    ati_wr(&a, ATI_DST_HEIGHT_WIDTH, (h << 16) | w);
+
+    /* rows 0,1 untouched; rows 2..5 are the copied old rows 0..3 */
+    for (x = 0; x < w; x++) {
+        g_assert_cmphex(ati_vram_rd32(&a, off + 0 * stride + x * 4), ==,
+                        0x1000);
+        g_assert_cmphex(ati_vram_rd32(&a, off + 1 * stride + x * 4), ==,
+                        0x1001);
+        g_assert_cmphex(ati_vram_rd32(&a, off + 2 * stride + x * 4), ==,
+                        0x1000);
+        g_assert_cmphex(ati_vram_rd32(&a, off + 3 * stride + x * 4), ==,
+                        0x1001);
+        g_assert_cmphex(ati_vram_rd32(&a, off + 4 * stride + x * 4), ==,
+                        0x1002);
+        g_assert_cmphex(ati_vram_rd32(&a, off + 5 * stride + x * 4), ==,
+                        0x1003);
+    }
+    ati_dev_close(&a);
+}
+
+/*
+ * 14-bit SIGNED destination coordinates (ati_sext14): a caption whose left
+ * edge is off-screen is encoded as a negative 14-bit X.  Exercised on the
+ * gradient path, which is where it matters (an off-origin caption ramp).
+ * Without sign extension DST_X = 0x3ffe reads as +16382, placing the whole
+ * rectangle past the right scissor edge so columns 0..3 stay clear; with it
+ * the origin is -2 and those columns render, interpolated from x0 = -2.
+ */
+static void test_ati_sext14_coord(void)
+{
+    ATITestDev a;
+    const uint32_t dst_off = 0x100000;
+    const int x0 = -2;
+    const int32_t val[3] = { 16 << 16, 64 << 16, 128 << 16 };
+    const int32_t dx[3]  = { 1 << 16, 0, 0 };
+    unsigned x, ch;
+
+    ati_dev_open(&a, NULL);
+    for (x = 0; x < 8; x++) {                          /* clear the row */
+        ati_vram_wr32(&a, dst_off + x * 4, 0);
+    }
+    ati_wr(&a, ATI_DEFAULT_SC_BR, 0x3fff3fff);
+    ati_wr(&a, ATI_SC_TOP_LEFT, 0);
+    ati_wr(&a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(&a, ATI_DST_OFFSET, dst_off);
+    ati_wr(&a, ATI_DST_PITCH, 8 / 8);
+    ati_wr(&a, ATI_DP_GUI_MASTER_CNTL, (6 << 8) | ATI_GMC_DST_POC);
+    ati_wr(&a, ATI_SCALE_3D_CNTL, 0x40);
+    ati_wr(&a, ATI_SETUP_CNTL, 4 << 3);
+    for (ch = 0; ch < 3; ch++) {
+        ati_wr(&a, ATI_SU_DDA_BASE + ch * 0xc + 0, (uint32_t)dx[ch]);
+        ati_wr(&a, ATI_SU_DDA_BASE + ch * 0xc + 4, 0);
+        ati_wr(&a, ATI_SU_DDA_BASE + ch * 0xc + 8, (uint32_t)val[ch]);
+    }
+    ati_wr(&a, ATI_DST_Y_X, 0x3ffe);                   /* x = -2 (sext14) */
+    ati_wr(&a, ATI_DST_HEIGHT_WIDTH, (1 << 16) | 6);   /* covers x -2..3 */
+
+    /* columns 0..3 render with R interpolated from the negative origin */
+    for (x = 0; x < 4; x++) {
+        int r = 16 + ((int)x - x0);                    /* val_R + dx_R*(x-x0) */
+        g_assert_cmphex(ati_vram_rd32(&a, dst_off + x * 4), ==,
+                        0xff000000u | (uint32_t)r << 16 | (64 << 8) | 128);
+    }
+    for (x = 4; x < 8; x++) {                          /* untouched */
+        g_assert_cmphex(ati_vram_rd32(&a, dst_off + x * 4), ==, 0);
+    }
+    ati_dev_close(&a);
+}
+
 int main(int argc, char **argv)
 {
     unsigned cpus;
@@ -2088,6 +2392,12 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ati/rom-bar-tables", test_ati_rom_bar_tables);
     qtest_add_func("/ia64-vpc/ati/2d-solid-fill", test_ati_2d_solid_fill);
     qtest_add_func("/ia64-vpc/ati/2d-fill-24bpp", test_ati_2d_fill_24bpp);
+    qtest_add_func("/ia64-vpc/ati/gradient-32bpp", test_ati_gradient_32bpp);
+    qtest_add_func("/ia64-vpc/ati/gradient-24bpp", test_ati_gradient_24bpp);
+    qtest_add_func("/ia64-vpc/ati/pattern-brush", test_ati_pattern_brush);
+    qtest_add_func("/ia64-vpc/ati/rop-src-dst", test_ati_rop_src_dst);
+    qtest_add_func("/ia64-vpc/ati/overlap-copy", test_ati_overlap_copy);
+    qtest_add_func("/ia64-vpc/ati/sext14-coord", test_ati_sext14_coord);
 
     return g_test_run();
 }
