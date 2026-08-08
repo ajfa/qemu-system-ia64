@@ -1623,6 +1623,44 @@ test_it_only_keeps_data_physical = require_registers("it_only_keeps_data_physica
     IT_ONLY_DATA_BUNDLE,
 ], {"ip": 0x8450, "exception": IA64_EXCP_NONE, "r31": IT_ONLY_DATA_LOW}, entry=0x10)
 
+test_itlb_uses_instruction_translation_after_data_fill = require_registers(
+    "itlb_uses_instruction_translation_after_data_fill", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, *movl_mlx(19, DTR_PTE_WB | 0x5000000)),
+        (0x30, *movl_mlx(20, DTR_PTE_WB | 0x5010000)),
+        (0x40, *movl_mlx(21, 0x8000)),
+        (0x50, *movl_mlx(
+            23, IA64_PSR_IC | IA64_PSR_IT | IA64_PSR_DT)),
+        (0x60, 0x00, adds(7, LOW_VECTOR_ITIR, 0), adds(5, 5, 0),
+         nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
+         nop_i()),
+        (0x80, 0x00, itr_i(5, 18), adds(6, 6, 0),
+         nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(21, 20), nop_i(), nop_i()),
+        (0xa0, 0x00, itr_d(6, 19), nop_i(), nop_i()),
+        (0xb0, 0x00, itr_i(6, 20), nop_i(), nop_i()),
+        (0xc0, 0x00, srlz_i(), nop_i(), nop_i()),
+        (0xd0, 0x00, srlz_d(), adds(31, 0x430, 0), nop_i()),
+        *rfi_to_gr(0xe0, 23, 31),
+
+        # Populate the data soft-TLB at 0x8000 before fetching code there.
+        (0x4000430, 0x00, ld8(8, 21), mov_br_gr(1, 21), nop_i()),
+        (0x4000440, 0x10, nop_m(), nop_i(), br_indirect(1)),
+
+        # The DTR and ITR deliberately map the same VA to different pages.
+        (0x5000000, 0x10, nop_m(), adds(31, 0x11, 0),
+         br_cond(0x8000, 0x8010)),
+        (0x5000010, 0x10, nop_m(), nop_i(), br_cond(0x8010, 0x8010)),
+        (0x5010000, 0x10, nop_m(), adds(31, 0x22, 0),
+         br_cond(0x8000, 0x8010)),
+        (0x5010010, 0x10, nop_m(), nop_i(), br_cond(0x8010, 0x8010)),
+    ], {
+        "ip": 0x8010,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0x22,
+    }, entry=0x10)
+
 PHYSICAL_ALIAS_ADDR = 0x220000
 PHYSICAL_ALIAS_UC_ADDR = IA64_PHYS_UC_BIT | PHYSICAL_ALIAS_ADDR
 PHYSICAL_ALIAS_FIRST = 0x1122334455667788
@@ -6285,6 +6323,7 @@ CASE_NAMES = (
     'ifetch_page_not_present_fallthrough_records_faulting_iip',
     'interruption_serializes_pending_ptr_d',
     'it_only_keeps_data_physical',
+    'itlb_uses_instruction_translation_after_data_fill',
     'itc_d_4g_page_size_is_insertable',
     'itc_d_clean_page_read_fill_store_raises_dirty_bit',
     'itc_d_clear_accessed_raises_data_access_bit',

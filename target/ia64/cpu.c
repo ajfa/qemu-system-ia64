@@ -254,6 +254,9 @@ static int ia64_tlb_prot_for_pte_psr(uint64_t pte, uint8_t perm,
 {
     int prot = ia64_tlb_perm_to_prot(perm);
 
+    /* IA-64 has independent instruction and data translation caches. */
+    prot &= is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
+
     /*
      * QEMU's software TLB may satisfy later accesses without re-entering
      * tlb_fill.  Do not cache write permission for a clean IA-64 PTE: a
