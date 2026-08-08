@@ -1703,6 +1703,313 @@ static void test_savevm_restores_platform_state(void)
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
+/*
+ * ATI RAGE 128 (Rage 128 Pro, 1002:5046) device-model regression tests.
+ *
+ * These drive the emulated adapter directly over its PCI BARs and lock in the
+ * fork's ATI fixes and the register behaviour documented in the RAGE 128 PRO
+ * Register Reference Guide: the indirect PLL register file, DAC load-sense,
+ * MM_INDEX/MM_DATA indirection, the PCI-ROM-BAR ATI-table patch, and 2D solid
+ * fills at every supported depth (including the 24bpp path that used to abort
+ * on 3-byte pixel accesses).
+ */
+#define ATI_SLOT                5
+
+/* Register offsets (RAGE 128 PRO RRG / hw/display/ati_regs.h). */
+#define ATI_MM_INDEX            0x0000
+#define ATI_MM_DATA             0x0004
+#define ATI_CLOCK_CNTL_INDEX    0x0008
+#define ATI_CLOCK_CNTL_DATA     0x000c
+#define ATI_DAC_CNTL            0x0058
+#define ATI_DST_OFFSET          0x1404
+#define ATI_DST_PITCH           0x1408
+#define ATI_DST_Y_X             0x1438
+#define ATI_DST_HEIGHT_WIDTH    0x143c
+#define ATI_DP_GUI_MASTER_CNTL  0x146c
+#define ATI_DP_BRUSH_FRGD_CLR   0x147c
+#define ATI_DP_CNTL             0x16c0
+#define ATI_DEFAULT_SC_BR       0x16e8
+
+/* Bit / field values. */
+#define ATI_PLL_WR_EN           0x00000080
+#define ATI_DAC_CMP_EN          0x00000008
+#define ATI_DAC_CMP_OUTPUT      0x00000080
+#define ATI_MM_INDEX_VRAM       0x80000000
+#define ATI_DP_LEFT_TO_RIGHT    0x00000001
+#define ATI_DP_TOP_TO_BOTTOM    0x00000002
+#define ATI_GMC_DST_POC         0x00000002 /* DST pitch/offset from registers */
+#define ATI_GMC_BRUSH_SOLID     0x000000d0
+#define ATI_GMC_ROP3_PATCOPY    0x00f00000
+
+typedef struct {
+    QTestState *qts;
+    QGenericPCIBus gbus;
+    QPCIDevice *dev;
+    uint64_t mmio;                     /* BAR2 - MMIO register aperture */
+    uint64_t fb;                       /* BAR0 - linear framebuffer      */
+} ATITestDev;
+
+static void ati_dev_open(ATITestDev *a, const char *extra)
+{
+    a->qts = extra ? ia64_vpc_start(extra) : ia64_vpc_start(NULL);
+    ia64_qpci_init(&a->gbus, a->qts);
+    a->dev = qpci_device_find(&a->gbus.bus, QPCI_DEVFN(ATI_SLOT, 0));
+    g_assert_nonnull(a->dev);
+    g_assert_cmphex(qpci_config_readw(a->dev, PCI_VENDOR_ID), ==, 0x1002);
+    g_assert_cmphex(qpci_config_readw(a->dev, PCI_DEVICE_ID), ==, 0x5046);
+    a->mmio = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_2) & 0xfffffff0;
+    a->fb = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_0) & 0xfffffff0;
+    g_assert_cmphex(a->mmio, ==, 0xc8000000);
+    g_assert_cmphex(a->fb, ==, 0xc4000000);
+}
+
+static void ati_dev_close(ATITestDev *a)
+{
+    g_free(a->dev);
+    qtest_quit(a->qts);
+}
+
+static inline void ati_wr(ATITestDev *a, uint32_t off, uint32_t v)
+{
+    qtest_writel(a->qts, a->mmio + off, v);
+}
+
+static inline uint32_t ati_rd(ATITestDev *a, uint32_t off)
+{
+    return qtest_readl(a->qts, a->mmio + off);
+}
+
+/* Read PLL register 'idx' through the CLOCK_CNTL_INDEX/DATA window. */
+static uint32_t ati_pll_rd(ATITestDev *a, uint32_t idx)
+{
+    ati_wr(a, ATI_CLOCK_CNTL_INDEX, idx & 0x3f);
+    return ati_rd(a, ATI_CLOCK_CNTL_DATA);
+}
+
+/* Write PLL register 'idx' with PLL_WR_EN asserted. */
+static void ati_pll_wr(ATITestDev *a, uint32_t idx, uint32_t v)
+{
+    ati_wr(a, ATI_CLOCK_CNTL_INDEX, ATI_PLL_WR_EN | (idx & 0x3f));
+    ati_wr(a, ATI_CLOCK_CNTL_DATA, v);
+}
+
+/* Config space: the machine reports the documented SVID=vendor/SID=device. */
+static void test_ati_config_ids(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_VENDOR_ID), ==,
+                    0x1002);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_ID), ==, 0x5046);
+    ati_dev_close(&a);
+}
+
+/*
+ * Indirect PLL register file: power-up defaults, PLL_WR_EN gating, the 6-bit
+ * index mask, and the PPLL_ATOMIC_UPDATE "update pending" bit (bit 15 of
+ * indices 0x03..0x07) that hardware reports as clear once settled.
+ */
+static void test_ati_pll_regfile(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+
+    /* documented power-up values */
+    g_assert_cmphex(ati_pll_rd(&a, 0x01), ==, 0x000000f7);
+    g_assert_cmphex(ati_pll_rd(&a, 0x02), ==, 0x0000cc03);
+    g_assert_cmphex(ati_pll_rd(&a, 0x10), ==, 0x7a770000);
+
+    /* a write without PLL_WR_EN is dropped */
+    ati_wr(&a, ATI_CLOCK_CNTL_INDEX, 0x02);           /* no WR_EN */
+    ati_wr(&a, ATI_CLOCK_CNTL_DATA, 0xdeadbeef);
+    g_assert_cmphex(ati_pll_rd(&a, 0x02), ==, 0x0000cc03);
+
+    /* with PLL_WR_EN it sticks; the index masks to 6 bits on read-back */
+    ati_pll_wr(&a, 0x02, 0x00001234);
+    ati_wr(&a, ATI_CLOCK_CNTL_INDEX, 0x40 | 0x02);    /* high bits ignored */
+    g_assert_cmphex(ati_rd(&a, ATI_CLOCK_CNTL_DATA), ==, 0x00001234);
+
+    /* PPLL_ATOMIC_UPDATE: bit 15 of idx 0x03 reads back cleared */
+    ati_pll_wr(&a, 0x03, 0x0000800c);
+    g_assert_cmphex(ati_pll_rd(&a, 0x03), ==, 0x0000000c);
+    /* a non-atomic index keeps bit 15 */
+    ati_pll_wr(&a, 0x02, 0x00008111);
+    g_assert_cmphex(ati_pll_rd(&a, 0x02), ==, 0x00008111);
+
+    ati_dev_close(&a);
+}
+
+/*
+ * DAC load-sense: with the comparator enabled the model reports a connected
+ * CRT (DAC_CMP_OUTPUT set); with it disabled the bit stays clear.
+ */
+static void test_ati_dac_load_sense(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    ati_wr(&a, ATI_DAC_CNTL, 0);
+    g_assert_cmphex(ati_rd(&a, ATI_DAC_CNTL) & ATI_DAC_CMP_OUTPUT, ==, 0);
+    ati_wr(&a, ATI_DAC_CNTL, ATI_DAC_CMP_EN);
+    g_assert_cmphex(ati_rd(&a, ATI_DAC_CNTL) & ATI_DAC_CMP_OUTPUT, ==,
+                    ATI_DAC_CMP_OUTPUT);
+    ati_dev_close(&a);
+}
+
+/* MM_INDEX/MM_DATA indirection to both the register file and to VRAM. */
+static void test_ati_mm_index_indirect(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+
+    /* register indirection: reach DAC_CNTL through MM_DATA */
+    ati_wr(&a, ATI_DAC_CNTL, ATI_DAC_CMP_EN);
+    ati_wr(&a, ATI_MM_INDEX, ATI_DAC_CNTL);
+    g_assert_cmphex(ati_rd(&a, ATI_MM_DATA) & ATI_DAC_CMP_OUTPUT, ==,
+                    ATI_DAC_CMP_OUTPUT);
+
+    /* VRAM indirection (MM_INDEX bit 31): write then read back, and confirm
+     * it really landed in VRAM as seen through the framebuffer BAR. */
+    ati_wr(&a, ATI_MM_INDEX, ATI_MM_INDEX_VRAM | 0x40000);
+    ati_wr(&a, ATI_MM_DATA, 0xcafef00d);
+    ati_wr(&a, ATI_MM_INDEX, ATI_MM_INDEX_VRAM | 0x40000);
+    g_assert_cmphex(ati_rd(&a, ATI_MM_DATA), ==, 0xcafef00d);
+    g_assert_cmphex(qtest_readl(a.qts, a.fb + 0x40000), ==, 0xcafef00d);
+
+    ati_dev_close(&a);
+}
+
+/*
+ * PCI ROM BAR: the machine patches the stock SeaVGABIOS with the ATI tables a
+ * native Rage 128 driver validates (ia64_vpc_install_ati_rom_tables): the
+ * " 761295520" signature at 0x30, a PCIR structure restated to 1002:5046, and
+ * a valid overall checksum over the (grown) declared image.
+ */
+static void test_ati_rom_bar_tables(void)
+{
+    ATITestDev a;
+    uint32_t rom_bar;
+    uint64_t rom_base;
+    uint8_t *rom;
+    uint32_t declared, pcir, i;
+    uint8_t checksum = 0;
+    int sig_at = -1;
+
+    ati_dev_open(&a, NULL);
+    /*
+     * The machine assigns the ROM BAR but deliberately leaves decode OFF (an
+     * XP VideoPortGetAccessRanges workaround); readers enable it transiently,
+     * exactly as videoprt/pci.sys do around VideoPortGetRomImage.
+     */
+    rom_bar = qpci_config_readl(a.dev, PCI_ROM_ADDRESS);
+    rom_base = rom_bar & 0xfffff800;
+    g_assert_cmphex(rom_base, ==, 0xc9000000);
+    qpci_config_writel(a.dev, PCI_ROM_ADDRESS, rom_base | 1); /* enable decode */
+
+    rom = g_malloc(0x10000);
+    qtest_memread(a.qts, rom_base, rom, 0x10000);
+    g_assert_cmphex(rom[0], ==, 0x55);
+    g_assert_cmphex(rom[1], ==, 0xaa);
+    declared = (uint32_t)rom[2] * 512;
+    g_assert_cmpuint(declared, >, 0);
+    g_assert_cmpuint(declared, <=, 0x10000);
+
+    /* signature the ATI drivers look for, at the documented 0x30 */
+    g_assert_cmpmem(rom + 0x30, 10, " 761295520", 10);
+    for (i = 0; i + 10 <= declared; i++) {
+        if (memcmp(rom + i, " 761295520", 10) == 0) {
+            sig_at = i;
+            break;
+        }
+    }
+    g_assert_cmpint(sig_at, ==, 0x30);
+
+    /* PCIR restated to this adapter (EFI 1.10 wants it to match the header) */
+    pcir = lduw_le_p(rom + 0x18);
+    g_assert_cmpuint(pcir + 0x18, <=, declared);
+    g_assert_cmpmem(rom + pcir, 4, "PCIR", 4);
+    g_assert_cmphex(lduw_le_p(rom + pcir + 4), ==, 0x1002);
+    g_assert_cmphex(lduw_le_p(rom + pcir + 6), ==, 0x5046);
+    g_assert_cmphex(lduw_le_p(rom + pcir + 0x10), ==, declared / 512);
+
+    /* the grown image checksums to zero */
+    for (i = 0; i < declared; i++) {
+        checksum += rom[i];
+    }
+    g_assert_cmphex(checksum, ==, 0);
+
+    g_free(rom);
+    ati_dev_close(&a);
+}
+
+/*
+ * Program a solid-colour rectangle through the 2D engine and read it back out
+ * of VRAM.  Exercises the DP_GUI_MASTER_CNTL datatype decode, the RAGE 128
+ * DST_PITCH*bpp byte-stride rule, the brush/ROP fill path and ati_stpix.  At
+ * 24bpp this is the case that used to abort in stn_he_p on a 3-byte store.
+ */
+static void ati_do_fill(ATITestDev *a, unsigned datatype, unsigned bypp,
+                        uint32_t pitch_regs, uint32_t color)
+{
+    const uint32_t dst_off = 0x100000;
+    const unsigned width = 32, height = 4;
+    unsigned x, y, b;
+    uint32_t gmc = (datatype << 8) | ATI_GMC_BRUSH_SOLID |
+                   ATI_GMC_ROP3_PATCOPY | ATI_GMC_DST_POC;
+
+    ati_wr(a, ATI_DEFAULT_SC_BR, 0x3fff3fff);         /* no clipping */
+    ati_wr(a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(a, ATI_DST_OFFSET, dst_off);
+    ati_wr(a, ATI_DST_PITCH, pitch_regs);
+    ati_wr(a, ATI_DP_BRUSH_FRGD_CLR, color);
+    ati_wr(a, ATI_DP_GUI_MASTER_CNTL, gmc);
+    ati_wr(a, ATI_DST_Y_X, 0);
+    /* the DST_HEIGHT_WIDTH write triggers the blit */
+    ati_wr(a, ATI_DST_HEIGHT_WIDTH, (height << 16) | width);
+
+    /* every pixel of the rectangle carries the fill colour, byte-exact */
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            uint64_t p = a->fb + dst_off + y * (width * bypp) + x * bypp;
+
+            for (b = 0; b < bypp; b++) {
+                g_assert_cmphex(qtest_readb(a->qts, p + b), ==,
+                                (color >> (b * 8)) & 0xff);
+            }
+        }
+    }
+}
+
+static void test_ati_2d_solid_fill(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    /* DST_PITCH is in units of 8 pixels; byte stride = pitch * bpp. */
+    ati_do_fill(&a, 2, 1, 32 / 8,     0x0000005a);     /* 8bpp  */
+    ati_do_fill(&a, 3, 2, 32 / 8,     0x00001234);     /* 16bpp */
+    ati_do_fill(&a, 6, 4, 32 / 8,     0x11223344);     /* 32bpp */
+    ati_dev_close(&a);
+}
+
+/*
+ * 24bpp fill: the RAGE 128 treats the surface as byte-wide, so the driver
+ * pre-triples the pitch register; the model must store 3-byte pixels without
+ * tripping stn_he_p (fixed in 605127d/d2140f0) and land them contiguously.
+ */
+static void test_ati_2d_fill_24bpp(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    /* 24bpp: driver folds the *3 into the register -> (width/8)*3. */
+    ati_do_fill(&a, 5, 3, (32 / 8) * 3, 0x00334455);
+    ati_dev_close(&a);
+}
+
 int main(int argc, char **argv)
 {
     unsigned cpus;
@@ -1773,6 +2080,14 @@ int main(int argc, char **argv)
                    test_sparse_io_pm_register);
     qtest_add_func("/ia64-vpc/savevm/platform-state",
                    test_savevm_restores_platform_state);
+    qtest_add_func("/ia64-vpc/ati/config-ids", test_ati_config_ids);
+    qtest_add_func("/ia64-vpc/ati/pll-regfile", test_ati_pll_regfile);
+    qtest_add_func("/ia64-vpc/ati/dac-load-sense", test_ati_dac_load_sense);
+    qtest_add_func("/ia64-vpc/ati/mm-index-indirect",
+                   test_ati_mm_index_indirect);
+    qtest_add_func("/ia64-vpc/ati/rom-bar-tables", test_ati_rom_bar_tables);
+    qtest_add_func("/ia64-vpc/ati/2d-solid-fill", test_ati_2d_solid_fill);
+    qtest_add_func("/ia64-vpc/ati/2d-fill-24bpp", test_ati_2d_fill_24bpp);
 
     return g_test_run();
 }
