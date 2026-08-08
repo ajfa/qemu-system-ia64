@@ -224,14 +224,27 @@ static void ati_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
     uint32_t h, srcoff, color;
     uint64_t abits, xbits, mask;
     uint32_t *dp = (uint32_t *)d;
+    unsigned hoff = (s->regs.cur_hv_offs >> 16) & 0x3f;
+    unsigned voff = s->regs.cur_hv_offs & 0x3f;
+    int row = scr_y - vga->hw_cursor_y;
 
     if (!(s->regs.crtc_gen_cntl & CRTC2_CUR_EN) ||
-        scr_y < vga->hw_cursor_y || scr_y >= vga->hw_cursor_y + 64 ||
+        row < 0 || row >= 64 ||
         scr_y > s->regs.crtc_v_total_disp >> 16) {
         return;
     }
-    /* FIXME handle cur_hv_offs correctly */
-    srcoff = s->cursor_offset + (scr_y - vga->hw_cursor_y) * 16;
+    /*
+     * CUR_HORZ_VERT_OFF crops the 64x64 image down to the pointer, exactly as
+     * ati_cursor_define() does for the host-overlay path: the high half skips
+     * that many leading columns (shift the row left, padding transparent) and
+     * the low half shortens the image to 64 - voff lines.  Without this the
+     * opaque-black padding quadrant (AND=0, XOR=0) is drawn as a black box
+     * beside the pointer.
+     */
+    if ((unsigned)row + voff >= 64) {
+        return; /* padding row past the cropped image: fully transparent */
+    }
+    srcoff = (s->regs.cur_offset & 0x07fffff0) + row * 16;
     if (srcoff > s->vga.vram_size - 16) {
         return;
     }
@@ -239,6 +252,10 @@ static void ati_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
     h = ((s->regs.crtc_h_total_disp >> 16) + 1) * 8;
     abits = ldq_be_p(&vga->vram_ptr[srcoff]);
     xbits = ldq_be_p(&vga->vram_ptr[srcoff + 8]);
+    if (hoff) {
+        abits = (abits << hoff) | ((1ULL << hoff) - 1);
+        xbits <<= hoff;
+    }
     mask = BIT_ULL(63);
     for (int i = 0; i < 64; i++, mask >>= 1) {
         if (vga->hw_cursor_x + i >= h) {

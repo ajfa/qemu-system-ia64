@@ -1606,6 +1606,17 @@ static const IA64VpcCompatDefault ia64_vpc_compat_defaults[] = {
     { "usb-kbd", "msos-desc", "off" },
     { "usb-mouse", "msos-desc", "off" },
     { "usb-tablet", "msos-desc", "off" },
+    /*
+     * Render the RAGE 128 hardware cursor into the framebuffer rather than as
+     * a host overlay.  The chip has no hotspot register -- the driver bakes the
+     * hotspot into CUR_HORZ_VERT_POSN/_OFF -- so a host overlay (which needs an
+     * explicit hotspot) cannot place arbitrary cursors correctly: Windows XP
+     * drives the hardware cursor at 8bpp and the overlay landed ~10px off, and
+     * a per-cursor hotspot guess only works for the arrow, not centre-hotspot
+     * cursors (I-beam, hourglass).  Compositing reproduces the exact hardware
+     * pixels at the exact hardware position, so every cursor type is correct.
+     */
+    { "ati-vga", "guest_hwcursor", "on" },
 };
 
 static void ia64_vpc_add_compat_defaults(MachineClass *mc)
