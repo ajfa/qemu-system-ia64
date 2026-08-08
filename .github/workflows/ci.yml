@@ -102,20 +102,12 @@ jobs:
           ccache -s
 
       - name: Run ia64 regression gate
+        # Includes the ATI Rage 128 device tests (qtest-ia64/ia64-vpc-test);
+        # --print-errorlogs prints the failing test's TAP path on a regression.
         run: >
           build/pyvenv/bin/meson test -C build
           --suite ia64 --suite qtest-ia64
           --print-errorlogs -t 2
-
-      - name: Run ATI RAGE 128 device tests
-        # These also run inside the gate above (they live in
-        # qtest-ia64/ia64-vpc-test), but this focused invocation makes a GPU
-        # model regression - PLL file, DAC load-sense, MM_INDEX indirection,
-        # the ROM-BAR ATI tables, or the 2D/24bpp fill path - immediately
-        # attributable in the CI log instead of buried in the full suite.
-        run: >
-          QTEST_QEMU_BINARY=build/qemu-system-ia64
-          build/tests/qtest/ia64-vpc-test -p /ia64/ia64-vpc/ati
 
       - name: Run ia64 EFI functional suite
         run: >
