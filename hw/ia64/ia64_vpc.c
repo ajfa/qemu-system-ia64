@@ -2676,7 +2676,6 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
 {
     IA64VpcMachineState *s = container_of(notifier, IA64VpcMachineState,
                                           done_notifier);
-    MachineState *machine = MACHINE(s);
     g_autofree uint8_t *image = NULL;
     IA64FirmwareEntrypoint entrypoint;
     CPUState *cs;
