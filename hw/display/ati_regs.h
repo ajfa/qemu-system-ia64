@@ -368,9 +368,11 @@
 #define DAC_MASK                                0xFF000000
 #define DAC_BLANKING                            0x00000004
 #define DAC_RANGE_CNTL                          0x00000003
+#define DAC_CMP_EN                              0x00000008 /* enable load-sense comparator */
 #define DAC_CLK_SEL                             0x00000010
 #define DAC_PALETTE_ACCESS_CNTL                 0x00000020
 #define DAC_PALETTE2_SNOOP_EN                   0x00000040
+#define DAC_CMP_OUTPUT                          0x00000080 /* R: 1 = CRT load sensed (RRG) */
 #define DAC_PDWN                                0x00008000
 
 /* CRTC_EXT_CNTL */

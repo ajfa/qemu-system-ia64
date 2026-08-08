@@ -1035,6 +1035,16 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         break;
     case DAC_CNTL:
         val = s->regs.dac_cntl;
+        /*
+         * DAC load-sense: with the comparator enabled, DAC_CMP_OUTPUT (bit 7)
+         * reads 1 when the RGB DAC outputs are terminated, i.e. a CRT is
+         * connected (RRG DAC_CNTL, and radeon/r128 CRT detection treat
+         * DAC_CMP_OUTPUT set as "connected").  This model always presents a
+         * connected CRT so the driver's monitor-detection succeeds.
+         */
+        if (val & DAC_CMP_EN) {
+            val |= DAC_CMP_OUTPUT;
+        }
         break;
     case GPIO_VGA_DDC ... GPIO_VGA_DDC + 3:
         val = ati_reg_read_offs(s->regs.gpio_vga_ddc,
