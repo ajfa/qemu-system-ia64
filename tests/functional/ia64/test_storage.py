@@ -95,6 +95,52 @@ class Ia64Storage(Ia64FirmwareTest):
                              if mode == "pio" else ""),
             drive_args=drive_args, ide_mode=mode)
 
+    def run_ide_machine(self, *, secondary=False):
+        """The ide=on machine option with an auto-attached if=ide disk.
+
+        index 0 lands on the primary master, index 2 on the secondary master,
+        exercising the built-in CMD646 in slot 0 and both channels.
+        """
+        app = app_path("storage")
+        where = "secondary" if secondary else "primary"
+        index = 2 if secondary else 0
+        media = Path(self.scratch_file(f"ide-machine-{where}.img"))
+        make_fat_disk(media, app)
+        drive_args = (
+            "-drive", f"file={media},format=raw,if=ide,index={index}",
+        )
+        self.run_scenario(
+            f"ide-machine-{where}", media, machine_options="ide=on",
+            drive_args=drive_args)
+
+    def run_ide_optical(self, *, secondary=False, shadow_disk=False):
+        """El Torito boot from an IDE ATAPI CD via the ide=on machine option.
+
+        With shadow_disk, a plain data disk sits on the primary master so the
+        test also proves a non-bootable disk does not shadow the bootable CD
+        elsewhere on the IDE bus (the boot-device selection fix).
+        """
+        where = "secondary" if secondary else "primary"
+        tag = f"ide-eltorito-{where}" + ("-shadowed" if shadow_disk else "")
+        media = Path(self.scratch_file(tag + ".iso"))
+        make_el_torito_iso(media, app_path("storage"), platform_id=0xEF)
+        # CD on the secondary master (index 2) or the primary slave (index 1).
+        cd_index = 2 if secondary else 1
+        drive_args = [
+            "-drive",
+            f"file={media},format=raw,if=ide,index={cd_index},"
+            "media=cdrom,readonly=on",
+        ]
+        if shadow_disk:
+            disk = Path(self.scratch_file(tag + "-disk.img"))
+            make_fat_disk(disk, app_path("storage"))
+            drive_args = [
+                "-drive", f"file={disk},format=raw,if=ide,index=0",
+            ] + drive_args
+        self.run_scenario(
+            tag, media, optical=True, machine_options="ide=on",
+            drive_args=tuple(drive_args))
+
     def run_ahci(self):
         app = app_path("storage")
         media = Path(self.scratch_file("ahci.img"))
@@ -106,7 +152,7 @@ class Ia64Storage(Ia64FirmwareTest):
             "-drive", f"file={media},format=raw,if=ide,index=0",
         )
         self.run_scenario(
-            "ahci", media, drive_args=drive_args,
+            "ahci", media, drive_args=drive_args, machine_options="ahci=on",
             required_cases=("logical-partition-handle",
                             "short-form-hard-drive-path",
                             "partition-driver-contracts"))
@@ -135,6 +181,7 @@ class Ia64Storage(Ia64FirmwareTest):
             raise ValueError(f"unknown empty-media transport: {transport}")
         self.run_scenario(
             f"{transport}-empty-cd", media, drive_args=tuple(drive_args),
+            machine_options="ahci=on" if transport == "ahci" else "",
             required_cases=("empty-removable-media",))
 
     def run_optical(self, name, builder, *, udf=False):
@@ -164,6 +211,18 @@ class Ia64Storage(Ia64FirmwareTest):
 
     def test_cmd646_ide_pio(self):
         self.run_ide("pio")
+
+    def test_ide_machine_option(self):
+        self.run_ide_machine()
+
+    def test_ide_machine_secondary_channel(self):
+        self.run_ide_machine(secondary=True)
+
+    def test_ide_el_torito_boot(self):
+        self.run_ide_optical(shadow_disk=True)
+
+    def test_ide_el_torito_boot_secondary(self):
+        self.run_ide_optical(secondary=True)
 
     def test_ahci(self):
         self.run_ahci()

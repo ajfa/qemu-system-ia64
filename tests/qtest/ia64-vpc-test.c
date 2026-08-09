@@ -939,16 +939,35 @@ static void test_ahci_off(void)
     qtest_quit(qts);
 }
 
-static void test_ahci_on_default(void)
+/*
+ * AHCI is opt-in (ahci=on): the controller then appears at 0:1.0 with its
+ * fixed BARs and INTx line.  It is absent from the default machine (see
+ * test_ahci_off_default) because Windows IA-64 ships no SATA driver.
+ */
+static void test_ahci_on(void)
+{
+    static const ExpectedPCIDevice ahci_dev = {
+        .slot = 1, .vendor = 0x8086, .device = 0x2922,
+        .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
+        .irq_line = 17, .irq_pin = 1,
+        .bars = { [4] = 0x0000c101, [5] = 0xc1020000 },
+    };
+    QTestState *qts = ia64_vpc_start("-machine ahci=on");
+    QGenericPCIBus gbus;
+
+    ia64_qpci_init(&gbus, qts);
+    assert_pci_device(&gbus.bus, &ahci_dev);
+    qtest_quit(qts);
+}
+
+/* The default machine has no AHCI controller: slot 1 is empty. */
+static void test_ahci_off_default(void)
 {
     QTestState *qts = ia64_vpc_start(NULL);
     QGenericPCIBus gbus;
-    QPCIDevice *ahci;
 
     ia64_qpci_init(&gbus, qts);
-    ahci = qpci_device_find(&gbus.bus, QPCI_DEVFN(1, 0));
-    g_assert_nonnull(ahci);
-    g_free(ahci);
+    g_assert_null(qpci_device_find(&gbus.bus, QPCI_DEVFN(1, 0)));
     qtest_quit(qts);
 }
 
@@ -956,12 +975,6 @@ static void test_pci_default_layout(void)
 {
     static const ExpectedPCIDevice devices[] = {
         {
-            .slot = 1, .vendor = 0x8086, .device = 0x2922,
-            .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
-                       PCI_COMMAND_MASTER,
-            .irq_line = 17, .irq_pin = 1,
-            .bars = { [4] = 0x0000c101, [5] = 0xc1020000 },
-        }, {
             .slot = 2, .vendor = 0x106b, .device = 0x003f,
             .command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
             .irq_line = 18, .irq_pin = 1,
@@ -997,11 +1010,13 @@ static void test_pci_default_layout(void)
     unsigned i;
 
     ia64_qpci_init(&gbus, qts);
+    /* Slot 0 (IDE, ide=on) and slot 1 (AHCI, ahci=on) are empty by default. */
     for (i = 0; i < 8; i++) {
         QPCIDevice *empty = qpci_device_find(&gbus.bus, QPCI_DEVFN(0, i));
 
         g_assert_null(empty);
     }
+    g_assert_null(qpci_device_find(&gbus.bus, QPCI_DEVFN(1, 0)));
     for (i = 0; i < ARRAY_SIZE(devices); i++) {
         assert_pci_device(&gbus.bus, &devices[i]);
     }
@@ -1190,10 +1205,8 @@ static void test_e1000_packet_transfer(void)
     close(sockets[0]);
 }
 
-static void test_pci_explicit_cmd646_slot0(void)
+static void assert_cmd646_at_slot0(QTestState *qts)
 {
-    QTestState *qts = ia64_vpc_start(
-        "-device cmd646-ide,secondary=1,addr=0");
     QGenericPCIBus gbus;
     QPCIDevice *dev;
 
@@ -1206,6 +1219,17 @@ static void test_pci_explicit_cmd646_slot0(void)
                     PCI_CLASS_STORAGE_IDE);
     g_free(dev);
     qtest_quit(qts);
+}
+
+static void test_pci_explicit_cmd646_slot0(void)
+{
+    assert_cmd646_at_slot0(ia64_vpc_start("-device cmd646-ide,secondary=1,addr=0"));
+}
+
+/* The ide=on machine option instantiates the same CMD646 at slot 0. */
+static void test_ide_on_slot0(void)
+{
+    assert_cmd646_at_slot0(ia64_vpc_start("-machine ide=on"));
 }
 
 static void lsi_write_script_insn(QTestState *qts, uint32_t *addr,
@@ -2396,7 +2420,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/firmware-handoff/defaults",
                    test_firmware_handoff_defaults);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);
-    qtest_add_func("/ia64-vpc/ahci/on-default", test_ahci_on_default);
+    qtest_add_func("/ia64-vpc/ahci/off-default", test_ahci_off_default);
+    qtest_add_func("/ia64-vpc/ahci/on", test_ahci_on);
     qtest_add_func("/ia64-vpc/cpu/merced", test_cpu_merced);
     qtest_add_func("/ia64-vpc/cpu/itanium-alias", test_cpu_itanium_alias);
     qtest_add_func("/ia64-vpc/firmware-handoff/i8042-off",
@@ -2432,6 +2457,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/default-layout", test_pci_default_layout);
     qtest_add_func("/ia64-vpc/pci/explicit-cmd646-slot0",
                    test_pci_explicit_cmd646_slot0);
+    qtest_add_func("/ia64-vpc/pci/ide-on-slot0", test_ide_on_slot0);
     qtest_add_func("/ia64-vpc/network/resources-survive-reset",
                    test_e1000_resources_survive_reset);
     qtest_add_func("/ia64-vpc/network/intx-route",

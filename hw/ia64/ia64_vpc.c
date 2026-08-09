@@ -30,6 +30,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/ide/ahci-pci.h"
 #include "hw/ide/ide-dev.h"
+#include "hw/ide/pci.h"
 #include "hw/input/i8042.h"
 #include "hw/acpi/acpi.h"
 #include "hw/pci/pci.h"
@@ -377,12 +378,14 @@ struct IA64VpcMachineState {
 
     bool i8042_enabled;
     bool ahci_enabled;
+    bool ide_enabled;
     bool firmware_ide_dma;
     uint64_t firmware_console;
     char *nvram_path;
     bool alat_full;
 
     PCIDevice *ahci_dev;
+    PCIDevice *ide_dev;
     PCIDevice *ohci_dev;
     PCIDevice *uhci_dev;
     PCIDevice *lsi_dev;
@@ -1684,6 +1687,31 @@ static void ia64_vpc_set_ahci(Object *obj, bool value, Error **errp)
     s->ahci_enabled = value;
 }
 
+static bool ia64_vpc_get_ide(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->ide_enabled;
+}
+
+static void ia64_vpc_set_ide(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+#ifndef CONFIG_IA64_VPC_STORAGE
+    if (value) {
+        error_setg(errp, "IDE support is not present in this build");
+        return;
+    }
+#else
+    (void)errp;
+#endif
+
+    s->ide_enabled = value;
+}
+
 static bool ia64_vpc_get_firmware_ide_dma(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -2497,6 +2525,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
         ia64_vpc_configure_nic(s->nic_devs[i], i);
     }
     ia64_vpc_configure_pci_irq(s->ahci_dev);
+    ia64_vpc_configure_pci_irq(s->ide_dev);
     ia64_vpc_configure_pci_irq(s->ohci_dev);
     ia64_vpc_configure_pci_irq(s->uhci_dev);
     ia64_vpc_configure_pci_irq(s->lsi_dev);
@@ -2989,8 +3018,16 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         ia64_vpc_configure_ahci(s->ahci_dev);
         ahci = ICH9_AHCI(s->ahci_dev);
         g_assert(ahci->ahci.ports <= ARRAY_SIZE(sata_drives));
-        ide_drive_get(sata_drives, ahci->ahci.ports);
-        ahci_ide_create_devs(&ahci->ahci, sata_drives);
+        /*
+         * The AHCI ports and the cmd646 IDE controller both present an ATA
+         * "if=ide" bus.  When ide=on the CMD646 owns those drives (below), so
+         * only bind if=ide media to SATA when IDE is not the active owner;
+         * a user can still attach disks to this controller explicitly.
+         */
+        if (!s->ide_enabled) {
+            ide_drive_get(sata_drives, ahci->ahci.ports);
+            ahci_ide_create_devs(&ahci->ahci, sata_drives);
+        }
     } else {
         pci_bus_set_slot_reserved_mask(pci_bus, 1U << 1);
     }
@@ -3046,6 +3083,27 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
     pci_bus_clear_slot_reserved_mask(pci_bus, (1U << 0) | (1U << 1));
 
+    /*
+     * With ide=on, populate the reserved slot 0 with a dual-channel CMD646
+     * PCI IDE controller.  Slot 0 is the platform-anticipated home for IDE:
+     * the firmware's fixed PCI-I/O table and the DSDT _PRT both describe an
+     * IDE function there, and it keeps every other device's BDF stable.  The
+     * firmware assigns the controller's I/O BARs on demand, exactly as for a
+     * hand-attached -device cmd646-ide.  secondary=1 enables both channels;
+     * pci_ide_create_devs() auto-binds any if=ide media across them.
+     */
+#ifdef CONFIG_IA64_VPC_STORAGE
+    if (s->ide_enabled) {
+        s->ide_dev = pci_new(PCI_DEVFN(0, 0), "cmd646-ide");
+        qdev_prop_set_uint32(DEVICE(s->ide_dev), "secondary", 1);
+        if (!pci_realize_and_unref(s->ide_dev, pci_bus, errp)) {
+            return false;
+        }
+        ia64_vpc_configure_pci_irq(s->ide_dev);
+        pci_ide_create_devs(s->ide_dev);
+    }
+#endif
+
     s->powerdown_notifier.notify = ia64_vpc_powerdown_req;
     qemu_register_powerdown_notifier(&s->powerdown_notifier);
 
@@ -3078,7 +3136,15 @@ static void ia64_vpc_machine_instance_init(Object *obj)
     s->i8042_enabled = true;
 #endif
 #ifdef CONFIG_IA64_VPC_STORAGE
-    s->ahci_enabled = true;
+    /*
+     * Default the SATA controller off: Windows XP/2003 IA-64 ship no inbox
+     * AHCI driver and otherwise see an unidentified PCI device, so the guest
+     * that most wants storage is better served booting off the LSI SCSI HBA.
+     * Re-enable with ahci=on for SATA-aware guests.  IDE (cmd646) is likewise
+     * opt-in via ide=on.
+     */
+    s->ahci_enabled = false;
+    s->ide_enabled = false;
     s->firmware_ide_dma = true;
 #endif
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -3148,8 +3214,15 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_get_ahci,
                                    ia64_vpc_set_ahci);
     object_class_property_set_description(oc, "ahci",
-        "Set on/off to enable/disable the AHCI SATA controller "
-        "(off removes the PCI device some guests lack a driver for)");
+        "Set on/off to enable/disable the AHCI SATA controller (default off; "
+        "on adds a PCI device that guests without a SATA driver cannot use)");
+    object_class_property_add_bool(oc, "ide",
+                                   ia64_vpc_get_ide,
+                                   ia64_vpc_set_ide);
+    object_class_property_set_description(oc, "ide",
+        "Set on/off to enable/disable the CMD646 PCI IDE controller "
+        "(default off; on adds a dual-channel ATA/ATAPI controller in slot 0 "
+        "and auto-attaches if=ide drives)");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,
                                    ia64_vpc_set_firmware_ide_dma);
