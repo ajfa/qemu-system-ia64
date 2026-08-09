@@ -193,6 +193,10 @@
 #define BRUSH_Y_X                               0x1474
 #define DP_BRUSH_BKGD_CLR                       0x1478
 #define DP_BRUSH_FRGD_CLR                       0x147c
+#define BRUSH_DATA0                             0x1480
+#define BRUSH_DATA1                             0x1484
+#define DST_LINE_START                          0x1600
+#define DST_LINE_END                            0x1604
 #define DST_WIDTH_X                             0x1588
 #define DST_HEIGHT_WIDTH_8                      0x158c
 #define SRC_X_Y                                 0x1590
@@ -364,9 +368,11 @@
 #define DAC_MASK                                0xFF000000
 #define DAC_BLANKING                            0x00000004
 #define DAC_RANGE_CNTL                          0x00000003
+#define DAC_CMP_EN                              0x00000008 /* enable load-sense comparator */
 #define DAC_CLK_SEL                             0x00000010
 #define DAC_PALETTE_ACCESS_CNTL                 0x00000020
 #define DAC_PALETTE2_SNOOP_EN                   0x00000040
+#define DAC_CMP_OUTPUT                          0x00000080 /* R: 1 = CRT load sensed (RRG) */
 #define DAC_PDWN                                0x00008000
 
 /* CRTC_EXT_CNTL */

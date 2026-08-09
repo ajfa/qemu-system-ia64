@@ -105,7 +105,13 @@
 #define IA64_VGA_LEGACY_SIZE   0x00020000U
 #ifdef CONFIG_IA64_VPC_GRAPHICS
 #define IA64_INT10_ROM_BASE     0x000c0000U
-#define IA64_INT10_ROM_SIZE     0x00000200U
+/*
+ * At least 2 KB: the XP inbox Rage 128 miniport validates the option ROM's
+ * size byte and rejects images smaller than 4 x 512 bytes
+ * (.GetVgaEnabledRomImage compares size_byte << 9 against 2048 and logs
+ * event 0xC1010002 UniqueId 26 on failure).
+ */
+#define IA64_INT10_ROM_SIZE     0x00000800U
 /*
  * PCIR sits above the ATI data blocks.  A real Rage 128 Pro BIOS keeps it
  * at 16Ch, well clear of both the ATI ROM signature at 30h and the legacy
@@ -1600,6 +1606,17 @@ static const IA64VpcCompatDefault ia64_vpc_compat_defaults[] = {
     { "usb-kbd", "msos-desc", "off" },
     { "usb-mouse", "msos-desc", "off" },
     { "usb-tablet", "msos-desc", "off" },
+    /*
+     * Render the RAGE 128 hardware cursor into the framebuffer rather than as
+     * a host overlay.  The chip has no hotspot register -- the driver bakes the
+     * hotspot into CUR_HORZ_VERT_POSN/_OFF -- so a host overlay (which needs an
+     * explicit hotspot) cannot place arbitrary cursors correctly: Windows XP
+     * drives the hardware cursor at 8bpp and the overlay landed ~10px off, and
+     * a per-cursor hotspot guess only works for the arrow, not centre-hotspot
+     * cursors (I-beam, hourglass).  Compositing reproduces the exact hardware
+     * pixels at the exact hardware position, so every cursor type is correct.
+     */
+    { "ati-vga", "guest_hwcursor", "on" },
 };
 
 static void ia64_vpc_add_compat_defaults(MachineClass *mc)
@@ -2302,6 +2319,16 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
     if (pcir != 0 && pcir + 0x18U <= declared &&
         memcmp(rom + pcir, "PCIR", 4) == 0) {
         stw_le_p(rom + pcir + 0x10, declared / 512U);
+        /*
+         * The shipped image is a SeaVGABIOS build whose PCIR data structure
+         * still advertises 1002:5159 (Radeon RV100).  EFI 1.10 §12.4 requires
+         * the PCIR vendor/device ID to match the adapter's configuration
+         * header, and a driver that validates the ROM against the device it
+         * bound to will reject an image belonging to another chip.  We only
+         * get here when the header really is 1002:5046, so restate that.
+         */
+        stw_le_p(rom + pcir + 0x04, IA64_ATI_VENDOR_ID);
+        stw_le_p(rom + pcir + 0x06, IA64_ATI_RAGE128_PF_ID);
     }
     rom[declared - 1] = 0;
     for (i = 0; i < declared - 1U; i++) {
@@ -2315,6 +2342,17 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
     if (pci_dev == NULL) {
         return;
     }
+
+    /*
+     * QEMU's generic 1af4:1100 subsystem ID is not a value this chip can
+     * report.  A Rage 128 loads the subsystem ID from the video BIOS on an
+     * add-in card; with none loaded the documented hardware fallback is
+     * SVID = vendor, SID = device (RAGE 128 PRO Register Reference Guide,
+     * configuration space chapter).  Drivers index board tables by it.
+     */
+    pci_set_word(pci_dev->config + PCI_SUBSYSTEM_VENDOR_ID,
+                 IA64_ATI_VENDOR_ID);
+    pci_set_word(pci_dev->config + PCI_SUBSYSTEM_ID, IA64_ATI_RAGE128_PF_ID);
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
                              IA64_VGA_FB_PCI_BASE, 4);
@@ -2335,10 +2373,46 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
      */
     if (pci_dev->io_regions[PCI_ROM_SLOT].size != 0) {
         ia64_vpc_install_ati_rom_tables(pci_dev);
+        /*
+         * Assign the ROM BAR but leave its enable bit CLEAR.  With the bit
+         * set at enumeration time, Windows' pci.sys generates a fourth
+         * memory resource for the devnode (busdrv/pci device.c/enum.c), and
+         * XP's inbox Rage 128 miniport calls VideoPortGetAccessRanges with a
+         * three-entry array: videoprt's copy loop filters only legacy VGA
+         * ranges, so the ROM range overflows the array and the call fails
+         * with ERROR_MORE_DATA - silently, no event log - and HwFindAdapter
+         * returns 234 (captured live: VideoPortGetAccessRanges RVA 0x33180
+         * -> ati2mpaa .GetResources -> .FindAdapter -> Code 10).
+         *
+         * Readers of the ROM image do not need the bit set at handoff:
+         * videoprt/pci.sys enable ROM decode transiently around
+         * VideoPortGetRomImage (busdrv/pci romimage.c), which is how build
+         * 2462's miniport reads the BIOS tables through BAR6.
+         */
         pci_default_write_config(pci_dev, PCI_ROM_ADDRESS,
-                                 IA64_VGA_ROM_PCI_BASE |
-                                 PCI_ROM_ADDRESS_ENABLE, 4);
+                                 IA64_VGA_ROM_PCI_BASE, 4);
     }
+    /*
+     * Both decodes on.  Windows XP's inbox Rage 128 miniport branches on
+     * (Command & 3) == 3 in .GetResources (ati2mpaa.sys VMA 0x9375c) and only
+     * then treats itself as the VGA device, so it is tempting to advertise
+     * something else and take the "VGA disabled" path, which claims no legacy
+     * VGA resources and reads the video BIOS from the ROM BAR instead of from
+     * the 0xC0000 shadow (which this machine does provide - see
+     * ia64_vpc_install_int10()).
+     *
+     * That does not work, and the reason is worth recording so it is not
+     * retried: the miniport claims all three BARs as access ranges, and BAR1
+     * is an I/O BAR.  videoprt's CheckIoEnabled (WSRV03 drivers/video/ms/port/
+     * registry.c:2114) walks the claimed ranges and fails the whole call if a
+     * RangeInIoSpace range is claimed while PCI_ENABLE_IO_SPACE is clear -
+     * or, symmetrically, a memory range while PCI_ENABLE_MEMORY_SPACE is
+     * clear.  VideoPortVerifyAccessRanges then returns ERROR_INVALID_PARAMETER
+     * (registry.c:1966) *silently*, with no event logged, and the device stops
+     * with Code 10 before touching a single register.  Any Command value that
+     * satisfies CheckIoEnabled for a device with both I/O and memory BARs is
+     * therefore exactly 3, which is also what real hardware presents.
+     */
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY, 2);
 

@@ -102,6 +102,8 @@ jobs:
           ccache -s
 
       - name: Run ia64 regression gate
+        # Includes the ATI Rage 128 device tests (qtest-ia64/ia64-vpc-test);
+        # --print-errorlogs prints the failing test's TAP path on a regression.
         run: >
           build/pyvenv/bin/meson test -C build
           --suite ia64 --suite qtest-ia64

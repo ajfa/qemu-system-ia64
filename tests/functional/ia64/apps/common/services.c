@@ -2001,12 +2001,20 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                 get_u16(descriptor + 14U) == 256U) {
                 bus = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
-                       descriptor[3] == 1U &&
+                       descriptor[3] == 1U && descriptor[5] == 0x33U &&
                        get_u64(descriptor + 6U) == 0 &&
                        get_u64(descriptor + 14U) == 0 &&
-                       get_u64(descriptor + 22U) == 0xffffffU &&
-                       get_u64(descriptor + 30U) == 0 &&
-                       get_u64(descriptor + 38U) == 0x1000000U) {
+                       get_u64(descriptor + 22U) == 0xffffU &&
+                       get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
+                       get_u64(descriptor + 38U) == 0x10000U) {
+                /*
+                 * Architectural 64 KB I/O window with a sparse translation
+                 * (_TTP|_TRS, type flags 0x33; _TRA = the memory-mapped port
+                 * window base).  The producer window shrank from 16 MB and
+                 * gained the sparse translation in 48321d4 so Windows' PnP I/O
+                 * arbiter can no longer rebalance the display adapter's I/O BAR
+                 * past the decodable range.
+                 */
                 io = 1;
             } else if (descriptor[0] == 0x87U && length == 23U &&
                        descriptor[3] == 0U &&

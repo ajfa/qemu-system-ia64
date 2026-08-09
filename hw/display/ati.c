@@ -143,19 +143,42 @@ static void ati_cursor_define(ATIVGAState *s)
 {
     uint64_t data[128];
     uint32_t srcoff;
+    unsigned hoff, voff;
 
     if ((s->regs.cur_offset & BIT(31)) || s->cursor_guest_mode) {
         return; /* Do not update cursor if locked or rendered by guest */
     }
-    /* FIXME handle cur_hv_offs correctly */
-    srcoff = (s->regs.cur_offset & 0x07fffff0) - (s->regs.cur_hv_offs >> 16) -
-             (s->regs.cur_hv_offs & 0xffff) * 16;
+    /*
+     * CUR_HORZ_VERT_OFF crops the 64x64 image down to the pointer the guest
+     * actually wants to show: the high half skips that many leading columns
+     * and the low half shortens it to 64 - v lines.  Measured against the XP
+     * driver, which stores a 32x32 pointer in the top-right quadrant and
+     * programs (32, 32): its unused left half is AND=0 XOR=0, i.e. *opaque
+     * black*, so failing to crop paints a black square over the screen.  The
+     * cropped-away part is padded transparent (AND=1, XOR=0).
+     */
+    hoff = (s->regs.cur_hv_offs >> 16) & 0x3f;
+    voff = s->regs.cur_hv_offs & 0x3f;
+    srcoff = s->regs.cur_offset & 0x07fffff0;
     if (srcoff > s->vga.vram_size - 64 * 16) {
         return;
     }
-    for (int i = 0; i < 64; i++, srcoff += 16) {
-        data[i] = ldq_le_p(&s->vga.vram_ptr[srcoff]);
-        data[i + 64] = ldq_le_p(&s->vga.vram_ptr[srcoff + 8]);
+    for (unsigned i = 0; i < 64; i++) {
+        uint64_t and_row = ~0ULL, xor_row = 0;
+
+        if (i + voff < 64) {
+            const uint8_t *src = &s->vga.vram_ptr[srcoff + i * 16];
+
+            /* Bit 7 of byte 0 is the leftmost pixel: shift big-endian. */
+            and_row = ldq_be_p(src);
+            xor_row = ldq_be_p(src + 8);
+            if (hoff) {
+                and_row = (and_row << hoff) | ((1ULL << hoff) - 1);
+                xor_row <<= hoff;
+            }
+        }
+        stq_be_p(&data[i], and_row);
+        stq_be_p(&data[i + 64], xor_row);
     }
     if (!s->cursor) {
         s->cursor = cursor_alloc(64, 64);
@@ -201,14 +224,27 @@ static void ati_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
     uint32_t h, srcoff, color;
     uint64_t abits, xbits, mask;
     uint32_t *dp = (uint32_t *)d;
+    unsigned hoff = (s->regs.cur_hv_offs >> 16) & 0x3f;
+    unsigned voff = s->regs.cur_hv_offs & 0x3f;
+    int row = scr_y - vga->hw_cursor_y;
 
     if (!(s->regs.crtc_gen_cntl & CRTC2_CUR_EN) ||
-        scr_y < vga->hw_cursor_y || scr_y >= vga->hw_cursor_y + 64 ||
+        row < 0 || row >= 64 ||
         scr_y > s->regs.crtc_v_total_disp >> 16) {
         return;
     }
-    /* FIXME handle cur_hv_offs correctly */
-    srcoff = s->cursor_offset + (scr_y - vga->hw_cursor_y) * 16;
+    /*
+     * CUR_HORZ_VERT_OFF crops the 64x64 image down to the pointer, exactly as
+     * ati_cursor_define() does for the host-overlay path: the high half skips
+     * that many leading columns (shift the row left, padding transparent) and
+     * the low half shortens the image to 64 - voff lines.  Without this the
+     * opaque-black padding quadrant (AND=0, XOR=0) is drawn as a black box
+     * beside the pointer.
+     */
+    if ((unsigned)row + voff >= 64) {
+        return; /* padding row past the cropped image: fully transparent */
+    }
+    srcoff = (s->regs.cur_offset & 0x07fffff0) + row * 16;
     if (srcoff > s->vga.vram_size - 16) {
         return;
     }
@@ -216,6 +252,10 @@ static void ati_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
     h = ((s->regs.crtc_h_total_disp >> 16) + 1) * 8;
     abits = ldq_be_p(&vga->vram_ptr[srcoff]);
     xbits = ldq_be_p(&vga->vram_ptr[srcoff + 8]);
+    if (hoff) {
+        abits = (abits << hoff) | ((1ULL << hoff) - 1);
+        xbits <<= hoff;
+    }
     mask = BIT_ULL(63);
     for (int i = 0; i < 64; i++, mask >>= 1) {
         if (vga->hw_cursor_x + i >= h) {
@@ -268,6 +308,44 @@ static void ati_vga_vblank_irq(void *opaque)
     ati_vga_update_irq(s);
 }
 
+/*
+ * Synthetic CRTC raster timing, derived from virtual time: a fixed 60 Hz
+ * frame of 525 lines with the last 45 in vertical blank (VGA-ish 480-line
+ * visible raster).  Drivers poll these instead of taking the vblank
+ * interrupt: XP's ati2draa spins on CRTC_STATUS (0x5C) waiting for the
+ * vblank bits to change, and a constant readback becomes bugcheck 0xEA.
+ */
+#define ATI_FRAME_NS   (NANOSECONDS_PER_SECOND / 60)
+#define ATI_FRAME_LINES 525
+#define ATI_VISIBLE_LINES 480
+
+static uint64_t ati_crtc_frame_count(void)
+{
+    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / ATI_FRAME_NS;
+}
+
+static uint32_t ati_crtc_current_line(void)
+{
+    uint64_t in_frame = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) % ATI_FRAME_NS;
+
+    return in_frame * ATI_FRAME_LINES / ATI_FRAME_NS;
+}
+
+static uint32_t ati_crtc_status(ATIVGAState *s)
+{
+    uint32_t val = 0;
+
+    /* bit 0: currently inside vertical blank */
+    if (ati_crtc_current_line() >= ATI_VISIBLE_LINES) {
+        val |= 1;
+    }
+    /* bit 1: a vblank happened since it was last acknowledged (W1C) */
+    if ((uint32_t)ati_crtc_frame_count() != s->regs.crtc_vblank_ack_frame) {
+        val |= 2;
+    }
+    return val;
+}
+
 static inline uint32_t ati_reg_read_offs(uint32_t reg, int offs,
                                          unsigned int size)
 {
@@ -278,14 +356,632 @@ static inline uint32_t ati_reg_read_offs(uint32_t reg, int offs,
     }
 }
 
+/*
+ * Registers the XP inbox Rage 128 miniport programs during HwFindAdapter /
+ * HwInitialize that carry no device-visible behaviour we model yet.  They
+ * must store writes and read them back (the driver programs the memory
+ * controller and PLL and verifies by readback); silently dropping the
+ * writes made the init fail.  Offsets and reset values follow the RAGE 128
+ * PRO Register Reference Guide.
+ */
+static const uint16_t ati_init_aux_offs[] = {
+    0x0030, /* BUS_CNTL          */
+    0x0034, /* BUS_CNTL1         */
+    0x00f0, /* GEN_RESET_CNTL    */
+    0x0120, 0x0124, 0x0128,
+    0x0130, /* HOST_PATH_CNTL    */
+    0x0140, /* MEM_CNTL          */
+    0x0144, /* EXT_MEM_CNTL      */
+    0x0148, /* MEM_ADDR_CONFIG   */
+    0x014c, /* MEM_INTF_CNTL     */
+    0x0150, /* MEM_STR_CNTL      */
+    0x0154, /* MEM_INIT_LAT_TIMER */
+    0x0158, /* MEM_SDRAM_MODE_REG */
+    0x0168, /* PAD_CTLR_STRENGTH */
+    0x0170, /* AGP_BASE          */
+    0x0174, /* AGP_CNTL          */
+    0x0180, /* PC_NGUI_MODE      */
+    0x0184, /* PC_NGUI_CTLSTAT   */
+    0x017c, /* PCI_GART_PAGE     */
+    0x02e0, 0x02e4, 0x02e8, 0x02ec, /* BIOS header scratch group */
+    0x0700, /* PM4_BUFFER_OFFSET  */
+    0x0704, /* PM4_BUFFER_CNTL    */
+    0x0708, /* PM4_BUFFER_WM_CTL  */
+    0x070c, /* PM4_BUFFER_DL_RPTR_ADDR */
+    0x07d4, /* PM4_MICRO_CNTL     */
+    0x07dc, /* PM4_MICROCODE_ADDR */
+    0x07e0, /* PM4_MICRODE_DATAH/L group */
+    0x0b00,
+    0x0a18, /* BM_CHUNK_0_VAL (bits 21-23 force bus mastering to PCI) */
+};
+
+static int ati_init_aux_slot(hwaddr addr)
+{
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(ati_init_aux_offs); i++) {
+        if (ati_init_aux_offs[i] == (addr & ~3ULL)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/*
+ * CLOCK_CNTL_INDEX (0x08) / CLOCK_CNTL_DATA (0x0c) indirect PLL file.
+ * Index layout on Rage 128: PLL_ADDR in the low bits (drivers mask 0x1f or
+ * 0x3f), PLL_WR_EN at bit 7, PPLL_DIV_SEL at bits 9:8.  The only handshake
+ * on this chip is PPLL_ATOMIC_UPDATE: bit 15 of PPLL_REF_DIV (0x03) and of
+ * PPLL_DIV_0..3 (0x04..0x07) reads as "update pending" and hardware clears
+ * it when the divider update lands; we complete updates instantly, so those
+ * reads mask bit 15.
+ */
+static uint32_t ati_pll_read(ATIVGAState *s)
+{
+    unsigned idx = s->regs.clock_cntl_index & 0x3f;
+    uint32_t val;
+
+    if (idx >= ARRAY_SIZE(s->regs.pll_regs)) {
+        return 0;
+    }
+    val = s->regs.pll_regs[idx];
+    if (idx >= 0x03 && idx <= 0x07) {
+        val &= ~0x8000u;
+    }
+    return val;
+}
+
+static void ati_mm_write(void *opaque, hwaddr addr, uint64_t data,
+                         unsigned int size);
+
+#define R128_PM4_BUFFER_DL_DONE  (1u << 31)
+
+/*
+ * Concurrent Command Engine ring buffer.
+ *
+ * The XP inbox display driver (ati2draa) and the r128 DRM submit most 2D
+ * work as PM4 packets through a ring buffer in bus-addressable memory:
+ * PM4_BUFFER_OFFSET holds the ring base, PM4_BUFFER_CNTL carries the mode
+ * bits plus log2(ring size in qwords), and PM4_BUFFER_DL_WPTR (a dword
+ * index, bit 31 = "list done" flag) advances the tail.  Type-0/1 packets
+ * are register writes and replay through the ordinary MMIO path, driving
+ * the same blitter the PIO path uses.  Unknown type-3 opcodes are skipped
+ * by their length field.  Packet encodings follow the RAGE 128 PM4
+ * specification as used by XFree86 4.x r128_reg.h and the Linux r128 DRM.
+ */
+/*
+ * PM4 addresses are card "VM space" addresses, not bus addresses.  When the
+ * PCI pseudo-GART is configured (PCI_GART_PAGE points at a page table of
+ * little-endian physical page addresses), ring fetches translate through it:
+ * the XP inbox driver runs the ring at VM offset 0 with the bus-master
+ * force-to-PCI bits set (BM_CHUNK_0_VAL bits 21-23), the r128 DRM addresses
+ * the same window at VM 0x02000000 (R128_AGP_OFFSET).  Without a GART, low
+ * addresses are local video memory.
+ */
+uint32_t ati_cce_vm_dword(ATIVGAState *s, uint32_t vm)
+{
+    int gart_slot = ati_init_aux_slot(0x017c); /* PCI_GART_PAGE */
+    uint32_t gart = gart_slot >= 0 ? s->regs.init_aux[gart_slot] & ~0xfffu : 0;
+    uint32_t le;
+
+    if (gart) {
+        uint32_t off = vm >= 0x02000000 ? vm - 0x02000000 : vm;
+        uint32_t ent;
+
+        pci_dma_read(&s->dev, gart + (off >> 12) * 4, &ent, sizeof(ent));
+        ent = le32_to_cpu(ent);
+        pci_dma_read(&s->dev, (ent & ~0xfffu) | (off & 0xfff), &le,
+                     sizeof(le));
+        return le32_to_cpu(le);
+    }
+    if (vm < s->vga.vram_size - 3) {
+        return ldl_le_p(s->vga.vram_ptr + vm);
+    }
+    pci_dma_read(&s->dev, vm, &le, sizeof(le));
+    return le32_to_cpu(le);
+}
+
+static uint32_t ati_cce_ring_dword(ATIVGAState *s, uint32_t base,
+                                   uint32_t mask, uint32_t idx)
+{
+    return ati_cce_vm_dword(s, base + ((idx & mask) << 2));
+}
+
+/*
+ * Type-3 engine-command packets, as emitted by the XP inbox ati2draa
+ * display driver (measured from a live ring) and the r128 DRM
+ * (Linux 2.4.18 drivers/char/drm/r128_state.c).  Payload dwords are the
+ * values of documented GUI registers, so each packet decomposes into the
+ * same ati_mm_write() sequence a PIO client would issue; the write to the
+ * width/height register fires the blit.
+ *
+ * Layout common to the CNTL ops: DP_GUI_MASTER_CNTL first, and its low
+ * bits announce which state dwords follow: bit 0 = SRC_PITCH_OFFSET,
+ * bit 1 = DST_PITCH_OFFSET, bit 3 = SC_TOP_LEFT + SC_BOTTOM_RIGHT.
+ * The brush field then decides brush colour dwords (solid = one
+ * DP_BRUSH_FRGD_CLR; none = nothing), and the trailing dwords are
+ * per-rectangle coordinates.  NEXT_CHAR carries no GMC at all - it draws
+ * one glyph with the state a preceding HOSTDATA_BLT packet loaded.
+ */
+uint32_t ati_cce_next(ATICCEReader *r)
+{
+    if (r->pos >= r->count) {
+        return 0;
+    }
+    return ati_cce_ring_dword(r->s, r->base, r->mask, r->rptr + r->pos++);
+}
+
+bool ati_cce_has(const ATICCEReader *r, unsigned n)
+{
+    return r->pos + n <= r->count;
+}
+
+static bool ati_cce_gmc_prefix(ATIVGAState *s, ATICCEReader *rd,
+                               uint32_t *gmc_out)
+{
+    uint32_t gmc = ati_cce_next(rd);
+
+    ati_mm_write(s, DP_GUI_MASTER_CNTL, gmc, 4);
+    if (gmc & GMC_SRC_PITCH_OFFSET_CNTL) {
+        ati_mm_write(s, SRC_PITCH_OFFSET, ati_cce_next(rd), 4);
+    }
+    if (gmc & GMC_DST_PITCH_OFFSET_CNTL) {
+        ati_mm_write(s, DST_PITCH_OFFSET, ati_cce_next(rd), 4);
+    }
+    if (gmc & GMC_SRC_CLIPPING) {
+        return false;   /* not emitted by known clients; layout unverified */
+    }
+    if (gmc & GMC_DST_CLIPPING) {
+        ati_mm_write(s, SC_TOP_LEFT, ati_cce_next(rd), 4);
+        ati_mm_write(s, SC_BOTTOM_RIGHT, ati_cce_next(rd), 4);
+    }
+    *gmc_out = gmc;
+    return true;
+}
+
+static void ati_cce_host_data(ATIVGAState *s, ATICCEReader *rd)
+{
+    while (rd->pos < rd->count) {
+        ati_mm_write(s, HOST_DATA0, ati_cce_next(rd), 4);
+    }
+    ati_host_data_finish(s);
+}
+
+/*
+ * Brush-payload dwords after the GMC prefix, by GMC brush type: solid
+ * colour carries DP_BRUSH_FRGD_CLR; 8x8 monochrome patterns carry
+ * background/foreground colours (register-ascending order), the two
+ * pattern dwords and the brush origin; brush "none" carries nothing.
+ */
+static bool ati_cce_paint_brush(ATIVGAState *s, ATICCEReader *rd,
+                                uint32_t gmc)
+{
+    switch ((gmc >> 4) & 0xf) {
+    case 0x0: /* 8x8 mono fg/bg */
+    case 0x1: /* 8x8 mono fg/leave-alone */
+        ati_mm_write(s, DP_BRUSH_BKGD_CLR, ati_cce_next(rd), 4);
+        ati_mm_write(s, DP_BRUSH_FRGD_CLR, ati_cce_next(rd), 4);
+        ati_mm_write(s, BRUSH_DATA0, ati_cce_next(rd), 4);
+        ati_mm_write(s, BRUSH_DATA1, ati_cce_next(rd), 4);
+        ati_mm_write(s, BRUSH_Y_X, ati_cce_next(rd), 4);
+        return true;
+    case 0xd: /* solid colour */
+        ati_mm_write(s, DP_BRUSH_FRGD_CLR, ati_cce_next(rd), 4);
+        return true;
+    case 0xf: /* none */
+        return true;
+    default:  /* 32x32 and colour brush layouts unverified */
+        return false;
+    }
+}
+
+/*
+ * A 2D drawing packet's opcode bit 7 (the "CNTL_" 0x9x form) selects whether
+ * the packet carries a leading SETTINGS block (SDK Table 4-14/4-15): the GUI
+ * control word (DP_GUI_MASTER_CNTL) and its optional SETUP_BODY (pitch/offset,
+ * scissor, brush).  The plain 0x1x form omits SETTINGS and the engine draws
+ * with the already-programmed registers.  The ATI-private glyph-cache blit
+ * 0x28 also carries a SETTINGS block despite bit 7 being clear.
+ *
+ * Returns the effective GUI control word: the one just parsed from the packet
+ * for the SETTINGS form, or the programmed DP_GUI_MASTER_CNTL otherwise.
+ */
+static bool ati_cce_has_settings(uint32_t op)
+{
+    return (op & 0x80) || op == 0x28;
+}
+
+static bool ati_cce_settings(ATIVGAState *s, ATICCEReader *rd, uint32_t op,
+                             uint32_t *gmc_out)
+{
+    if (ati_cce_has_settings(op)) {
+        return ati_cce_gmc_prefix(s, rd, gmc_out);
+    }
+    *gmc_out = s->regs.dp_gui_master_cntl;
+    return true;
+}
+
+static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
+                                  uint32_t mask, uint32_t rptr,
+                                  uint32_t count, uint32_t op)
+{
+    ATICCEReader rd = { s, base, mask, rptr, count, 0 };
+    uint32_t gmc;
+
+    switch (op) {
+    case 0x10: /* NOP: no payload, no effect.  The ring padder and DRM sync
+                * paths emit type-3 NOPs; handle it explicitly so it is not
+                * counted (and logged once) as an unhandled packet. */
+        return true;
+    case 0x1f: /* SET_MODE24BPP: a single flag dword (1 = set / 0 = clear the
+                * engine microcode's 24bpp flag; SDK F.23, p.F-47).  It sets no
+                * MMIO register -- it toggles an internal microcode flag that
+                * governs HOST_DATA triplication for 24bpp destinations, which
+                * this model does not have and no guest we run selects (XP/2003
+                * desktops are 8/16/32bpp).  Consume it as a documented no-op so
+                * it is not misreported as unhandled. */
+        return true;
+    case 0x19: /* NEXT_CHAR: (y,x), (h,w), inline monochrome bits */
+    case 0x99: /* CNTL_NEXT_CHAR: as NEXT_CHAR with a leading SETTINGS block */
+        if (ati_cce_has_settings(op) &&
+            !ati_cce_gmc_prefix(s, &rd, &gmc)) {
+            return false;
+        }
+        if (!ati_cce_has(&rd, 2)) {
+            return false;
+        }
+        ati_mm_write(s, DST_Y_X, ati_cce_next(&rd), 4);
+        ati_mm_write(s, DST_HEIGHT_WIDTH, ati_cce_next(&rd), 4);
+        ati_cce_host_data(s, &rd);
+        return true;
+    case 0x1e: /* SET_SCISSORS */
+        if (!ati_cce_has(&rd, 2)) {
+            return false;
+        }
+        ati_mm_write(s, SC_TOP_LEFT, ati_cce_next(&rd), 4);
+        ati_mm_write(s, SC_BOTTOM_RIGHT, ati_cce_next(&rd), 4);
+        return true;
+    case 0x18: /* POLYSCANLINES: plain form, no SETTINGS */
+    case 0x98: /* CNTL_POLYSCANLINES: solid-fill a polygon as horizontal spans.
+                * This packet carries only the setup (GMC prefix + the fill
+                * colour); the spans themselves arrive in the PLY_NEXTSCAN
+                * (0x1d) packets that follow.  The Windows user32 DrawEdge draws
+                * 3D window borders (e.g. Internet Explorer's client edge) this
+                * way, so without it those borders go unrendered. */
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
+            return false;
+        }
+        if (ati_cce_has(&rd, 1)) {
+            ati_mm_write(s, DP_BRUSH_FRGD_CLR, ati_cce_next(&rd), 4);
+        }
+        return true;
+    case 0x1d: /* PLY_NEXTSCAN: one polyscanline of the current CNTL_POLYSCANLINES
+                * fill.  dword0 = top | (height << 16); each following dword is a
+                * segment = x_start | (x_end << 16) (SDK F.20).  Fill each segment
+                * as a rectangle with the colour/ROP set up by the 0x98 packet. */
+    {
+        uint32_t yh;
+        int y, h;
+
+        if (!ati_cce_has(&rd, 2)) {
+            return false;
+        }
+        yh = ati_cce_next(&rd);
+        y = yh & 0x3fff;
+        h = (yh >> 16) & 0x3fff;
+        while (ati_cce_has(&rd, 1)) {
+            uint32_t seg = ati_cce_next(&rd);
+            int x0 = seg & 0x3fff;
+            int x1 = (seg >> 16) & 0x3fff;
+
+            if (x1 <= x0 || h <= 0) {
+                continue;
+            }
+            ati_mm_write(s, DST_Y_X, ((uint32_t)y << 16) | (uint32_t)x0, 4);
+            ati_mm_write(s, DST_HEIGHT_WIDTH,
+                         ((uint32_t)h << 16) | (uint32_t)(x1 - x0), 4);
+        }
+        return true;
+    }
+    case 0x11: /* PAINT: plain form, no SETTINGS */
+    case 0x91: /* CNTL_PAINT: one rect given as two corners (like SET_SCISSORS),
+                * top-left then bottom-right, each packed (y << 16) | x.  The
+                * Windows DirectDraw colour-fill (DdBlt DDBLT_COLORFILL) uses
+                * this packet; PAINT_MULTI below instead carries (x,y)+(w,h),
+                * so the two must be decoded differently. */
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
+            return false;
+        }
+        if (ati_cce_has_settings(op) && !ati_cce_paint_brush(s, &rd, gmc)) {
+            return false;
+        }
+        while (ati_cce_has(&rd, 2)) {
+            uint32_t tl = ati_cce_next(&rd);
+            uint32_t br = ati_cce_next(&rd);
+            int w = (int)(br & 0x3fff) - (int)(tl & 0x3fff);
+            int h = (int)((br >> 16) & 0x3fff) - (int)((tl >> 16) & 0x3fff);
+
+            if (w <= 0 || h <= 0) {
+                continue;
+            }
+            ati_mm_write(s, DST_Y_X, tl, 4);
+            ati_mm_write(s, DST_HEIGHT_WIDTH,
+                         ((uint32_t)h << 16) | (uint32_t)w, 4);
+        }
+        return true;
+    case 0x1a: /* PAINT_MULTI: plain form, no SETTINGS */
+    case 0x9a: /* CNTL_PAINT_MULTI: rects as (x<<16|y), (w<<16|h) */
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
+            return false;
+        }
+        if (ati_cce_has_settings(op) && !ati_cce_paint_brush(s, &rd, gmc)) {
+            return false;
+        }
+        while (ati_cce_has(&rd, 2)) {
+            ati_mm_write(s, DST_X_Y, ati_cce_next(&rd), 4);
+            ati_mm_write(s, DST_WIDTH_HEIGHT, ati_cce_next(&rd), 4);
+        }
+        return true;
+    case 0x15: /* POLYLINE: plain form, no SETTINGS */
+    case 0x95: /* CNTL_POLYLINE: brush colour, then points as (y<<16|x) */
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
+            return false;
+        }
+        if (ati_cce_has_settings(op) && !ati_cce_paint_brush(s, &rd, gmc)) {
+            return false;
+        }
+        if (!ati_cce_has(&rd, 2)) {
+            return false;
+        }
+        ati_mm_write(s, DST_LINE_START, ati_cce_next(&rd), 4);
+        while (ati_cce_has(&rd, 1)) {
+            ati_mm_write(s, DST_LINE_END, ati_cce_next(&rd), 4);
+        }
+        return true;
+    case 0x9c: /* CNTL_TRANS_BITBLT: colour-keyed copy (masked icons) */
+        if (!ati_cce_gmc_prefix(s, &rd, &gmc)) {
+            return false;
+        }
+        if (!ati_cce_has(&rd, 6)) {
+            return false;
+        }
+        ati_mm_write(s, CLR_CMP_CNTL, ati_cce_next(&rd), 4);
+        ati_mm_write(s, CLR_CMP_CLR_SRC, ati_cce_next(&rd), 4);
+        ati_mm_write(s, CLR_CMP_CLR_DST, ati_cce_next(&rd), 4);
+        ati_mm_write(s, SRC_X_Y, ati_cce_next(&rd), 4);
+        ati_mm_write(s, DST_X_Y, ati_cce_next(&rd), 4);
+        ati_mm_write(s, DST_WIDTH_HEIGHT, ati_cce_next(&rd), 4);
+        /*
+         * The compare stays programmed in the register file, so clear it
+         * again: ordinary blits that follow must not be colour-keyed.
+         */
+        ati_mm_write(s, CLR_CMP_CNTL, 0, 4);
+        return true;
+    case 0x12: /* BITBLT: plain form, no SETTINGS */
+    case 0x1b: /* BITBLT_MULTI: plain form, no SETTINGS */
+    case 0x28: /* CNTL_BITBLT as used by ati2draa's glyph cache (carries
+                * SETTINGS despite bit 7 being clear) */
+    case 0x92: /* CNTL_BITBLT */
+    case 0x9b: /* CNTL_BITBLT_MULTI */
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
+            return false;
+        }
+        while (ati_cce_has(&rd, 3)) {
+            ati_mm_write(s, SRC_X_Y, ati_cce_next(&rd), 4);
+            ati_mm_write(s, DST_X_Y, ati_cce_next(&rd), 4);
+            ati_mm_write(s, DST_WIDTH_HEIGHT, ati_cce_next(&rd), 4);
+        }
+        return true;
+    case 0x14: /* HOSTDATA_BLT: plain form, no SETTINGS */
+    case 0x94: /* CNTL_HOSTDATA_BLT: colours, then optional rect + data */
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
+            return false;
+        }
+        if (!ati_cce_has(&rd, 2)) {
+            return false;
+        }
+        ati_mm_write(s, DP_SRC_FRGD_CLR, ati_cce_next(&rd), 4);
+        ati_mm_write(s, DP_SRC_BKGD_CLR, ati_cce_next(&rd), 4);
+        /*
+         * ati2draa emits this with no trailing rect purely to load the
+         * text state that subsequent NEXT_CHAR packets use; the r128 DRM
+         * appends (y,x), (h,w), a dword count and the host data itself.
+         */
+        if (ati_cce_has(&rd, 3)) {
+            ati_mm_write(s, DST_Y_X, ati_cce_next(&rd), 4);
+            ati_mm_write(s, DST_HEIGHT_WIDTH, ati_cce_next(&rd), 4);
+            ati_cce_next(&rd);      /* dword count, implied by the rect */
+            ati_cce_host_data(s, &rd);
+        }
+        return true;
+    case 0x16: /* SCALING: plain form, no SETTINGS */
+    case 0x17: /* TRANS_SCALING: plain form, no SETTINGS */
+    case 0x96: /* SCALE: stretch a source bitmap into a destination rect */
+    case 0x97: { /* TRANS_SCALE: as SCALE, with a source colour key */
+        uint32_t db[11];
+        unsigned i;
+
+        if (!ati_cce_settings(s, &rd, op, &gmc)) {
+            return false;
+        }
+        if (!ati_cce_has(&rd, 11)) {
+            return false;
+        }
+        for (i = 0; i < 11; i++) {
+            db[i] = ati_cce_next(&rd);
+        }
+        ati_scale_blt(s, gmc, db, op == 0x97 || op == 0x17);
+        return true;
+    }
+    case 0x25: /* 3D_RNDR_GEN_PRIM: vertices inline in the ring */
+        return ati_3d_gen_prim(s, &rd, false);
+    case 0x23: /* 3D_RNDR_GEN_INDX_PRIM: vertices in a VRAM buffer */
+        return ati_3d_gen_prim(s, &rd, true);
+    case 0x2c: /* LOAD_PALETTE: a datatype word (1 = 16-entry/4bpp, else
+                * 256-entry/8bpp) then that many RGBQUAD colours
+                * (B[7:0] G[15:8] R[23:16] A[31:24]) loaded from CLUT entry 0
+                * (SDK F.21).  Feed them to the VGA DAC the same way the MMIO
+                * PALETTE_DATA path does; guests normally use that MMIO path,
+                * so this is the documented ring alternative. */
+    {
+        uint32_t dt;
+        unsigned n, i;
+
+        if (!ati_cce_has(&rd, 1)) {
+            return false;
+        }
+        dt = ati_cce_next(&rd);
+        n = dt == 1 ? 16 : 256;
+        vga_ioport_write(&s->vga, VGA_PEL_IW, 0);
+        for (i = 0; i < n && ati_cce_has(&rd, 1); i++) {
+            uint32_t c = ati_cce_next(&rd);
+
+            vga_ioport_write(&s->vga, VGA_PEL_D, (c >> 16) & 0xff); /* R */
+            vga_ioport_write(&s->vga, VGA_PEL_D, (c >> 8) & 0xff);  /* G */
+            vga_ioport_write(&s->vga, VGA_PEL_D, c & 0xff);         /* B */
+        }
+        return true;
+    }
+    case 0x2d: /* PURGE: purge the pixel cache (SDK opcode summary).  This
+                * model executes each packet synchronously and has no pixel
+                * cache, so there is nothing to flush -- treat it as a no-op
+                * rather than an unhandled packet. */
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void ati_cce_execute(ATIVGAState *s, uint32_t rptr, uint32_t wptr)
+{
+    int off_slot = ati_init_aux_slot(0x0700);
+    int cntl_slot = ati_init_aux_slot(0x0704);
+    uint32_t base, mask;
+    unsigned l2qw;
+
+    if (off_slot < 0 || cntl_slot < 0) {
+        return;
+    }
+    base = s->regs.init_aux[off_slot] & ~0x03u;
+    l2qw = s->regs.init_aux[cntl_slot] & 0x3f;
+    /*
+     * Mode 0 in PM4_BUFFER_CNTL bits 31:28 is PM4_NONPM4 - no command
+     * engine.  A base of 0 is valid: the XP driver runs its ring at card
+     * VM address 0 (translated through the PCI GART).
+     */
+    if (!((s->regs.init_aux[cntl_slot] >> 28) & 0xf) || l2qw > 17) {
+        return;
+    }
+    mask = (2u << l2qw) - 1;    /* ring size in dwords, power of two */
+    rptr &= mask;
+    wptr &= mask;
+
+    while (rptr != wptr) {
+        uint32_t hdr = ati_cce_ring_dword(s, base, mask, rptr++);
+        uint32_t count = ((hdr >> 16) & 0x3fff) + 1;
+        unsigned i;
+
+        switch (hdr >> 30) {
+        case 0: /* type 0: write count registers starting at bits 12:0 */
+        {
+            uint32_t reg = (hdr & 0x1fff) << 2;
+            bool one_reg = hdr & 0x8000; /* all data to the same register */
+
+            for (i = 0; i < count && rptr != wptr; i++) {
+                uint32_t data = ati_cce_ring_dword(s, base, mask, rptr++);
+
+                ati_mm_write(s, reg + (one_reg ? 0 : i * 4), data, 4);
+            }
+            break;
+        }
+        case 1: /* type 1: two scattered register writes */
+        {
+            uint32_t reg0 = (hdr & 0x7ff) << 2;
+            uint32_t reg1 = ((hdr >> 11) & 0x7ff) << 2;
+
+            if (rptr != wptr) {
+                ati_mm_write(s, reg0, ati_cce_ring_dword(s, base, mask,
+                                                         rptr++), 4);
+            }
+            if (rptr != wptr) {
+                ati_mm_write(s, reg1, ati_cce_ring_dword(s, base, mask,
+                                                         rptr++), 4);
+            }
+            break;
+        }
+        case 2: /* type 2: filler */
+            break;
+        case 3: /* type 3: engine command */
+        {
+            uint32_t op = (hdr >> 8) & 0xff;
+
+            if (!ati_cce_execute_type3(s, base, mask, rptr, count, op)) {
+                static uint32_t warned[8];
+
+                if (!(warned[op >> 5] & (1u << (op & 31)))) {
+                    warned[op >> 5] |= 1u << (op & 31);
+                    qemu_log_mask(LOG_UNIMP,
+                                  "ati: unhandled CCE type-3 packet 0x%02x\n",
+                                  op);
+                }
+            }
+            rptr = (rptr + count) & mask;
+            break;
+        }
+        }
+        rptr &= mask;
+    }
+}
+
+static void ati_pll_write(ATIVGAState *s, uint32_t data)
+{
+    unsigned idx = s->regs.clock_cntl_index & 0x3f;
+
+    if ((s->regs.clock_cntl_index & 0x80) &&
+        idx < ARRAY_SIZE(s->regs.pll_regs)) {
+        s->regs.pll_regs[idx] = data;
+    }
+}
+
 static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
 {
     ATIVGAState *s = opaque;
     uint32_t val = 0;
 
+    /* Register Aperture 1: the upper half of BAR2 mirrors the register file
+     * (RRG 2.2.1; CONFIG_REG_APER_SIZE reports 8 KB, the BAR covers 16). */
+    if (addr >= 0x2000 && addr < 0x4000) {
+        addr -= 0x2000;
+    }
+
     switch (addr) {
     case MM_INDEX:
         val = s->regs.mm_index;
+        break;
+    case CLOCK_CNTL_INDEX ... CLOCK_CNTL_INDEX + 3:
+        val = ati_reg_read_offs(s->regs.clock_cntl_index,
+                                addr - CLOCK_CNTL_INDEX, size);
+        break;
+    case CLOCK_CNTL_DATA ... CLOCK_CNTL_DATA + 3:
+        val = ati_reg_read_offs(ati_pll_read(s), addr - CLOCK_CNTL_DATA,
+                                size);
+        break;
+    case 0x710 ... 0x713: /* PM4_BUFFER_DL_RPTR */
+        val = ati_reg_read_offs(s->regs.pm4_dl_rptr, addr - 0x710, size);
+        break;
+    case 0x714 ... 0x717: /* PM4_BUFFER_DL_WPTR */
+        val = ati_reg_read_offs(s->regs.pm4_dl_wptr, addr - 0x714, size);
+        break;
+    case 0x05c ... 0x05f: /* CRTC_STATUS */
+        val = ati_reg_read_offs(ati_crtc_status(s), addr - 0x05c, size);
+        break;
+    case 0x210 ... 0x213: /* CRTC_VLINE_CRNT_VLINE */
+        val = ati_reg_read_offs(ati_crtc_current_line() << 16,
+                                addr - 0x210, size);
+        break;
+    case 0x214 ... 0x217: /* CRTC_CRNT_FRAME */
+        val = ati_reg_read_offs(ati_crtc_frame_count() & 0x1fffff,
+                                addr - 0x214, size);
         break;
     case MM_DATA ... MM_DATA + 3:
         /* indexed access to regs or memory */
@@ -316,6 +1012,18 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         break;
     case GEN_INT_STATUS:
         val = s->regs.gen_int_status;
+        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+            /*
+             * GUI_IDLE_INT_STAT (bit 19) is a level-ish engine-idle status:
+             * it powers up set - the only GEN_INT_STATUS bit that does - and
+             * reasserts whenever the engine is idle (RAGE 128 PRO Register
+             * Reference Guide).  Every operation in this model completes
+             * synchronously, so the engine is always idle; a driver that
+             * acknowledges the bit and waits for it to come back (the XP
+             * display driver's engine-liveness test) must see it set again.
+             */
+            val |= BIT(19);
+        }
         break;
     case CRTC_GEN_CNTL ... CRTC_GEN_CNTL + 3:
         val = ati_reg_read_offs(s->regs.crtc_gen_cntl,
@@ -327,6 +1035,16 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         break;
     case DAC_CNTL:
         val = s->regs.dac_cntl;
+        /*
+         * DAC load-sense: with the comparator enabled, DAC_CMP_OUTPUT (bit 7)
+         * reads 1 when the RGB DAC outputs are terminated, i.e. a CRT is
+         * connected (RRG DAC_CNTL, and radeon/r128 CRT detection treat
+         * DAC_CMP_OUTPUT set as "connected").  This model always presents a
+         * connected CRT so the driver's monitor-detection succeeds.
+         */
+        if (val & DAC_CMP_EN) {
+            val |= DAC_CMP_OUTPUT;
+        }
         break;
     case GPIO_VGA_DDC ... GPIO_VGA_DDC + 3:
         val = ati_reg_read_offs(s->regs.gpio_vga_ddc,
@@ -558,7 +1276,26 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
                       "Read from write-only register 0x%x\n", (unsigned)addr);
         break;
     default:
+    {
+        int aux = ati_init_aux_slot(addr);
+
+        if (aux >= 0) {
+            uint32_t v = s->regs.init_aux[aux];
+
+            if ((addr & ~3ULL) == 0x0140) {
+                /*
+                 * MEM_CNTL bits 22:20 are read-only status
+                 * (MEM_CTLR_STATUS / MEM_SEQNCR_STATUS / MEM_ARBITER_STATUS),
+                 * 0 = idle.  The memory controller in this model is never
+                 * busy, and a driver that wrote those bits and then polled
+                 * for them to clear would otherwise wait forever.
+                 */
+                v &= ~(7u << 20);
+            }
+            val = ati_reg_read_offs(v, addr & 3, size);
+        }
         break;
+    }
     }
     if (addr < CUR_OFFSET || addr > CUR_CLR1 || ATI_DEBUG_HW_CURSOR) {
         trace_ati_mm_read(size, addr, ati_reg_name(addr & ~3ULL), val);
@@ -582,10 +1319,59 @@ static void ati_mm_write(void *opaque, hwaddr addr,
 {
     ATIVGAState *s = opaque;
 
+    if (addr >= 0x2000 && addr < 0x4000) {
+        addr -= 0x2000; /* Register Aperture 1 mirror */
+    }
+
     if (addr < CUR_OFFSET || addr > CUR_CLR1 || ATI_DEBUG_HW_CURSOR) {
         trace_ati_mm_write(size, addr, ati_reg_name(addr & ~3ULL), data);
     }
     switch (addr) {
+    case CLOCK_CNTL_INDEX ... CLOCK_CNTL_INDEX + 3:
+        ati_reg_write_offs(&s->regs.clock_cntl_index,
+                           addr - CLOCK_CNTL_INDEX, data, size);
+        break;
+    case CLOCK_CNTL_DATA ... CLOCK_CNTL_DATA + 3:
+    {
+        uint32_t cur = ati_pll_read(s);
+
+        ati_reg_write_offs(&cur, addr - CLOCK_CNTL_DATA, data, size);
+        ati_pll_write(s, cur);
+        break;
+    }
+    case 0x710 ... 0x713: /* PM4_BUFFER_DL_RPTR */
+        ati_reg_write_offs(&s->regs.pm4_dl_rptr, addr - 0x710, data, size);
+        break;
+    case 0x05c: /* CRTC_STATUS: bit 1 is write-1-to-clear */
+        if (data & 2) {
+            s->regs.crtc_vblank_ack_frame = ati_crtc_frame_count();
+        }
+        break;
+    case 0x714 ... 0x717: /* PM4_BUFFER_DL_WPTR */
+        /*
+         * CCE ring-buffer submission.  This model executes nothing from the
+         * ring yet; consume it instantly so a driver polling the read
+         * pointer (XP's ati2draa spins on PM4_BUFFER_DL_RPTR until it
+         * catches up with its write pointer, and the kernel watchdog turns
+         * a stall into bugcheck 0xEA) sees the engine keep up.  Mirror the
+         * new read pointer through the ring read-pointer writeback address
+         * if the driver configured one (PM4_BUFFER_DL_RPTR_ADDR).
+         */
+        ati_reg_write_offs(&s->regs.pm4_dl_wptr, addr - 0x714, data, size);
+        ati_cce_execute(s, s->regs.pm4_dl_rptr,
+                        s->regs.pm4_dl_wptr & ~R128_PM4_BUFFER_DL_DONE);
+        s->regs.pm4_dl_rptr = s->regs.pm4_dl_wptr & ~R128_PM4_BUFFER_DL_DONE;
+        {
+            int slot = ati_init_aux_slot(0x070c);
+            uint32_t wb = slot >= 0 ? s->regs.init_aux[slot] : 0;
+
+            if (wb & ~3u) {
+                uint32_t le = cpu_to_le32(s->regs.pm4_dl_rptr);
+
+                pci_dma_write(&s->dev, wb & ~3u, &le, sizeof(le));
+            }
+        }
+        break;
     case MM_INDEX:
         s->regs.mm_index = data & ~3;
         break;
@@ -920,6 +1706,18 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         s->regs.dp_datatype = (data & 0x0f00) >> 8 | (data & 0x30f0) << 4 |
                               (data & 0x4000) << 16;
         s->regs.dp_mix = (data & GMC_ROP3_MASK) | (data & 0x7000000) >> 16;
+        /*
+         * GMC_CLR_CMP_CNTL_DIS (bit 28): "1 = clear CLR_CMP_FN_DST,
+         * CLR_CMP_FN_SRC" (RRG, DP_GUI_MASTER_CNTL).  The XFree86 r128 driver
+         * sets this bit in the base GUI control word of every operation, so a
+         * colour-key left enabled by a transparent blit is cleared by the next
+         * op's control write.  Without honouring it a stale key (e.g. from a
+         * KDE window-decoration blit) leaks into the following text and fill
+         * operations, dropping keyed pixels and corrupting them.
+         */
+        if (data & GMC_DST_CLR_CMP_FCN_CLEAR) {
+            s->regs.clr_cmp_cntl &= ~0x00000707u; /* clear FN_SRC[2:0],FN_DST[10:8] */
+        }
 
         if (!(data & GMC_SRC_PITCH_OFFSET_CNTL)) {
             s->regs.src_offset = s->regs.default_offset;
@@ -976,6 +1774,34 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         break;
     case DP_BRUSH_FRGD_CLR:
         s->regs.dp_brush_frgd_clr = data;
+        break;
+    case BRUSH_Y_X:
+        s->regs.brush_y_x = data & 0x1f001f;
+        break;
+    case BRUSH_DATA0:
+        s->regs.brush_data0 = data;
+        break;
+    case BRUSH_DATA1:
+        s->regs.brush_data1 = data;
+        break;
+    case CLR_CMP_CNTL:
+        s->regs.clr_cmp_cntl = data;
+        break;
+    case CLR_CMP_CLR_SRC:
+        s->regs.clr_cmp_clr_src = data;
+        break;
+    case CLR_CMP_CLR_DST:
+        s->regs.clr_cmp_clr_dst = data;
+        break;
+    case CLR_CMP_MASK:
+        s->regs.clr_cmp_msk = data;
+        break;
+    case DST_LINE_START:
+        s->regs.dst_line_start = data;
+        break;
+    case DST_LINE_END:
+        ati_2d_line(s, s->regs.dst_line_start, data);
+        s->regs.dst_line_start = data;
         break;
     case DP_CNTL:
         s->regs.dp_cntl = data;
@@ -1066,8 +1892,43 @@ static void ati_mm_write(void *opaque, hwaddr addr,
             s->host_data.next = 0;
         }
         break;
-    default:
+    case SCALE_3D_CNTL ... SCALE_3D_CNTL + 3:
+        ati_reg_write_offs(&s->regs.scale_3d_cntl,
+                           addr - SCALE_3D_CNTL, data, size);
         break;
+    case SETUP_CNTL ... SETUP_CNTL + 3:
+        ati_reg_write_offs(&s->regs.setup_cntl,
+                           addr - SETUP_CNTL, data, size);
+        break;
+    case 0x1a40 ... 0x1a63:
+    {
+        /*
+         * Setup-engine per-channel colour DDA.  Three channels (R,G,B) on a
+         * 12-byte stride, each {dx, dy, value} at +0/+4/+8 (signed 16.16).
+         * A write arms a Gouraud fill; it stays armed across the clip-rect
+         * blits of one gradient (a fresh plane starts a new burst).
+         */
+        unsigned off = addr - 0x1a40;
+        unsigned ch = off / 0xc;
+        unsigned field = off % 0xc;
+        int32_t *reg = field < 4 ? &s->regs.su_color_dx[ch] :
+                       field < 8 ? &s->regs.su_color_dy[ch] :
+                                   &s->regs.su_color_val[ch];
+
+        ati_reg_write_offs((uint32_t *)reg, addr & 3, data, size);
+        s->regs.su_gouraud_armed = true;
+        s->regs.su_gouraud_rect_valid = false;
+        break;
+    }
+    default:
+    {
+        int aux = ati_init_aux_slot(addr);
+
+        if (aux >= 0) {
+            ati_reg_write_offs(&s->regs.init_aux[aux], addr & 3, data, size);
+        }
+        break;
+    }
     }
 }
 
@@ -1075,6 +1936,102 @@ static const MemoryRegionOps ati_mm_ops = {
     .read = ati_mm_read,
     .write = ati_mm_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static bool ati_init_regs_needed(void *opaque)
+{
+    ATIVGARegs *r = opaque;
+    unsigned i;
+
+    if (r->clock_cntl_index) {
+        return true;
+    }
+    for (i = 0; i < ARRAY_SIZE(r->pll_regs); i++) {
+        if (r->pll_regs[i]) {
+            return true;
+        }
+    }
+    for (i = 0; i < ARRAY_SIZE(r->init_aux); i++) {
+        if (r->init_aux[i]) {
+            return true;
+        }
+    }
+    return r->pm4_dl_rptr || r->pm4_dl_wptr;
+}
+
+static const VMStateDescription vmstate_ati_vga_init_regs = {
+    .name = "ati-vga/regs/init",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ati_init_regs_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(clock_cntl_index, ATIVGARegs),
+        VMSTATE_UINT32_ARRAY(pll_regs, ATIVGARegs, 32),
+        VMSTATE_UINT32_ARRAY(init_aux, ATIVGARegs, 40),
+        VMSTATE_UINT32(pm4_dl_rptr, ATIVGARegs),
+        VMSTATE_UINT32(pm4_dl_wptr, ATIVGARegs),
+        VMSTATE_UINT32(crtc_vblank_ack_frame, ATIVGARegs),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool ati_brush_regs_needed(void *opaque)
+{
+    ATIVGARegs *r = opaque;
+
+    return r->brush_y_x || r->brush_data0 || r->brush_data1 ||
+           r->dst_line_start || r->clr_cmp_cntl || r->clr_cmp_clr_src ||
+           r->clr_cmp_clr_dst || r->clr_cmp_msk;
+}
+
+static const VMStateDescription vmstate_ati_vga_brush_regs = {
+    .name = "ati-vga/regs/brush",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ati_brush_regs_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(brush_y_x, ATIVGARegs),
+        VMSTATE_UINT32(brush_data0, ATIVGARegs),
+        VMSTATE_UINT32(brush_data1, ATIVGARegs),
+        VMSTATE_UINT32(dst_line_start, ATIVGARegs),
+        VMSTATE_UINT32(clr_cmp_cntl, ATIVGARegs),
+        VMSTATE_UINT32(clr_cmp_clr_src, ATIVGARegs),
+        VMSTATE_UINT32(clr_cmp_clr_dst, ATIVGARegs),
+        VMSTATE_UINT32(clr_cmp_msk, ATIVGARegs),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool ati_setup_regs_needed(void *opaque)
+{
+    ATIVGARegs *r = opaque;
+    unsigned i;
+
+    if (r->scale_3d_cntl || r->setup_cntl || r->su_gouraud_armed) {
+        return true;
+    }
+    for (i = 0; i < 3; i++) {
+        if (r->su_color_dx[i] || r->su_color_dy[i] || r->su_color_val[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const VMStateDescription vmstate_ati_vga_setup_regs = {
+    .name = "ati-vga/regs/setup",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ati_setup_regs_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(scale_3d_cntl, ATIVGARegs),
+        VMSTATE_UINT32(setup_cntl, ATIVGARegs),
+        VMSTATE_INT32_ARRAY(su_color_dx, ATIVGARegs, 3),
+        VMSTATE_INT32_ARRAY(su_color_dy, ATIVGARegs, 3),
+        VMSTATE_INT32_ARRAY(su_color_val, ATIVGARegs, 3),
+        VMSTATE_BOOL(su_gouraud_armed, ATIVGARegs),
+        VMSTATE_END_OF_LIST()
+    }
 };
 
 static const VMStateDescription vmstate_ati_vga_regs = {
@@ -1140,6 +2097,12 @@ static const VMStateDescription vmstate_ati_vga_regs = {
         VMSTATE_UINT32(default_tile, ATIVGARegs),
         VMSTATE_END_OF_LIST()
     },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_ati_vga_init_regs,
+        &vmstate_ati_vga_brush_regs,
+        &vmstate_ati_vga_setup_regs,
+        NULL
+    }
 };
 
 static const VMStateDescription vmstate_ati_host_data = {
@@ -1325,6 +2288,35 @@ static void ati_vga_reset(DeviceState *dev)
     timer_del(&s->vblank_timer);
     ati_vga_update_irq(s);
 
+    /*
+     * PLL and init-register power-up values from the RAGE 128 PRO Register
+     * Reference Guide.  PLL indices follow the chip's PLL address space:
+     * 0x01 CLK_PIN_CNTL, 0x02 PPLL_CNTL, 0x0b XPLL_CNTL, 0x0c XDLL_CNTL,
+     * 0x0e MPLL_CNTL, 0x10 AGP_PLL_CNTL.
+     */
+    s->regs.clock_cntl_index = 0;
+    memset(s->regs.pll_regs, 0, sizeof(s->regs.pll_regs));
+    s->regs.pll_regs[0x01] = 0x000000f7;
+    s->regs.pll_regs[0x02] = 0x0000cc03;
+    s->regs.pll_regs[0x0b] = 0x0000cc03;
+    s->regs.pll_regs[0x0c] = 0x000b000b;
+    s->regs.pll_regs[0x0e] = 0x0000cc03;
+    s->regs.pll_regs[0x10] = 0x7a770000;
+    memset(s->regs.init_aux, 0, sizeof(s->regs.init_aux));
+    s->regs.init_aux[ati_init_aux_slot(0x0030)] = 0x880f0f41; /* BUS_CNTL */
+    s->regs.init_aux[ati_init_aux_slot(0x0034)] = 0x0000001f; /* BUS_CNTL1 */
+    /* MEM_CNTL: MEM_LATENCY = 3 clocks, MEM_REFRESH_DIS set out of reset. */
+    s->regs.init_aux[ati_init_aux_slot(0x0140)] = 0x08000300;
+
+    /* 2D setup engine (caption-gradient colour interpolator). */
+    s->regs.scale_3d_cntl = 0;
+    s->regs.setup_cntl = 0;
+    s->regs.su_gouraud_armed = false;
+    s->regs.su_gouraud_rect_valid = false;
+    memset(s->regs.su_color_dx, 0, sizeof(s->regs.su_color_dx));
+    memset(s->regs.su_color_dy, 0, sizeof(s->regs.su_color_dy));
+    memset(s->regs.su_color_val, 0, sizeof(s->regs.su_color_val));
+
     /* reset vga */
     vga_common_reset(&s->vga);
     s->mode = VGA_MODE;
@@ -1359,6 +2351,7 @@ static void ati_vga_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+
 
     device_class_set_legacy_reset(dc, ati_vga_reset);
     device_class_set_props(dc, ati_vga_properties);
