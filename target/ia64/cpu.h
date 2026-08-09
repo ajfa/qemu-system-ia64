@@ -1344,6 +1344,29 @@ static inline bool ia64_sal_boot_environment_active(const CPUIA64State *env)
            (env->psr & IA64_PSR_IC) != 0;
 }
 
+/*
+ * Distinguish an OS that manages region 7 as a *flat identity* map (region-7
+ * VA == physical, e.g. Linux's PAGE_OFFSET) from one that uses the loader's
+ * biased KSEG (region-7 VA == physical + 0x8000_0000, e.g. Windows/2003).  The
+ * two conventions collide for region-7 offsets in [0x8000_0000, KSEG2): under
+ * the Windows convention that window aliases low physical memory, but under the
+ * identity convention it *is* physical RAM at 2 GiB+, so the persistent KSEG
+ * alias must not shadow it -- doing so hands the identity OS the wrong page and
+ * crashes it once installed RAM exceeds 2 GiB (measured: Debian/Linux 2.4.17).
+ *
+ * The signal is where the OS placed its interruption vector table: Windows'
+ * IVT lives inside KSEG0 (region 7, offset >= 0x8000_0000); Linux's is at the
+ * identity-mapped KERNEL_START (region 7, offset well below KSEG0).  So a
+ * region-7 IVT below the KSEG base means the running OS owns region 7 as an
+ * identity map and services its own region-7 TLB misses -- suppress the alias.
+ * A non-region-7 IVT (SAL/firmware, or the microprogram harness) keeps it.
+ */
+static inline bool ia64_region7_is_identity_os(const CPUIA64State *env)
+{
+    return ia64_rr_index(env->cr_iva) == 7 &&
+           (env->cr_iva & IA64_REGION7_PHYS_MASK) < IA64_FW_REGION7_DIRECTMAP_BASE;
+}
+
 static inline bool ia64_data_nested_tlb_active(const CPUIA64State *env)
 {
     return !(env->psr & IA64_PSR_IC) && !env->exception_state.psr_ic_inflight;
@@ -1419,7 +1442,8 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
      */
     if (ia64_rr_index(va) == 7 &&
         phys >= IA64_FW_REGION7_DIRECTMAP_BASE &&
-        phys < env->mmu.region7_directmap_limit) {
+        phys < env->mmu.region7_directmap_limit &&
+        !ia64_region7_is_identity_os(env)) {
         *pa = phys - IA64_FW_REGION7_DIRECTMAP_BASE;
         return true;
     }
