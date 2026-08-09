@@ -176,6 +176,23 @@
  * fills otherwise-unmapped region-7 pages with the same bias.
  */
 #define IA64_FW_REGION7_DIRECTMAP_BASE 0x0000000080000000ULL
+/*
+ * The persistent alias only covers the Windows/2003 KSEG0 window, a *fixed*
+ * 512 MiB range [KSEG0_BASE, KSEG2_BASE) = region-7 offset
+ * [0x8000_0000, 0xA000_0000) (WXPSP1 base/ntos/mm/ia64/miia64.h: "The HAL,
+ * kernel, initial drivers, NLS data, and registry ... which physically
+ * addresses memory ... Initial NonPaged Pool is within KSEG0").  It must not
+ * scale with RAM: region-7 VAs at or above KSEG2_BASE are ordinary kernel
+ * system space (system cache, pools, PFN database, KI_USER_SHARED_DATA, the
+ * PCR) that the OS maps through the VHPT/self-map, so a wider alias would
+ * silently shadow those VAs with the wrong physical page once installed RAM
+ * pushes the window past 0xA000_0000 -- corrupting the kernel and bugchecking
+ * the guest (measured: XP RTM dies in KeBugCheck2 during MmInitSystem above
+ * ~1.75 GiB).  Loader-phase accesses to physical memory above KSEG0 arrive
+ * while the SAL boot environment still owns the IVT and are served by the
+ * boot-identity fallback below, not this persistent alias.
+ */
+#define IA64_FW_REGION7_DIRECTMAP_SIZE 0x0000000020000000ULL
 #define IA64_LOCAL_SAPIC_PA   0x00000000fee00000ULL
 #define IA64_LOCAL_SAPIC_SIZE 0x00200000ULL
 #define IA64_PAL_IO_BLOCK_PA  0x000080000c000000ULL
@@ -1394,9 +1411,11 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
      * before the kernel's self-mapped page tables are active (e.g.
      * KdInitSystem walks a loader debug-block list this way).  Model it as a
      * last-resort translation that survives the loader -> kernel handoff,
-     * bounded to backed RAM (region7_directmap_limit = base + guest RAM size)
-     * so that paged system space and the recursive page-table self-map window
-     * -- both above the alias -- still take ordinary TLB-miss faults.
+     * bounded to the fixed KSEG0 window (region7_directmap_limit = base +
+     * min(RAM, IA64_FW_REGION7_DIRECTMAP_SIZE)) so that kernel system space,
+     * KI_USER_SHARED_DATA/PCR, and the recursive page-table self-map window
+     * -- all region-7 VAs at or above KSEG2_BASE -- still take ordinary
+     * TLB-miss faults instead of being shadowed by a RAM-sized alias.
      */
     if (ia64_rr_index(va) == 7 &&
         phys >= IA64_FW_REGION7_DIRECTMAP_BASE &&
