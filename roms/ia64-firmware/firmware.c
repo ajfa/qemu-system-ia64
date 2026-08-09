@@ -17717,36 +17717,69 @@ static void *load_pe_image(uint8_t *image_base, UINTN image_size,
 /* --- ATA PIO Block I/O driver --------------------------------------------- */
 
 typedef struct {
-    UINT8  unit;         /* 0=master, 1=slave on the primary channel */
+    UINT8  unit;         /* 0=master, 1=slave on this channel */
+    UINT8  channel;      /* 0=primary channel, 1=secondary channel */
     UINT8  present;      /* 0=no device, 1=device responds */
     UINT8  media_present;
     UINT8  is_atapi;     /* 0=ATA disk, 1=ATAPI CD-ROM */
     UINT64 last_lba;
 } IDE_DEVICE;
 
-/* IDE primary-channel controller configuration. */
+/* IDE channel controller configuration (one per ATA channel). */
 typedef struct {
-    UINT64 data_base;    /* primary data port base (8-byte range) */
-    UINT64 ctrl_base;    /* primary alt-status/control port */
-    UINT64 bmdma_base;   /* PCI IDE bus-master base */
+    UINT64 data_base;    /* data port base (8-byte range) */
+    UINT64 ctrl_base;    /* alt-status/control port */
+    UINT64 bmdma_base;   /* PCI IDE bus-master base for this channel */
     UINT8  has_bmdma;    /* 1=PCI bus-master IDE registers available */
+    UINT8  present;      /* 1=channel I/O bases configured */
 } IDE_CONFIG;
 
+#define IDE_CHANNEL_COUNT 2U
+
+/*
+ * Active-channel scratch register set.  Every IDE operation loads this from
+ * the target device's channel via ide_activate() before touching ports, so
+ * the many existing gIde.<port> sites stay channel-agnostic and unchanged.
+ */
 static IDE_CONFIG gIde = {
     .data_base  = LEGACY_IO_BASE + 0x1F0U,
     .ctrl_base  = LEGACY_IO_BASE + 0x3F6U,
     .bmdma_base = 0,
     .has_bmdma  = 0,
 };
-static IDE_DEVICE mIdeDevices[2] = {
-    { .unit = 0, .present = 0, .media_present = 0,
-      .is_atapi = 0, .last_lba = 0 },
-    { .unit = 1, .present = 0, .media_present = 0,
-      .is_atapi = 0, .last_lba = 0 },
+
+/* Per-channel controller state, defaulting to the legacy primary/secondary
+ * ISA port bases until ide_configure_channels_from_pci() reprograms them. */
+static IDE_CONFIG gIdeChannels[IDE_CHANNEL_COUNT] = {
+    { .data_base = LEGACY_IO_BASE + 0x1F0U,
+      .ctrl_base = LEGACY_IO_BASE + 0x3F6U, .present = 0 },
+    { .data_base = LEGACY_IO_BASE + 0x170U,
+      .ctrl_base = LEGACY_IO_BASE + 0x376U, .present = 0 },
+};
+
+/* Primary master/slave then secondary master/slave. */
+static IDE_DEVICE mIdeDevices[4] = {
+    { .unit = 0, .channel = 0 },
+    { .unit = 1, .channel = 0 },
+    { .unit = 0, .channel = 1 },
+    { .unit = 1, .channel = 1 },
 };
 static IDE_DEVICE *mBootIdeDevice = &mIdeDevices[0];
 static IDE_DEVICE *mHardDiskIdeDevice;
 static UINT32 mCdromBlocks;
+
+/*
+ * Load a device's channel port bases into the active gIde scratch.  IDE
+ * access in this firmware is strictly serial, so switching the active
+ * channel immediately before an operation is sufficient (and idempotent for
+ * nested calls that re-select the same device's channel).
+ */
+static void ide_activate(const IDE_DEVICE *dev)
+{
+    if (dev != NULL && dev->channel < IDE_CHANNEL_COUNT) {
+        gIde = gIdeChannels[dev->channel];
+    }
+}
 
 #define PCI_CLASS_REVISION_OFFSET     0x08U
 #define PCI_CFG_COMMAND_OFFSET        0x04U
@@ -17983,92 +18016,110 @@ static BOOLEAN ide_find_pci_controller(PCI_DEVICE_LOCATION *Location)
     return 0;
 }
 
-static BOOLEAN ide_configure_primary_from_pci(void)
+static BOOLEAN ide_configure_channels_from_pci(void)
 {
+    static const UINT8 bar_offset[5] = {
+        PCI_IDE_BAR0_OFFSET, PCI_IDE_BAR1_OFFSET, PCI_IDE_BAR2_OFFSET,
+        PCI_IDE_BAR3_OFFSET, PCI_IDE_BAR4_OFFSET,
+    };
     PCI_DEVICE_LOCATION location;
-    UINT32 data_bar;
-    UINT32 ctrl_bar;
-    UINT32 bmdma_bar;
-    UINT64 data_base;
-    UINT64 ctrl_base;
-    UINT64 bmdma_base;
+    UINT32 bar[5];
+    UINT64 base;
+    UINT64 bmdma_base = 0;
     UINT16 command;
+    BOOLEAN dma_ok;
+    UINTN i;
+    UINTN ch;
+
+    for (ch = 0; ch < IDE_CHANNEL_COUNT; ch++) {
+        gIdeChannels[ch].bmdma_base = 0;
+        gIdeChannels[ch].has_bmdma = 0;
+        gIdeChannels[ch].present = 0;
+    }
 
     if (!ide_find_pci_controller(&location)) {
         return 0;
     }
 
-    data_bar = (UINT32)pci_config_read_value(0, location.Bus,
-                                             location.Device,
-                                             location.Function,
-                                             PCI_IDE_BAR0_OFFSET, 4);
-    ctrl_bar = (UINT32)pci_config_read_value(0, location.Bus,
-                                             location.Device,
-                                             location.Function,
-                                             PCI_IDE_BAR1_OFFSET, 4);
-    bmdma_bar = (UINT32)pci_config_read_value(0, location.Bus,
-                                              location.Device,
-                                              location.Function,
-                                              PCI_IDE_BAR4_OFFSET, 4);
-    if (!ide_io_bar_address(data_bar, &data_base) ||
-        !ide_io_bar_address(ctrl_bar, &ctrl_base) ||
-        data_base + 7U >= LEGACY_IO_LIMIT ||
-        ctrl_base + 2U >= LEGACY_IO_LIMIT) {
-        /*
-         * Command-line PCI devices arrive with unassigned BARs.  Allocate the
-         * platform's reserved IDE I/O ranges only after an IDE controller has
-         * actually been requested.
-         */
-        data_bar = PCI_IDE_DATA0_BAR;
-        ctrl_bar = PCI_IDE_CTRL0_BAR;
-        bmdma_bar = PCI_IDE_BMDMA_BAR;
-        pci_config_write_value(0, location.Bus, location.Device,
-                               location.Function, PCI_IDE_BAR0_OFFSET, 4,
-                               data_bar);
-        pci_config_write_value(0, location.Bus, location.Device,
-                               location.Function, PCI_IDE_BAR1_OFFSET, 4,
-                               ctrl_bar);
-        pci_config_write_value(0, location.Bus, location.Device,
-                               location.Function, PCI_IDE_BAR2_OFFSET, 4,
-                               PCI_IDE_DATA1_BAR);
-        pci_config_write_value(0, location.Bus, location.Device,
-                               location.Function, PCI_IDE_BAR3_OFFSET, 4,
-                               PCI_IDE_CTRL1_BAR);
-        pci_config_write_value(0, location.Bus, location.Device,
-                               location.Function, PCI_IDE_BAR4_OFFSET, 4,
-                               bmdma_bar);
-        if (!ide_io_bar_address(data_bar, &data_base) ||
-            !ide_io_bar_address(ctrl_bar, &ctrl_base)) {
-            return 0;
+    for (i = 0; i < 5; i++) {
+        bar[i] = (UINT32)pci_config_read_value(0, location.Bus, location.Device,
+                                               location.Function,
+                                               bar_offset[i], 4);
+    }
+
+    /*
+     * Command-line and synthetic PCI controllers arrive with unassigned BARs.
+     * Allocate the platform's reserved legacy-style IDE I/O ranges -- both
+     * channels plus the 16-byte bus-master register file -- on demand, only
+     * once an IDE controller has actually been requested.
+     */
+    if (!ide_io_bar_address(bar[0], &base) || base + 7U >= LEGACY_IO_LIMIT ||
+        !ide_io_bar_address(bar[1], &base) || base + 2U >= LEGACY_IO_LIMIT) {
+        bar[0] = PCI_IDE_DATA0_BAR;
+        bar[1] = PCI_IDE_CTRL0_BAR;
+        bar[2] = PCI_IDE_DATA1_BAR;
+        bar[3] = PCI_IDE_CTRL1_BAR;
+        bar[4] = PCI_IDE_BMDMA_BAR;
+        for (i = 0; i < 5; i++) {
+            pci_config_write_value(0, location.Bus, location.Device,
+                                   location.Function, bar_offset[i], 4, bar[i]);
         }
     }
 
-    gIde.data_base = data_base;
-    gIde.ctrl_base = ctrl_base + 2U;
-    gIde.has_bmdma = 0;
-    command = (UINT16)pci_config_read_value(0, location.Bus,
-                                            location.Device,
+    command = (UINT16)pci_config_read_value(0, location.Bus, location.Device,
                                             location.Function,
                                             PCI_CFG_COMMAND_OFFSET, 2);
     command |= PCI_CFG_COMMAND_IO_SPACE;
-    if (fw_handoff_ide_dma_enabled() &&
-        ide_io_bar_address(bmdma_bar, &bmdma_base) &&
-        bmdma_base + 7U < LEGACY_IO_LIMIT) {
-        gIde.bmdma_base = bmdma_base;
-        gIde.has_bmdma = 1;
-        command |= PCI_CFG_COMMAND_BUS_MASTER;
+
+    /* The bus-master register file spans 16 bytes: primary channel at +0,
+     * secondary at +8 (PCI IDE / cmd646). */
+    dma_ok = fw_handoff_ide_dma_enabled() &&
+             ide_io_bar_address(bar[4], &bmdma_base) &&
+             bmdma_base + 15U < LEGACY_IO_LIMIT;
+
+    for (ch = 0; ch < IDE_CHANNEL_COUNT; ch++) {
+        UINT64 data_base;
+        UINT64 ctrl_base;
+
+        if (!ide_io_bar_address(bar[ch * 2], &data_base) ||
+            !ide_io_bar_address(bar[ch * 2 + 1], &ctrl_base) ||
+            data_base + 7U >= LEGACY_IO_LIMIT ||
+            ctrl_base + 2U >= LEGACY_IO_LIMIT) {
+            continue;   /* channel BAR unassigned or out of range */
+        }
+        gIdeChannels[ch].data_base = data_base;
+        gIdeChannels[ch].ctrl_base = ctrl_base + 2U;
+        gIdeChannels[ch].present = 1;
+        if (dma_ok) {
+            gIdeChannels[ch].bmdma_base = bmdma_base + ch * 8U;
+            gIdeChannels[ch].has_bmdma = 1;
+            command |= PCI_CFG_COMMAND_BUS_MASTER;
+        }
     }
+
+    if (!gIdeChannels[0].present) {
+        return 0;
+    }
+
     pci_config_write_value(0, location.Bus, location.Device,
                            location.Function, PCI_CFG_COMMAND_OFFSET, 2,
                            command);
 
+    gIde = gIdeChannels[0];   /* default active channel = primary */
+
     uart_puts("IDE controller:       PCI BAR primary data=0x");
-    uart_put_hex64(gIde.data_base);
+    uart_put_hex64(gIdeChannels[0].data_base);
     uart_puts(" ctrl=0x");
-    uart_put_hex64(gIde.ctrl_base);
-    if (gIde.has_bmdma) {
+    uart_put_hex64(gIdeChannels[0].ctrl_base);
+    if (gIdeChannels[0].has_bmdma) {
         uart_puts(" bmdma=0x");
-        uart_put_hex64(gIde.bmdma_base);
+        uart_put_hex64(gIdeChannels[0].bmdma_base);
+    }
+    if (gIdeChannels[1].present) {
+        uart_puts(" | secondary data=0x");
+        uart_put_hex64(gIdeChannels[1].data_base);
+        uart_puts(" ctrl=0x");
+        uart_put_hex64(gIdeChannels[1].ctrl_base);
     }
     uart_puts("\r\n");
     return 1;
@@ -18097,6 +18148,9 @@ static BOOLEAN ata_pio_wait_ready(UINT64 cmd_port)
 
 static const char *ide_unit_name(const IDE_DEVICE *dev)
 {
+    if (dev != NULL && dev->channel != 0) {
+        return dev->unit != 0 ? "secondary slave" : "secondary master";
+    }
     return (dev != NULL && dev->unit != 0) ? "primary slave" : "primary master";
 }
 
@@ -18125,6 +18179,7 @@ static BOOLEAN ata_pio_identify(IDE_DEVICE *dev, UINT8 command,
         return 0;
     }
 
+    ide_activate(dev);
     ide_select_device(ide_packet_drive_select(dev));
     ata_pio_write8(gIde.data_base + IDE_NSEC_OFF, 0);
     ata_pio_write8(gIde.data_base + IDE_LBALO_OFF, 0);
@@ -18147,7 +18202,7 @@ static void ide_probe_primary_devices(void)
     UINT16 identify[256];
     UINTN i;
 
-    if (!ide_configure_primary_from_pci()) {
+    if (!ide_configure_channels_from_pci()) {
         uart_puts("IDE controller:       not present\r\n");
         mHardDiskIdeDevice = NULL;
         for (i = 0; i < FW_ARRAY_SIZE(mIdeDevices); i++) {
@@ -18167,6 +18222,14 @@ static void ide_probe_primary_devices(void)
         dev->media_present = 0;
         dev->is_atapi = 0;
         dev->last_lba = 0;
+
+        /* Skip a channel whose I/O ports were never assigned (e.g. a
+         * single-channel controller, or the secondary disabled). */
+        if (dev->channel >= IDE_CHANNEL_COUNT ||
+            !gIdeChannels[dev->channel].present) {
+            continue;
+        }
+        ide_activate(dev);
 
         if (ata_pio_identify(dev, ATA_CMD_IDENTIFY_PACKET, identify)) {
             dev->present = 1;
@@ -18203,11 +18266,35 @@ static void ide_probe_primary_devices(void)
     }
 }
 
+/*
+ * Choose the IDE device to expose as the optical/boot candidate.  Prefer any
+ * present ATAPI CD-ROM -- on either channel, master or slave -- so that a data
+ * disk on the primary master does not shadow a bootable CD elsewhere on the
+ * IDE bus; fall back to the first present device for plain fixed-disk boot.
+ */
+static IDE_DEVICE *ide_pick_boot_device(void)
+{
+    UINTN i;
+
+    for (i = 0; i < FW_ARRAY_SIZE(mIdeDevices); i++) {
+        if (mIdeDevices[i].present && mIdeDevices[i].is_atapi) {
+            return &mIdeDevices[i];
+        }
+    }
+    for (i = 0; i < FW_ARRAY_SIZE(mIdeDevices); i++) {
+        if (mIdeDevices[i].present) {
+            return &mIdeDevices[i];
+        }
+    }
+    return NULL;
+}
+
 static BOOLEAN ata_pio_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
                                     UINTN count)
 {
     UINTN sector;
 
+    ide_activate(dev);
     if (dev == NULL || !dev->present || dev->is_atapi ||
         count == 0 || count > 255) {
         return 0;
@@ -18251,6 +18338,7 @@ static BOOLEAN ata_pio_write_sectors(IDE_DEVICE *dev, const UINT8 *buf,
 {
     UINTN sector;
 
+    ide_activate(dev);
     if (dev == NULL || !dev->present || dev->is_atapi ||
         count == 0 || count > 255) {
         return 0;
@@ -18291,6 +18379,7 @@ static BOOLEAN ata_dma_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
     UINT32 done = 0;
     UINT32 prd_addr;
 
+    ide_activate(dev);
     if (dev == NULL || !dev->present || dev->is_atapi || !gIde.has_bmdma ||
         count == 0 || count > 255) {
         return 0;
@@ -18338,6 +18427,7 @@ static BOOLEAN ata_dma_write_sectors(IDE_DEVICE *dev, const UINT8 *buf,
     UINT32 done = 0;
     UINT32 prd_addr;
 
+    ide_activate(dev);
     if (dev == NULL || !dev->present || dev->is_atapi || !gIde.has_bmdma ||
         count == 0 || count > 255) {
         return 0;
@@ -18386,6 +18476,7 @@ static BOOLEAN ata_dma_write_sectors(IDE_DEVICE *dev, const UINT8 *buf,
 static BOOLEAN ata_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
                                 UINTN count)
 {
+    ide_activate(dev);
     if (gIde.has_bmdma && ata_dma_read_sectors(dev, buf, lba, count)) {
         return 1;
     }
@@ -18395,6 +18486,7 @@ static BOOLEAN ata_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
 static BOOLEAN ata_write_sectors(IDE_DEVICE *dev, const UINT8 *buf, UINT32 lba,
                                  UINTN count)
 {
+    ide_activate(dev);
     if (gIde.has_bmdma && ata_dma_write_sectors(dev, buf, lba, count)) {
         return 1;
     }
@@ -18539,6 +18631,7 @@ static BOOLEAN atapi_packet_data_in(IDE_DEVICE *Dev, const UINT8 *Cdb,
     UINTN remaining = BufferSize;
     UINTN offset = 0;
 
+    ide_activate(Dev);
     if (Dev == NULL || !Dev->present || !Dev->is_atapi || Cdb == NULL ||
         CdbSize != 12U || Buffer == NULL || BufferSize == 0 ||
         BufferSize > 0xffffU || (BufferSize & 1U) != 0) {
@@ -18612,6 +18705,7 @@ static BOOLEAN atapi_pio_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
 {
     UINT32 done = 0;
 
+    ide_activate(dev);
     if (dev == NULL || !dev->present || !dev->is_atapi) {
         return 0;
     }
@@ -18769,6 +18863,7 @@ static BOOLEAN atapi_dma_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
     UINT32 done = 0;
     UINT32 prd_addr;
 
+    ide_activate(dev);
     if (dev == NULL || !dev->present || !dev->is_atapi || !gIde.has_bmdma) {
         return 0;
     }
@@ -18823,6 +18918,7 @@ static BOOLEAN atapi_dma_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
 static BOOLEAN atapi_read_sectors_uncached(IDE_DEVICE *dev, UINT8 *buf,
                                            UINT32 lba, UINT32 count)
 {
+    ide_activate(dev);
     if (gIde.has_bmdma) {
         if (atapi_dma_read_sectors(dev, buf, lba, count)) {
             return 1;
@@ -20609,6 +20705,7 @@ static BOOLEAN storage_flush(const FW_STORAGE_DEVICE *Device)
         return 1;
     }
     if (Device->Kind == FW_STORAGE_IDE) {
+        ide_activate(Device->Ide);
         ide_select_device(ide_lba_drive_select(Device->Ide, 0));
         if (!ata_pio_wait_not_busy()) {
             return 0;
@@ -20661,6 +20758,7 @@ static BOOLEAN storage_reset(const FW_STORAGE_DEVICE *Device,
         UINT8 command = Device->Ide->is_atapi ?
                         ATA_CMD_IDENTIFY_PACKET : ATA_CMD_IDENTIFY;
 
+        ide_activate(Device->Ide);
         /* ATA Device Control: assert and then release software reset. */
         ata_pio_write8(gIde.ctrl_base, 0x04U);
         (void)bs_stall(5U);
@@ -34500,10 +34598,7 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 
     /* Install Block I/O protocol */
     ide_probe_primary_devices();
-    mBootIdeDevice = &mIdeDevices[0];
-    if (!mBootIdeDevice->present && mIdeDevices[1].present) {
-        mBootIdeDevice = &mIdeDevices[1];
-    }
+    mBootIdeDevice = ide_pick_boot_device();
     ahci_probe_devices();
     scsi_probe_devices();
 
@@ -34884,8 +34979,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
             uart_puts(storage_is_cd(&mBootStorageDevice) ?
                       "SATA ATAPI" : "SATA AHCI disk");
         } else if (mBootStorageDevice.Ide->is_atapi) {
+            ide_activate(mBootStorageDevice.Ide);
             uart_puts(gIde.has_bmdma ? "ATAPI DMA-capable" : "ATAPI PIO");
         } else {
+            ide_activate(mBootStorageDevice.Ide);
             uart_puts(gIde.has_bmdma ? "ATA DMA-capable" : "ATA PIO");
         }
     } else {
@@ -34895,8 +34992,12 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
         uart_puts(", LSI53C895A)\r\n");
     } else if (mBootStorageDevice.Kind == FW_STORAGE_AHCI) {
         uart_puts(", AHCI)\r\n");
+    } else if (mBootStorageDevice.Kind == FW_STORAGE_IDE) {
+        uart_puts(mBootStorageDevice.Ide != NULL &&
+                  mBootStorageDevice.Ide->channel != 0 ?
+                  ", secondary IDE)\r\n" : ", primary IDE)\r\n");
     } else {
-        uart_puts(", primary IDE)\r\n");
+        uart_puts(")\r\n");
     }
     uart_puts("Block I/O Read Test:  ");
     uart_puts(block_io_read_selftest() ? "media ID/range/bulk reads verified\r\n" :
