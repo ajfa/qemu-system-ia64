@@ -2314,6 +2314,72 @@ static void test_ati_sext14_coord(void)
     ati_dev_close(&a);
 }
 
+#define ATI_CLR_CMP_CLR_SRC     0x15c4
+#define ATI_CLR_CMP_MASK        0x15cc
+#define ATI_CLR_CMP_CNTL        0x15c0
+#define ATI_GMC_CLR_CMP_FCN_CLR 0x10000000 /* DP_GUI_MASTER_CNTL bit 28 */
+
+/*
+ * A GUI-master-control write with GMC_CLR_CMP_CNTL_DIS (bit 28) must clear the
+ * colour-compare function (CLR_CMP_CNTL FN_SRC/FN_DST).  The XFree86 r128
+ * driver sets this bit in the base control word of every op, so a colour key
+ * enabled by a transparent (window-decoration) blit does not leak into the
+ * following text/fill ops.  Without this, a stale key drops keyed pixels and
+ * corrupts KDE's terminal text and window frames.
+ */
+static void test_ati_clr_cmp_clear(void)
+{
+    ATITestDev a;
+    const uint32_t src_off = 0x200000, dst_off = 0x100000;
+    const unsigned w = 4, h = 1;
+    const uint32_t stride = (w / 8 ? w / 8 : 1) * 32;
+    const uint32_t key = 0x00aaaaaa, other = 0x00112233;
+    unsigned x;
+
+    ati_dev_open(&a, NULL);
+
+    /* src: [key, other, key, other]; dst pre-cleared to 0 */
+    ati_vram_wr32(&a, src_off + 0 * 4, key);
+    ati_vram_wr32(&a, src_off + 1 * 4, other);
+    ati_vram_wr32(&a, src_off + 2 * 4, key);
+    ati_vram_wr32(&a, src_off + 3 * 4, other);
+    for (x = 0; x < w; x++) {
+        ati_vram_wr32(&a, dst_off + x * 4, 0);
+    }
+
+    /* Enable a NEQ colour key on 'key' (draw only where src != key). */
+    ati_wr(&a, ATI_CLR_CMP_CLR_SRC, key);
+    ati_wr(&a, ATI_CLR_CMP_MASK, 0xffffffff);
+    ati_wr(&a, ATI_CLR_CMP_CNTL, 5);              /* FN_SRC = CMP_NEQ */
+
+    ati_wr(&a, ATI_DEFAULT_SC_BR, 0x3fff3fff);
+    ati_wr(&a, ATI_SC_TOP_LEFT, 0);
+    ati_wr(&a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(&a, ATI_SRC_OFFSET, src_off);
+    ati_wr(&a, ATI_SRC_PITCH, 1);
+    ati_wr(&a, ATI_SRC_Y_X, 0);
+    ati_wr(&a, ATI_DST_OFFSET, dst_off);
+    ati_wr(&a, ATI_DST_PITCH, 1);
+    /*
+     * This control write carries GMC_CLR_CMP_CNTL_DIS, so it must clear the
+     * key first: the copy then draws ALL four source pixels, key ones included.
+     */
+    ati_wr(&a, ATI_DP_GUI_MASTER_CNTL,
+           (6 << 8) | ATI_ROP3_SRCCOPY | ATI_GMC_SRC_POC | ATI_GMC_DST_POC |
+           ATI_GMC_CLR_CMP_FCN_CLR);
+    ati_wr(&a, ATI_DST_Y_X, 0);
+    ati_wr(&a, ATI_DST_HEIGHT_WIDTH, (h << 16) | w);
+
+    /* every source pixel copied, including the two that matched the key */
+    g_assert_cmphex(ati_vram_rd32(&a, dst_off + 0 * 4), ==, key);
+    g_assert_cmphex(ati_vram_rd32(&a, dst_off + 1 * 4), ==, other);
+    g_assert_cmphex(ati_vram_rd32(&a, dst_off + 2 * 4), ==, key);
+    g_assert_cmphex(ati_vram_rd32(&a, dst_off + 3 * 4), ==, other);
+
+    (void)stride;
+    ati_dev_close(&a);
+}
+
 int main(int argc, char **argv)
 {
     unsigned cpus;
@@ -2398,6 +2464,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ati/rop-src-dst", test_ati_rop_src_dst);
     qtest_add_func("/ia64-vpc/ati/overlap-copy", test_ati_overlap_copy);
     qtest_add_func("/ia64-vpc/ati/sext14-coord", test_ati_sext14_coord);
+    qtest_add_func("/ia64-vpc/ati/clr-cmp-clear", test_ati_clr_cmp_clear);
 
     return g_test_run();
 }

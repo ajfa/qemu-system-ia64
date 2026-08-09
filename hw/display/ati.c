@@ -1706,6 +1706,18 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         s->regs.dp_datatype = (data & 0x0f00) >> 8 | (data & 0x30f0) << 4 |
                               (data & 0x4000) << 16;
         s->regs.dp_mix = (data & GMC_ROP3_MASK) | (data & 0x7000000) >> 16;
+        /*
+         * GMC_CLR_CMP_CNTL_DIS (bit 28): "1 = clear CLR_CMP_FN_DST,
+         * CLR_CMP_FN_SRC" (RRG, DP_GUI_MASTER_CNTL).  The XFree86 r128 driver
+         * sets this bit in the base GUI control word of every operation, so a
+         * colour-key left enabled by a transparent blit is cleared by the next
+         * op's control write.  Without honouring it a stale key (e.g. from a
+         * KDE window-decoration blit) leaks into the following text and fill
+         * operations, dropping keyed pixels and corrupting them.
+         */
+        if (data & GMC_DST_CLR_CMP_FCN_CLEAR) {
+            s->regs.clr_cmp_cntl &= ~0x00000707u; /* clear FN_SRC[2:0],FN_DST[10:8] */
+        }
 
         if (!(data & GMC_SRC_PITCH_OFFSET_CNTL)) {
             s->regs.src_offset = s->regs.default_offset;
