@@ -1366,6 +1366,74 @@ static void test_lsi_dbms_no_leak(void)
     qtest_quit(qts);
 }
 
+/*
+ * Regression for the lsi_memcpy 64-bit MOVE MEMORY fix.  A 64-bit memory move
+ * takes bits [63:32] of the destination from the Memory Move Write Selector
+ * (MMWS) and of the source from MMRS (LSI53C895A 4-103/4-104).  Before the fix
+ * lsi_memcpy() was 32-bit and ignored them, so an above-4GB memory move was
+ * truncated to the wrong page -- which broke the Linux sym53c8xx cache snoop
+ * test (a MOVE MEMORY) on large-memory guests.
+ */
+#define IA64_LSI_REG_MMRS            0xa0
+#define IA64_LSI_REG_MMWS            0xa4
+static void test_lsi_memory_move_mmws(void)
+{
+    static const uint8_t src_pattern[16] = {
+        0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+        0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a };
+    const uint32_t src = IA64_LSI_MSGOUT_ADDR;   /* low source */
+    const uint32_t dst = IA64_LSI_CDB_ADDR;      /* low destination */
+    uint32_t addr = IA64_LSI_SCRIPT_ADDR;
+    QTestState *qts;
+    uint8_t dstat = 0;
+    unsigned int i;
+
+    qts = ia64_vpc_start(NULL);   /* a memory move needs no SCSI target */
+
+    qtest_memwrite(qts, src, src_pattern, sizeof(src_pattern));
+    qtest_memset(qts, dst, 0xaa, sizeof(src_pattern));
+
+    /*
+     * MMWS=1 must push the destination 4GB up, into an unmapped hole on this
+     * 256M machine; MMRS=0 keeps the source low.  The low destination must
+     * therefore stay untouched.  Without the fix MMWS is ignored and the low
+     * destination is overwritten with the source pattern.
+     */
+    qtest_writel(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_MMRS, 0x00000000);
+    qtest_writel(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_MMWS, 0x00000001);
+
+    /* SCRIPT: MOVE MEMORY (3 dwords: insn, src, dst) then INTERRUPT. */
+    qtest_writel(qts, addr, 0xc0000000u | sizeof(src_pattern)); addr += 4;
+    qtest_writel(qts, addr, src); addr += 4;
+    qtest_writel(qts, addr, dst); addr += 4;
+    qtest_writel(qts, addr, IA64_LSI_SCRIPT_INTERRUPT); addr += 4;
+    qtest_writel(qts, addr, 0); addr += 4;
+
+    qtest_readb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_DSTAT);
+    qtest_readb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_SIST0);
+    qtest_readb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_SIST1);
+    qtest_writel(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_DSP,
+                 IA64_LSI_SCRIPT_ADDR);
+
+    for (i = 0; i < 1000; i++) {
+        if (qtest_readb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_ISTAT0) &
+            IA64_LSI_ISTAT0_DIP) {
+            dstat = qtest_readb(qts,
+                                IA64_LSI_MMIO_BASE + IA64_LSI_REG_DSTAT);
+            if (dstat & IA64_LSI_DSTAT_SIR) {
+                break;
+            }
+        }
+        g_usleep(1000);
+    }
+    g_assert_true((dstat & IA64_LSI_DSTAT_SIR) != 0);
+
+    for (i = 0; i < sizeof(src_pattern); i++) {
+        g_assert_cmphex(qtest_readb(qts, dst + i), ==, 0xaa);
+    }
+    qtest_quit(qts);
+}
+
 static void iosapic_select(QTestState *qts, uint32_t reg)
 {
     qtest_writel(qts, IA64_IOSAPIC_BASE + IA64_IOSAPIC_IOREGSEL, reg);
@@ -2515,6 +2583,8 @@ int main(int argc, char **argv)
                    test_lsi_async_nodata_command);
     qtest_add_func("/ia64-vpc/lsi/dbms-no-leak",
                    test_lsi_dbms_no_leak);
+    qtest_add_func("/ia64-vpc/lsi/memory-move-mmws",
+                   test_lsi_memory_move_mmws);
     qtest_add_func("/ia64-vpc/iosapic/level-remote-irr",
                    test_iosapic_level_remote_irr);
     qtest_add_func("/ia64-vpc/iosapic/lowest-priority",

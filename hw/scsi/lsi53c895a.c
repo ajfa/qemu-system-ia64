@@ -1241,7 +1241,7 @@ bad:
 }
 
 #define LSI_BUF_SIZE 4096
-static void lsi_memcpy(LSIState *s, uint32_t dest, uint32_t src, int count)
+static void lsi_memcpy(LSIState *s, dma_addr_t dest, dma_addr_t src, int count)
 {
     int n;
     QEMU_UNINITIALIZED uint8_t buf[LSI_BUF_SIZE];
@@ -1748,12 +1748,27 @@ again:
         if ((insn & (1 << 29)) == 0) {
             /* Memory move.  */
             uint32_t dest;
+            dma_addr_t src64, dest64;
             /* ??? The docs imply the destination address is loaded into
                the TEMP register.  However the Linux drivers rely on
                the value being presrved.  */
             dest = lsi_fetch_dword(s, s->dsp);
             s->dsp += 4;
-            lsi_memcpy(s, dest, addr, insn & 0xffffff);
+            /*
+             * A 64-bit MOVE MEMORY takes bits [63:32] of the source from the
+             * Memory Move Read Selector (MMRS) and of the destination from the
+             * Memory Move Write Selector (MMWS); DDAC forces a 32-bit address
+             * (LSI53C895A 4-103/4-104).  Without this the copy truncates to 32
+             * bits, so an above-4GB memory move -- e.g. the sym53c8xx cache
+             * snoop test on a >4GB Linux guest -- silently hits the wrong page.
+             */
+            src64 = addr;
+            dest64 = dest;
+            if (!(s->ccntl1 & LSI_CCNTL1_DDAC)) {
+                src64 |= (dma_addr_t)s->mmrs << 32;
+                dest64 |= (dma_addr_t)s->mmws << 32;
+            }
+            lsi_memcpy(s, dest64, src64, insn & 0xffffff);
         } else {
             uint8_t data[7];
             int reg;
