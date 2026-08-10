@@ -507,16 +507,17 @@ static inline uint32_t lsi_fetch_dword(LSIState *s, uint32_t dsp_addr)
  */
 static inline dma_addr_t lsi_dnad_addr(LSIState *s)
 {
-    dma_addr_t addr = s->dnad;
-
-    if (lsi_dma_40bit(s) || lsi_dma_ti64bit(s)) {
-        addr |= ((uint64_t)s->dnad64 << 32);
-    } else if (s->dbms) {
-        addr |= ((uint64_t)s->dbms << 32);
-    } else if (s->sbms) {
-        addr |= ((uint64_t)s->sbms << 32);
-    }
-    return addr;
+    /*
+     * s->dnad64 holds the upper 32 address bits selected for the *current*
+     * block move.  lsi_execute_script() computes it per move honouring
+     * EN64DBMV / EN64TIBMV, the SBMS static fallback and DDAC (LSI53C895A
+     * technical manual 4-100).  Composing from it directly avoids leaking a
+     * stale Dynamic Block Move Selector (DBMS) — which is only meaningful for
+     * the 64-bit direct move that loaded it — into an unrelated later
+     * transfer (e.g. a 32-bit table-indirect or control move), which would
+     * wrongly push a below-4GB transfer above 4GB.
+     */
+    return s->dnad | ((uint64_t)s->dnad64 << 32);
 }
 
 static void lsi_stop_script(LSIState *s)
@@ -1344,6 +1345,11 @@ again:
         if (insn & (1 << 29)) {
             /* Indirect addressing.  */
             addr = read_dword(s, addr);
+            /*
+             * An indirect move carries no per-move upper address dword, so
+             * bits [63:32] come from the static selector (or none under DDAC).
+             */
+            addr_high = s->sbms;
         } else if (insn & (1 << 28)) {
             uint32_t buf[2];
             int32_t offset;
@@ -1393,6 +1399,12 @@ again:
                           "for 64-bit DMA block move", selector);
                     break;
                 }
+            } else {
+                /*
+                 * EN64TIBMV clear: table indirect BMOVs take bits [63:32]
+                 * from the Static Block Move Selector (LSI53C895A 4-100).
+                 */
+                addr_high = s->sbms;
             }
         } else if (lsi_dma_64bit(s)) {
             /* fetch a 3rd dword if 64-bit direct move is enabled and
@@ -1400,6 +1412,21 @@ again:
             s->dbms = lsi_fetch_dword(s, s->dsp);
             s->dsp += 4;
             s->ia = s->dsp - 12;
+            /*
+             * EN64DBMV: this direct move's upper 32 bits come from the
+             * Dynamic Block Move Selector just loaded from the instruction.
+             */
+            addr_high = s->dbms;
+        } else {
+            /*
+             * Plain 32-bit direct BMOV (EN64DBMV clear): bits [63:32] come
+             * from the Static Block Move Selector, never a stale dynamic one.
+             */
+            addr_high = s->sbms;
+        }
+        /* DDAC disables all dual-address cycles: force a 32-bit address. */
+        if (s->ccntl1 & LSI_CCNTL1_DDAC) {
+            addr_high = 0;
         }
         if ((s->sstat1 & PHASE_MASK) != ((insn >> 24) & 7)) {
             trace_lsi_execute_script_blockmove_badphase(

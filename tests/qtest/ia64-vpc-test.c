@@ -1319,6 +1319,53 @@ static void test_lsi_async_nodata_command(void)
     qtest_quit(qts);
 }
 
+/*
+ * Regression for the lsi_dnad_addr stale-selector leak.  A non-zero Dynamic
+ * Block Move Selector (DBMS) left over from an earlier 64-bit direct move must
+ * NOT be OR-ed into bits [63:32] of a later plain (non-EN64DBMV) block move --
+ * a plain move takes its upper address bits from the Static selector (SBMS).
+ * Before the fix a stale DBMS leaked into every subsequent fetch/store,
+ * including the SCSI CDB fetch in lsi_do_command(), pushing it to an unmapped
+ * >4GB address; on IA-64 XP at 6GB (where above-4GB DMA sets DBMS) this
+ * corrupted disk page-ins and bugchecked the guest (STOP 0xF4).
+ */
+#define IA64_LSI_REG_SBMS            0xb0
+#define IA64_LSI_REG_DBMS            0xb4
+static void test_lsi_dbms_no_leak(void)
+{
+    const uint8_t test_unit_ready[6] = { 0 };
+    QTestState *qts;
+    uint8_t status;
+
+    qts = ia64_vpc_start(
+        "-blockdev driver=null-co,read-zeroes=on,"
+                  "node-name=disk0,size=1048576 "
+        "-device scsi-hd,drive=disk0,bus=scsi.0,scsi-id=0");
+
+    /* Consume the initial unit attention with a clean selector. */
+    g_assert_true(lsi_run_nodata_command(qts, test_unit_ready,
+                                         sizeof(test_unit_ready), &status));
+
+    /*
+     * Poison DBMS with a high-32 that, if leaked, moves every transfer 4GB up
+     * into unmapped space; keep SBMS clear.  The next plain command must
+     * consult SBMS (0), never this stale dynamic selector.
+     */
+    qtest_writel(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_SBMS, 0x00000000);
+    qtest_writel(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_DBMS, 0x00000001);
+
+    /*
+     * With the leak the message-out / CDB / status moves all target >4GB
+     * holes and the command cannot complete GOOD; the fix ignores DBMS, so
+     * the command still selects, transfers and reports GOOD status.
+     */
+    g_assert_true(lsi_run_nodata_command(qts, test_unit_ready,
+                                         sizeof(test_unit_ready), &status));
+    g_assert_cmpuint(status, ==, 0);
+
+    qtest_quit(qts);
+}
+
 static void iosapic_select(QTestState *qts, uint32_t reg)
 {
     qtest_writel(qts, IA64_IOSAPIC_BASE + IA64_IOSAPIC_IOREGSEL, reg);
@@ -2466,6 +2513,8 @@ int main(int argc, char **argv)
                    test_e1000_packet_transfer);
     qtest_add_func("/ia64-vpc/lsi/async-nodata-command",
                    test_lsi_async_nodata_command);
+    qtest_add_func("/ia64-vpc/lsi/dbms-no-leak",
+                   test_lsi_dbms_no_leak);
     qtest_add_func("/ia64-vpc/iosapic/level-remote-irr",
                    test_iosapic_level_remote_irr);
     qtest_add_func("/ia64-vpc/iosapic/lowest-priority",
