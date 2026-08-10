@@ -1672,13 +1672,18 @@ static BOOLEAN test_pci_root_io(EFI_SYSTEM_TABLE *SystemTable)
     EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *root = NULL;
     UINT32 device_id = 0;
 
+    /*
+     * Read the always-present LSI53C895A boot HBA at device 4 (0x1000:0x0012).
+     * The AHCI controller at device 1 is opt-in (ahci=off by default), so it
+     * must not be assumed present here.
+     */
     return SystemTable->BootServices->LocateProtocol(
                pci_root_guid, NULL, (VOID **)&root) == EFI_SUCCESS &&
            root != NULL && root->Pci.Read != NULL &&
            root->SegmentNumber == 0 &&
-           root->Pci.Read(root, EfiPciWidthUint32, 1ULL << 16, 1,
+           root->Pci.Read(root, EfiPciWidthUint32, 4ULL << 16, 1,
                           &device_id) == EFI_SUCCESS &&
-           device_id == 0x29228086U;
+           device_id == 0x00121000U;
 }
 
 static BOOLEAN test_pci_root_resources(EFI_SYSTEM_TABLE *SystemTable)
