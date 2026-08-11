@@ -29737,6 +29737,18 @@ static UINT64 fw_pci_io_expected_bar_length(const FW_PCI_IO_DEVICE *Dev)
     return Dev->ExpectedBarLength;
 }
 
+/*
+ * The IDE (ide=on) and AHCI (ahci=on) storage controllers are opt-in and may
+ * be absent from the default machine configuration, in which case their PCI
+ * config space reads back all-ones.  Every other device in mPciIoDevices is
+ * always present and must self-test.
+ */
+static BOOLEAN fw_pci_io_device_optional(const FW_PCI_IO_DEVICE *Dev)
+{
+    return Dev->Protocol == &mPciIdeIoProto ||
+           Dev->Protocol == &mPciAhciIoProto;
+}
+
 static BOOLEAN fw_pci_io_device_present(const FW_PCI_IO_DEVICE *Dev)
 {
     UINT32 id;
@@ -30839,9 +30851,15 @@ static BOOLEAN __attribute__((noinline)) pci_root_bridge_io_selftest(void)
         return 0;
     }
 
+    /*
+     * The AHCI controller is opt-in (ahci=on); on the default machine slot 1
+     * is empty and reads back all-ones.  Still exercise the root-bridge
+     * config-read path either way, but only require the exact id when the
+     * controller is actually present.
+     */
     if (pci_root_cfg_read(&mPciRootBridgeIoProto, EfiPciWidthUint32,
                           1ULL << 16, 1, &ahci_id) != EFI_SUCCESS ||
-        ahci_id != 0x29228086U) {
+        (ahci_id != 0xffffffffU && ahci_id != 0x29228086U)) {
         return 0;
     }
 
@@ -30905,7 +30923,7 @@ static BOOLEAN __attribute__((noinline)) pci_io_protocol_selftest(void)
                             &id) != EFI_SUCCESS) {
             return 0;
         }
-        if (i == 0 && id == 0xffffffffU) {
+        if (id == 0xffffffffU && fw_pci_io_device_optional(dev)) {
             continue;
         }
         if (id != expected_id) {
