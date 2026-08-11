@@ -2247,13 +2247,16 @@ static void fw_init_guest_high_ram_ranges(UINT64 RamSize)
         mGuestHighRam[i].End = 0;
     }
 
-    /* Consume installed RAM across the same platform holes used by QEMU. */
+    /*
+     * Consume installed RAM across the same platform holes used by QEMU.
+     * Match real 460GX behaviour: DRAM runs contiguously up to the PCI/MMIO
+     * gap, and anything displaced by the gap is remapped ABOVE 4 GiB -- there
+     * is no DRAM island in [PCI_MMIO_end, SAPIC).  (Keep this in lockstep with
+     * ia64_vpc_map_ram() in hw/ia64/ia64_vpc.c.)
+     */
     remaining = RamSize > mGuestLowRamEnd ? RamSize - mGuestLowRamEnd : 0;
     fw_add_guest_high_ram_range(FW_HIGH_RAM_BASE,
                                 FW_HIGH_RAM_BELOW_PCI_END,
-                                &remaining);
-    fw_add_guest_high_ram_range(FW_HIGH_RAM_AFTER_PCI_BASE,
-                                FW_LOCAL_SAPIC_BASE,
                                 &remaining);
     fw_add_guest_high_ram_range(FW_FIRMWARE_ADDRESS_SPACE_END,
                                 ~0ULL, &remaining);

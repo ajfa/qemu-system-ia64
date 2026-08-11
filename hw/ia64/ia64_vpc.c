@@ -2132,14 +2132,14 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
     offset += size;
     remaining -= size;
 
-    size = ia64_vpc_map_ram_alias(
-        s, IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE, offset, remaining,
-        IA64_LOCAL_SAPIC_PA -
-            (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE),
-        "ia64-vpc.high-ram-above-pci");
-    offset += size;
-    remaining -= size;
-
+    /*
+     * Real 460GX hardware keeps a single PCI/MMIO gap at the top of the
+     * 32-bit space and REMAPS any DRAM displaced by that gap to above 4 GiB,
+     * rather than parking it in an island above the PCI aperture but below
+     * 4 GiB.  Do the same: nothing is placed in [PCI_MMIO_end, SAPIC).  A
+     * mid-memory DRAM island there confuses OSes written for the real map
+     * (Linux 2.4 zone/bootmem/DMA setup) once RAM crosses ~3 GiB.
+     */
     ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_AFTER_FIRMWARE_BASE,
                            offset, remaining, remaining,
                            "ia64-vpc.high-ram-above-4g");
