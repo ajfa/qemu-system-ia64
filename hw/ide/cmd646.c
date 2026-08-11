@@ -201,6 +201,17 @@ static void cmd646_set_irq(void *opaque, int channel, int level)
     irq_mask = MRDMODE_INTR_CH0 << channel;
     if (level) {
         pd->config[MRDMODE] |= irq_mask;
+        /*
+         * The real PCI0646 also latches every IDE-bus interrupt into the
+         * per-channel Bus Master IDE status register (BMIDESR bit 2,
+         * "Interrupt", Base Address #4 + 02h; CMD PCI0646 spec, Bus Master
+         * IDE Status Register).  It is sticky and cleared by the driver
+         * writing 1 to it.  Intel's Bus Master IDE programming interface (and
+         * hence Linux' generic ide_dma_end(), which requires
+         * (dma_stat & 7) == 4) relies on this bit to acknowledge a bus-master
+         * transfer, so mirror the standard bmdma_irq() behaviour here.
+         */
+        d->bmdma[channel].status |= BM_STATUS_INT;
     } else {
         pd->config[MRDMODE] &= ~irq_mask;
     }
