@@ -2158,6 +2158,18 @@ void ide_bus_exec_cmd(IDEBus *bus, uint32_t val)
     s = ide_bus_active_if(bus);
     trace_ide_bus_exec_cmd(bus, s, val);
 
+    /*
+     * An entirely empty channel (no master and no slave device) has nothing
+     * to drive INTRQ.  Executing a stray probe command on it -- e.g. the
+     * abort path below for a command to the absent master -- would raise a
+     * spurious interrupt that no driver claims; on a shared native-mode PCI
+     * IDE IRQ (both CMD646 channels multiplexed onto INTA) that unclaimed,
+     * never-cleared interrupt storms the line and wedges the guest.
+     */
+    if (!bus->ifs[0].blk && !bus->ifs[1].blk) {
+        return;
+    }
+
     /* ignore commands to non existent slave */
     if (s != bus->ifs && !s->blk) {
         return;
