@@ -74,7 +74,14 @@
 #define IA64_DEBUG_UART_BASE          0x00000047f0001000ULL
 #define IA64_UART_MMIO_SIZE           0x0000000000002000ULL
 
-#define IA64_PCI_MMIO_BASE            0x00000000c1000000ULL
+/*
+ * The PCI/MMIO aperture sits just below the fixed chipset/SAPIC/firmware
+ * region [0xFE000000, 4 GiB), mirroring real 460GX hardware, which keeps a
+ * single MMIO gap at the top of the 32-bit space so DRAM stays contiguous up
+ * to it and any displaced RAM is remapped above 4 GiB (see
+ * plans/sdv-i2000-firmware-reference.md 7.1).
+ */
+#define IA64_PCI_MMIO_BASE            0x00000000ee000000ULL
 #define IA64_PCI_MMIO_SIZE            0x0000000010000000ULL
 
 typedef struct __attribute__((packed)) IA64VpcHandoff {

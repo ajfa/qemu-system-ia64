@@ -98,7 +98,7 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     0, 0x000C0000, 0x000DFFFF, 0, 0x00020000)
                 QWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, NonCacheable, ReadWrite,
-                    0, 0xC1000000, 0xD0FFFFFF, 0, 0x10000000)
+                    0, 0xEE000000, 0xFDFFFFFF, 0, 0x10000000)
             })
             Name (_PRT, Package ()
             {

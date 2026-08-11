@@ -67,8 +67,8 @@
 #define IA64_VBE2_SIGNATURE          0x32454256U
 #define IA64_VBE_IO_INDEX            0x01ceU
 #define IA64_VBE_IO_DATA             0x01d0U
-#define IA64_VGA_FB_BASE             0x00000000c4000000ULL
-#define IA64_VGA_MMIO_BASE           0x00000000c8000000ULL
+#define IA64_VGA_FB_BASE             0x00000000f0000000ULL
+#define IA64_VGA_MMIO_BASE           0x00000000f5000000ULL
 #define IA64_VGA_LEGACY_BASE         0x00000000000a0000ULL
 #define IA64_ATI_BIOS_0_SCRATCH      0x0010U
 #define IA64_BDA_VIDEO_MODE          0x00000449ULL
@@ -99,7 +99,7 @@ typedef struct TestInt10Registers {
     uint32_t input_signature;
 } TestInt10Registers;
 
-#define IA64_LSI_MMIO_BASE           0x00000000c1030000ULL
+#define IA64_LSI_MMIO_BASE           0x00000000ee030000ULL
 #define IA64_LSI_SCRIPT_ADDR         0x00100000U
 #define IA64_LSI_MSGOUT_ADDR         0x00110000U
 #define IA64_LSI_CDB_ADDR            0x00110010U
@@ -123,7 +123,7 @@ typedef struct TestInt10Registers {
 #define IA64_LSI_SCRIPT_MOVE(phase, count) \
     (((phase) << 24) | (count))
 
-#define IA64_E1000_MMIO_BASE         0x00000000c1040000ULL
+#define IA64_E1000_MMIO_BASE         0x00000000ee040000ULL
 #define IA64_E1000_IO_BASE           0x0000c400U
 #define IA64_E1000_SLOT              6U
 #define IA64_E1000_GSI               18U
@@ -438,7 +438,7 @@ static void test_int10_vbe_for_device(const char *extra_args)
     g_assert_cmphex(lduw_le_p(response + 18), ==, 1024);
     g_assert_cmphex(lduw_le_p(response + 20), ==, 768);
     g_assert_cmphex(response[25], ==, 32);
-    g_assert_cmphex((uint32_t)ldl_le_p(response + 40), ==, 0xc4000000U);
+    g_assert_cmphex((uint32_t)ldl_le_p(response + 40), ==, 0xf0000000U);
 
     memset(&regs, 0, sizeof(regs));
     regs.ax = 0x4f02;
@@ -950,7 +950,7 @@ static void test_ahci_on(void)
         .slot = 1, .vendor = 0x8086, .device = 0x2922,
         .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
         .irq_line = 17, .irq_pin = 1,
-        .bars = { [4] = 0x0000c101, [5] = 0xc1020000 },
+        .bars = { [4] = 0x0000c101, [5] = 0xee020000 },
     };
     QTestState *qts = ia64_vpc_start("-machine ahci=on");
     QGenericPCIBus gbus;
@@ -978,7 +978,7 @@ static void test_pci_default_layout(void)
             .slot = 2, .vendor = 0x106b, .device = 0x003f,
             .command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
             .irq_line = 18, .irq_pin = 1,
-            .bars = { [0] = 0xc1010000 },
+            .bars = { [0] = 0xee010000 },
         }, {
             .slot = 3, .vendor = 0x8086, .device = 0x7020,
             .command = PCI_COMMAND_IO | PCI_COMMAND_MASTER,
@@ -991,17 +991,17 @@ static void test_pci_default_layout(void)
             .irq_line = 16, .irq_pin = 1,
             .bars = {
                 [0] = 0x0000c201,
-                [1] = 0xc1030000,
-                [2] = 0xc1032000,
+                [1] = 0xee030000,
+                [2] = 0xee032000,
             },
         }, {
             .slot = 5, .vendor = 0x1002, .device = 0x5046,
             .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY,
             .irq_line = 17, .irq_pin = 1,
             .bars = {
-                [0] = 0xc4000008,
+                [0] = 0xf0000008,
                 [1] = 0x0000c301,
-                [2] = 0xc8000000,
+                [2] = 0xf5000000,
             },
         },
     };
@@ -1898,8 +1898,8 @@ static void ati_dev_open(ATITestDev *a, const char *extra)
     g_assert_cmphex(qpci_config_readw(a->dev, PCI_DEVICE_ID), ==, 0x5046);
     a->mmio = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_2) & 0xfffffff0;
     a->fb = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_0) & 0xfffffff0;
-    g_assert_cmphex(a->mmio, ==, 0xc8000000);
-    g_assert_cmphex(a->fb, ==, 0xc4000000);
+    g_assert_cmphex(a->mmio, ==, 0xf5000000);
+    g_assert_cmphex(a->fb, ==, 0xf0000000);
 }
 
 static void ati_dev_close(ATITestDev *a)
@@ -2045,7 +2045,7 @@ static void test_ati_rom_bar_tables(void)
      */
     rom_bar = qpci_config_readl(a.dev, PCI_ROM_ADDRESS);
     rom_base = rom_bar & 0xfffff800;
-    g_assert_cmphex(rom_base, ==, 0xc9000000);
+    g_assert_cmphex(rom_base, ==, 0xf6000000);
     qpci_config_writel(a.dev, PCI_ROM_ADDRESS, rom_base | 1); /* enable decode */
 
     rom = g_malloc(0x10000);
