@@ -63,5 +63,7 @@ bool ia64_exec_debug_read(CPUState *cs, uint64_t addr, void *buffer,
                           size_t size);
 bool ia64_exec_physical_rw(uint64_t addr, void *buffer, size_t size,
                            bool is_write);
+void ia64_exec_invalidate_phys_range(CPUIA64State *env, uint64_t addr,
+                                     uint64_t length);
 
 #endif /* TARGET_IA64_EXEC_ACCESS_H */

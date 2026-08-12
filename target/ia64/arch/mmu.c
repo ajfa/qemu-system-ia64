@@ -265,19 +265,17 @@ void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
 {
     uint64_t pa;
 
-    if ((env->psr & IA64_PSR_DT) && !ia64_va_is_implemented(env, addr)) {
+    if ((env->psr & IA64_PSR_DT) ?
+        !ia64_va_is_implemented(env, addr) :
+        !ia64_pa_is_implemented(env, addr)) {
         ia64_raise_unimplemented_data_address(
             env, addr, IA64_ISR_R, true, false, ia64_code_tlb_ed(env));
     }
 
     if (ia64_data_address_to_phys(env, addr, &pa)) {
         uint64_t start = pa & ~(IA64_L0_CACHE_LINE_SIZE - 1);
-        uint64_t end = start + IA64_L0_CACHE_LINE_SIZE - 1;
 
-        if (end < start) {
-            end = UINT64_MAX;
-        }
-        tb_invalidate_phys_range(env_cpu(env), start, end);
+        ia64_exec_invalidate_phys_range(env, start, IA64_L0_CACHE_LINE_SIZE);
     }
 }
 

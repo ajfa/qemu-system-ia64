@@ -8,6 +8,7 @@
 #include "qemu/atomic.h"
 #include "qemu/atomic128.h"
 #include "qemu/log.h"
+#include "qemu/rcu.h"
 #include "cpu.h"
 #include "exec-access.h"
 #include "accel/tcg/cpu-ldst.h"
@@ -328,4 +329,39 @@ bool ia64_exec_physical_rw(uint64_t addr, void *buffer, size_t size,
     return address_space_rw(&address_space_memory, addr,
                             MEMTXATTRS_UNSPECIFIED, buffer, size,
                             is_write) == MEMTX_OK;
+}
+
+void ia64_exec_invalidate_phys_range(CPUIA64State *env, uint64_t addr,
+                                     uint64_t length)
+{
+    hwaddr start = addr;
+    hwaddr remaining = length;
+
+    /*
+     * Translated blocks are keyed by RAMBlock offset, not guest-physical
+     * address.  Where the machine aliases DRAM (e.g. the fork remaps RAM
+     * displaced by the PCI window above 4 GiB), a guest-physical range must
+     * be resolved to its backing RAMBlock offsets before the invalidation,
+     * or fc.i/PAL_COPY_PAL would flush the wrong (or no) code pages.
+     */
+    RCU_READ_LOCK_GUARD();
+    while (remaining != 0) {
+        hwaddr xlat;
+        hwaddr len = remaining;
+        MemoryRegion *mr;
+
+        mr = address_space_translate(&address_space_memory, start, &xlat,
+                                     &len, false, MEMTXATTRS_UNSPECIFIED);
+        if (len == 0) {
+            break;
+        }
+        if (memory_region_is_ram(mr) || memory_region_is_romd(mr)) {
+            ram_addr_t ram_addr = memory_region_get_ram_addr(mr) + xlat;
+
+            tb_invalidate_phys_range(env_cpu(env), ram_addr,
+                                     ram_addr + len - 1);
+        }
+        start += len;
+        remaining -= len;
+    }
 }

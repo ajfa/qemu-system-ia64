@@ -30,6 +30,9 @@ from .encoding import (
     IA64_EXCP_UNALIGNED,
     IA64_FIRMWARE_IVT_BASE,
     IA64_FW_IDENTITY_BASE,
+    IA64_GENERAL_VECTOR,
+    IA64_GENEX_UNIMPL_DATA_ADDR,
+    IA64_IMPL_PA_BITS,
     IA64_IMPL_VA_MSB,
     IA64_INST_ACCESS_BIT_VECTOR,
     IA64_INST_ACCESS_VECTOR,
@@ -6206,6 +6209,73 @@ test_fc_i_invalidates_translated_cache_line = require_registers(
         "r31": 2,
     }, entry=0x10)
 
+test_fc_i_unimplemented_physical_address_faults = require_registers(
+    "fc_i_unimplemented_physical_address_faults", [
+        (0x10, *movl_mlx(16, 1 << IA64_IMPL_PA_BITS)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x01, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, fc_i(16), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00,
+         mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(10, 20), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x30,
+                 IA64_GENERAL_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x50,
+        "r9": (IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R |
+               IA64_ISR_NA),
+        "r10": 1 << IA64_IMPL_PA_BITS,
+    }, entry=0x10)
+
+
+FC_HIGH_RAM_TARGET = 0x80210000
+FC_ABOVE_4G_RAM_TARGET = 0x100100000
+
+
+def test_fc_i_high_ram_invalidates_translated_target(qemu):
+    stats, output = run_program_jit(qemu, [
+        (0x10, *movl_mlx(16, FC_HIGH_RAM_TARGET)),
+        (0x20, *movl_mlx(17, 0x60)),
+        (0x30, 0x00, nop_m(), mov_br_gr(1, 17),
+         mov_br_gr(2, 16)),
+        (0x40, 0x10, nop_m(), nop_i(), br_indirect(2)),
+        (0x60, 0x10, fc_i(16), nop_i(), br_cond(0x60, 0x70)),
+        (0x70, 0x01, sync_i(), nop_i(), nop_i()),
+        (0x80, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (FC_HIGH_RAM_TARGET, 0x10, nop_m(), adds(30, 1, 0),
+         br_indirect(1)),
+    ], entry=0x10, terminal_ip=0x90, memory="4G")
+    if stats.get("TB invalidate count", 0) < 1:
+        raise AssertionError(
+            "fc.i did not invalidate code in aliased high RAM:\n" + output)
+
+
+def test_fc_i_above_4g_ram_invalidates_translated_target(qemu):
+    stats, output = run_program_jit(qemu, [
+        (0x10, *movl_mlx(16, FC_ABOVE_4G_RAM_TARGET)),
+        (0x20, *movl_mlx(17, 0x60)),
+        (0x30, 0x00, nop_m(), mov_br_gr(1, 17),
+         mov_br_gr(2, 16)),
+        (0x40, 0x10, nop_m(), nop_i(), br_indirect(2)),
+        (0x60, 0x10, fc_i(16), nop_i(), br_cond(0x60, 0x70)),
+        (0x70, 0x01, sync_i(), nop_i(), nop_i()),
+        (0x80, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (FC_ABOVE_4G_RAM_TARGET, 0x10, nop_m(), adds(30, 1, 0),
+         br_indirect(1)),
+    ], entry=0x10, terminal_ip=0x90, memory="8G")
+    if stats.get("TB invalidate count", 0) < 1:
+        raise AssertionError(
+            "fc.i did not invalidate code above 4 GiB RAM:\n" + output)
+
 test_no_ic_data_access_enters_vector_with_ni = require_registers(
     "no_ic_data_access_enters_vector_with_ni",
     [
@@ -6311,8 +6381,11 @@ CASE_NAMES = (
     'dtlb_miss_slot1_resumes_without_replaying_slot0',
     'dtr_match_ignores_vrn',
     'exception_preserves_translation_bits',
+    'fc_i_above_4g_ram_invalidates_translated_target',
+    'fc_i_high_ram_invalidates_translated_target',
     'fc_i_invalidates_translated_cache_line',
     'fc_i_invalidates_translated_target',
+    'fc_i_unimplemented_physical_address_faults',
     'fetchadd4_alt_dtlb_sets_read_write_isr',
     'firmware_identity_ends_after_iva_handoff',
     'firmware_identity_does_not_override_user_mapping',
