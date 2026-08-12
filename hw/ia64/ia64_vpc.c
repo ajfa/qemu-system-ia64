@@ -3043,7 +3043,21 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
 #ifdef CONFIG_IA64_VPC_PS2
     if (s->i8042_enabled) {
-        isa_create_simple(isa_bus, TYPE_I8042);
+        ISADevice *i8042 = isa_new(TYPE_I8042);
+
+        /*
+         * Model the PS/2 serial transfer latency of the Super I/O KBC (see
+         * the LPC47B27 that real Merced platforms carry).  Presenting mouse
+         * and keyboard bytes synchronously with the guest port access lets a
+         * solicited AUX reply race the psmouse driver's unlocked command
+         * bookkeeping across CPUs and fatally dereference a not-yet-installed
+         * protocol_handler; the throttle spaces bytes at ~1 ms as on hardware.
+         */
+        object_property_set_bool(OBJECT(i8042), "kbd-throttle", true,
+                                 &error_abort);
+        if (!isa_realize_and_unref(i8042, isa_bus, errp)) {
+            return false;
+        }
     }
 #endif
 
