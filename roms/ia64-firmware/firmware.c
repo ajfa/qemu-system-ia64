@@ -2249,15 +2249,25 @@ static void fw_init_guest_high_ram_ranges(UINT64 RamSize)
 
     /*
      * Consume installed RAM across the same platform holes used by QEMU.
-     * Match real 460GX behaviour: DRAM runs contiguously up to the PCI/MMIO
-     * gap, and anything displaced by the gap is remapped ABOVE 4 GiB -- there
-     * is no DRAM island in [PCI_MMIO_end, SAPIC).  (Keep this in lockstep with
+     * Match real 460GX behaviour: anything displaced by the top-of-memory
+     * PCI/MMIO gap is remapped ABOVE 4 GiB -- there is no DRAM island in
+     * [PCI_MMIO_end, SAPIC).
+     *
+     * The sub-4 GiB high window [HIGH_RAM_BASE, PCI_MMIO_BASE) is only used
+     * when the installed RAM fills it COMPLETELY.  A partially-filled window
+     * leaves DRAM ending mid-band below 4 GiB with no RAM above 4 GiB, which
+     * Linux 2.6.8 IA-64's zone/bootmem/virtual-mem-map init mishandles
+     * (page-table corruption in early userspace) for any RAM in the
+     * ~(2 GiB, 3.72 GiB) band.  When the window would be partial, remap all
+     * high DRAM above 4 GiB instead.  (Keep this in lockstep with
      * ia64_vpc_map_ram() in hw/ia64/ia64_vpc.c.)
      */
     remaining = RamSize > mGuestLowRamEnd ? RamSize - mGuestLowRamEnd : 0;
-    fw_add_guest_high_ram_range(FW_HIGH_RAM_BASE,
-                                FW_HIGH_RAM_BELOW_PCI_END,
-                                &remaining);
+    if (remaining > FW_HIGH_RAM_BELOW_PCI_END - FW_HIGH_RAM_BASE) {
+        fw_add_guest_high_ram_range(FW_HIGH_RAM_BASE,
+                                    FW_HIGH_RAM_BELOW_PCI_END,
+                                    &remaining);
+    }
     fw_add_guest_high_ram_range(FW_FIRMWARE_ADDRESS_SPACE_END,
                                 ~0ULL, &remaining);
 }

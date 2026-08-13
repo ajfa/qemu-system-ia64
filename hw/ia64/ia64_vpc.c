@@ -2125,21 +2125,32 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
     offset += size;
     remaining -= size;
 
-    size = ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_BASE, offset,
-                                  remaining,
-                                  IA64_PCI_MMIO_BASE - IA64_HIGH_RAM_BASE,
-                                  "ia64-vpc.high-ram-below-pci");
-    offset += size;
-    remaining -= size;
-
     /*
-     * Real 460GX hardware keeps a single PCI/MMIO gap at the top of the
-     * 32-bit space and REMAPS any DRAM displaced by that gap to above 4 GiB,
-     * rather than parking it in an island above the PCI aperture but below
-     * 4 GiB.  Do the same: nothing is placed in [PCI_MMIO_end, SAPIC).  A
-     * mid-memory DRAM island there confuses OSes written for the real map
-     * (Linux 2.4 zone/bootmem/DMA setup) once RAM crosses ~3 GiB.
+     * The sub-4 GiB high-RAM window [HIGH_RAM_BASE, PCI_MMIO_BASE) is only
+     * used when the installed RAM fills it COMPLETELY.  A partially-filled
+     * window leaves DRAM ending mid-band below 4 GiB with no RAM above 4 GiB;
+     * Linux 2.6.8 IA-64 (and the -mckinley zone/bootmem/virtual-mem-map init)
+     * mishandles that fragmented single-DMA-zone layout and corrupts page
+     * tables during early userspace (do_wp_page "bogus page" -> slab/rmap
+     * cascade).  Reproduces at any RAM in ~(2 GiB, 3.72 GiB); <=2 GiB (no
+     * window) and >=~3.72 GiB (window full + DRAM above 4 GiB, so a non-empty
+     * ZONE_NORMAL) both boot cleanly.  When the window would be partial,
+     * remap all high DRAM above 4 GiB instead, matching what real 460GX does
+     * with DRAM displaced by the top-of-memory PCI gap.  The test is strict so
+     * that using the window always leaves a remainder above 4 GiB: DRAM is then
+     * both contiguous up to the aperture AND present above 4 GiB, exactly the
+     * layout that boots cleanly.  Keep this in lockstep with
+     * fw_init_guest_high_ram_ranges() in roms/ia64-firmware/firmware.c.
      */
+    if (remaining > IA64_PCI_MMIO_BASE - IA64_HIGH_RAM_BASE) {
+        size = ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_BASE, offset,
+                                      remaining,
+                                      IA64_PCI_MMIO_BASE - IA64_HIGH_RAM_BASE,
+                                      "ia64-vpc.high-ram-below-pci");
+        offset += size;
+        remaining -= size;
+    }
+
     ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_AFTER_FIRMWARE_BASE,
                            offset, remaining, remaining,
                            "ia64-vpc.high-ram-above-4g");

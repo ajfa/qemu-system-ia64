@@ -683,6 +683,48 @@ static void test_firmware_handoff_defaults(void)
     qtest_quit(qts);
 }
 
+/*
+ * The sub-4 GiB high-RAM window [0x80200000, 0xEE000000) is used only when the
+ * installed RAM fills it completely; otherwise all DRAM above 2 GiB is remapped
+ * above 4 GiB.  A partially-filled window corrupts Linux 2.6.8 IA-64's MM (see
+ * ia64_vpc_map_ram()/fw_init_guest_high_ram_ranges()).  Guard both branches by
+ * probing where DRAM actually lands.  The -m values reserve a large address
+ * space but qtest only touches a couple of pages, so the RSS stays tiny.
+ */
+#define IA64_HIGH_RAM_BELOW_PCI_BASE 0x0000000080200000ULL
+#define IA64_HIGH_RAM_ABOVE_4G_BASE  0x0000000100000000ULL
+
+static void test_ram_high_remap(void)
+{
+    const uint64_t magic = 0x0123456789abcdefULL;
+
+    /*
+     * 2304 MiB lands in the toxic band (256 MiB above the 2 GiB low limit,
+     * far short of the ~1758 MiB window): the window is skipped and the high
+     * DRAM is remapped above 4 GiB.
+     */
+    QTestState *qts = qtest_init("-machine ia64-vpc -m 2304M -S");
+
+    qtest_writeq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE), ==, magic);
+    /* The below-PCI window must NOT be backed by DRAM at this size. */
+    qtest_writeq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE), !=, magic);
+    qtest_quit(qts);
+
+    /*
+     * 3808 MiB more than fills the window, so the below-PCI window is used
+     * (contiguous DRAM up to the aperture) and only the small remainder lands
+     * above 4 GiB - the layout large guests have always had.
+     */
+    qts = qtest_init("-machine ia64-vpc -m 3808M -S");
+    qtest_writeq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE), ==, magic);
+    qtest_writeq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE), ==, magic);
+    qtest_quit(qts);
+}
+
 static void assert_cpu_model_type(const char *cpu_arg, const char *expect_type)
 {
     g_autofree char *args = g_strdup_printf("-cpu %s", cpu_arg);
@@ -2532,6 +2574,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/vga/int10-legacy", test_int10_legacy);
     qtest_add_func("/ia64-vpc/vga/int10-legacy-std",
                    test_int10_legacy_std);
+    qtest_add_func("/ia64-vpc/ram/high-remap-above-4g", test_ram_high_remap);
     qtest_add_func("/ia64-vpc/firmware-handoff/defaults",
                    test_firmware_handoff_defaults);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);
