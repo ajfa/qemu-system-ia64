@@ -565,6 +565,7 @@ mov_br_nat_source_consumes
 mov_cpuid_indexed_decode
 mov_cpuid_madison_model
 mov_cpuid_nat_index_consumes
+mov_cr_ifa_uda_merced
 mov_cr_lid_ignored_high_bits_read_zero
 mov_cr_nat_source_consumes
 mov_cr_to_r0_ic_set_illegal

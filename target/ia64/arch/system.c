@@ -395,6 +395,17 @@ uint64_t ia64_system_validate_cr_access(CPUIA64State *env, uint64_t value,
                                fault_ip, raw, slot);
     }
 
+    if (write && cr_num == IA64_CR_IFA &&
+        !ia64_va_is_implemented(env, value)) {
+        /* Writing an unimplemented VA to CR.IFA raises Unimplemented Data
+         * Address (a non-access reference). */
+        env->cr_ifa = value;
+        env->cr_isr = IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_NA |
+                      (ia64_current_code_tlb_ed(env) ? IA64_ISR_ED : 0);
+        ia64_raise_exception(env, IA64_EXCP_UNIMPL_DATA_ADDR,
+                             fault_ip, raw, slot);
+    }
+
     switch (cr_num) {
     case 2:
         return value & ~0x7fffULL;

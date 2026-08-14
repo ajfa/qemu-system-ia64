@@ -28,6 +28,7 @@ from .encoding import (
     IA64_EXCP_PAGE_NOT_PRESENT,
     IA64_EXCP_RESERVED_REG_FIELD,
     IA64_EXCP_UNALIGNED,
+    IA64_EXCP_UNIMPL_DATA_ADDR,
     IA64_FIRMWARE_IVT_BASE,
     IA64_FW_IDENTITY_BASE,
     IA64_GENERAL_VECTOR,
@@ -2385,6 +2386,17 @@ test_tak_unimplemented_va_does_not_alias_short_vhpt = require_registers(
         "exception": IA64_EXCP_NONE,
         "r31": 1,
     }, entry=0x10, cpu="montecito")
+
+test_mov_cr_ifa_uda_merced = require_exception(
+    "mov_cr_ifa_uda_merced", [
+        # PSR.ic clear so the write reaches the IFA check, not the ic+16..25
+        # Illegal-Operation guard.  1<<51 is above Merced's implemented VA.
+        (0x10, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, *movl_mlx(16, 1 << 51)),
+        (0x40, 0x00, mov_m_gr_cr(16, 20), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], IA64_EXCP_UNIMPL_DATA_ADDR, fault_ip=0x40, cpu="merced")
 
 test_itr_d_not_present_raises_page_fault = require_registers(
     "itr_d_not_present_raises_page_fault", [
@@ -6514,6 +6526,7 @@ CASE_NAMES = (
     'natpage_unaligned_store_outranks_unaligned',
     'natpage_xchg_raises_nat_consumption',
     'unaligned_store_reports_unaligned_when_mapped',
+    'mov_cr_ifa_uda_merced',
     'mov_pkr_duplicate_key_invalidates_old_slot',
     'mov_pkr_indexed_decode',
     'mov_rr_indexed_decode',
