@@ -624,8 +624,21 @@ static void ia64_do_fcmp(CPUIA64State *env, uint32_t p1, uint32_t p2,
         return;
     }
 
-    rel = floatx80_compare(ia64_fr_to_floatx80(env, r2),
-                           ia64_fr_to_floatx80(env, r3), &env->fp.fp_status);
+    /*
+     * fcmp.eq/.neq (cond 0) and fcmp.unord/.ord (cond 3) are quiet: an
+     * unordered (QNaN) operand does not raise Invalid.  Only fcmp.lt/.le
+     * (cond 1/2) signal.  Using softfloat's signaling compare for every
+     * relation wrongly set V (and could take an FP fault) on a QNaN.
+     */
+    if ((cond_code & 3) == 0 || (cond_code & 3) == 3) {
+        rel = floatx80_compare_quiet(ia64_fr_to_floatx80(env, r2),
+                                     ia64_fr_to_floatx80(env, r3),
+                                     &env->fp.fp_status);
+    } else {
+        rel = floatx80_compare(ia64_fr_to_floatx80(env, r2),
+                               ia64_fr_to_floatx80(env, r3),
+                               &env->fp.fp_status);
+    }
 
     switch (cond_code & 3) {
     case 0:

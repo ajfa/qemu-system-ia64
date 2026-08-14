@@ -886,6 +886,55 @@ test_fcmp_invalid_fault_restores_predicates = require_registers(
         "ar_fpsr": 0x33e,
     }, entry=0x10)
 
+test_fcmp_qnan_quiet_relations = require_registers(
+    "fcmp_qnan_quiet_relations", [
+        (0x10, *movl_mlx(2, 0x7ff8000000001234)),
+        (0x20, *movl_mlx(3, 0x3ff0000000000000)),
+        (0x30, 0x09, setf_d(6, 2), setf_d(7, 3), nop_i()),
+        (0x40, 0x1c, nop_m(), fcmp(6, 7, 6, 7, rel=0, sf=0), nop_b()),
+        (0x50, 0x1c, nop_m(), fcmp(8, 9, 6, 7, rel=3, sf=1), nop_b()),
+        (0x60, 0x1c, nop_m(), fcmp(10, 11, 6, 7, rel=1, sf=2), nop_b()),
+        (0x70, 0x1c, nop_m(), fcmp(12, 13, 6, 7, rel=2, sf=3), nop_b()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "pr_mask": ExpectedBits(
+            mask=sum(1 << predicate for predicate in range(6, 14)),
+            value=(1 << 7) | (1 << 8) | (1 << 11) | (1 << 13)),
+        # eq and unord are quiet; lt and le set V for this QNaN.
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (1 << (FPSR_SF2_SHIFT + FPSR_SF_FLAGS_SHIFT)) |
+                    (1 << (FPSR_SF2_SHIFT + 13 +
+                           FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fcmp_qnan_quiet_with_invalid_enabled = require_registers(
+    "fcmp_qnan_quiet_with_invalid_enabled", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~1)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x00, cmp4_eq_unc_imm(8, 9, 0, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(3, 0x7ff8000000005678)),
+        (0x50, *movl_mlx(4, 0x3ff0000000000000)),
+        (0x60, 0x09, setf_d(6, 3), setf_d(7, 4), nop_i()),
+        # Quiet eq commits before signaling lt takes the enabled V fault.
+        (0x70, 0x1c, nop_m(), fcmp(6, 7, 6, 7, rel=0), nop_b()),
+        (0x80, 0x1c, nop_m(), fcmp(8, 9, 6, 7, rel=1), nop_b()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x10,
+                 IA64_FP_FAULT_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 1,
+        "pr_mask": ExpectedBits(
+            mask=sum(1 << predicate for predicate in range(6, 10)),
+            value=(1 << 7) | (1 << 8)),
+        "ar_fpsr": DEFAULT_FPSR & ~1,
+    }, entry=0x10)
+
 test_fp_inexact_trap_commits_result = require_registers(
     "fp_inexact_trap_commits_result", [
         (0x10, *movl_mlx(2, 0x31f)),
@@ -3195,6 +3244,8 @@ CASE_NAMES = (
     'fcmp_invalid_fault_restores_predicates',
     'fcmp_natval_clears_predicates',
     'fcmp_p2_high_bit_not_fchkfs',
+    'fcmp_qnan_quiet_relations',
+    'fcmp_qnan_quiet_with_invalid_enabled',
     'fcmp_same_pred_illegal',
     'fcmp_status_field_decode',
     'fcvt_fx_signed_trunc',
