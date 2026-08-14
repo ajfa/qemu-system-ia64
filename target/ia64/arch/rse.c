@@ -1244,10 +1244,14 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
 
 void ia64_rse_pop_return_frame(CPUIA64State *env, uint64_t pfs)
 {
+    /*
+     * Restore AR.EC before the mandatory RSE loads: return_to_frame may take a
+     * fill fault, and the handler must already see the restored epilog count.
+     */
+    env->ar_ec = (pfs & IA64_PFS_PEC_MASK) >> IA64_PFS_PEC_SHIFT;
     ia64_rse_return_to_frame(env, pfs & IA64_PFS_PFM_MASK,
                              (pfs & IA64_CFM_SOL_MASK) >>
                              IA64_CFM_SOL_SHIFT);
-    env->ar_ec = (pfs & IA64_PFS_PEC_MASK) >> IA64_PFS_PEC_SHIFT;
 }
 
 void ia64_rse_br_ret(CPUIA64State *env, uint32_t b_reg)

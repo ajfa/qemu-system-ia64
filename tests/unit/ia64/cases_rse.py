@@ -3038,6 +3038,49 @@ test_rse_bspstore_dtlb_miss_retries_spill = require_registers(
         "r8": 0x1234,
     }, entry=0x10)
 
+test_rse_br_ret_ec_restored_before_target_fill_fault = require_registers(
+    "rse_br_ret_ec_restored_before_target_fill_fault", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE + 0x2000)),
+        (0x20, *movl_mlx(7, EIGHT_K_ITIR)),
+        (0x30, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x40, *movl_mlx(3, HIGH_TR_BASE + 0x2008)),
+        (0x50, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x60, *movl_mlx(4, 0x81 | (0x2d << 52))),
+        (0x70, *movl_mlx(5, 0x200)),
+        (0x80, 0x01, nop_m(), mov_m_gr_ar(4, 64), mov_b_gr(7, 5)),
+        (0x90, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DT | IA64_PSR_RT)),
+        (0xa0, *movl_mlx(3, 0x100)),
+        *rfi_to_gr(0xb0, 2, 3),
+        (0x100, 0x00, nop_m(), mov_i_imm_ar(66, 7), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_ret(7)),
+        (0x200, 0x00, nop_m(), mov_m_ar_gr(9, 66),
+         adds(11, 0, 32)),
+        (0x210, 0x10, nop_m(), nop_i(), br_cond(0x210, 0x210)),
+        raw_bundle(0x4002000, 0x123456789abcdef0, 0),
+        (IA64_ALT_DTLB_VECTOR, 0x18, nop_m(), nop_m(), cover_b()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x00, nop_m(),
+         mov_m_ar_gr(8, 66), adds(10, 1, 10)),
+        (IA64_ALT_DTLB_VECTOR + 0x20, 0x08,
+         mov_m_cr_gr(12, 19), mov_m_cr_gr(13, 22), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00,
+         mov_m_cr_gr(14, 17), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x40, 0x00,
+         mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x50, 0x00,
+         itc_d(18), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x60, 0x10,
+         nop_m(), nop_i(), rfi_b()),
+    ], {
+        # r8 is AR.EC read inside the fill-fault handler: it must already be
+        # the restored 0x2d, not the pre-br.ret 7 (T1e ordering fix).
+        "ip": 0x210,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x2d,
+        "r9": 0x2d,
+        "r10": 1,
+        "r11": 0x123456789abcdef0,
+    }, entry=0x10)
+
 test_rse_br_ret_fill_dtlb_miss_retries_atomically = require_registers(
     "rse_br_ret_fill_dtlb_miss_retries_atomically", [
         (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
@@ -4884,6 +4927,7 @@ CASE_NAMES = (
     'rse_big_endian_backing_store',
     'rse_big_endian_partial_rnat_store_preserves_backed_prefix',
     'rse_big_endian_rnat_collection',
+    'rse_br_ret_ec_restored_before_target_fill_fault',
     'rse_br_ret_fill_dtlb_miss_retries_atomically',
     'rse_br_ret_fill_ignores_rsc_mode',
     'rse_bsp_is_current_frame_base',
