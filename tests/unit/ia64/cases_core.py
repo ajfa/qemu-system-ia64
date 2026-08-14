@@ -268,6 +268,18 @@ test_mov_cr_to_r0_ic_set_illegal = require_exception(
         (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x30)
 
+test_mov_cr_lid_ignored_high_bits_read_zero = require_registers(
+    "mov_cr_lid_ignored_high_bits_read_zero", [
+        (0x10, *movl_mlx(2, 0xdeadbeef12340000)),
+        (0x20, 0x00, mov_m_gr_cr(2, 64), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_cr_gr(29, 64), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {
+        "ip": 0x40,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0x12340000,
+    }, entry=0x10)
+
 test_popcnt_decode = require_registers("popcnt_decode", [
     (0x10, *movl_mlx(3, 0xf0f0f0f0f0f0f0f0)),
     (0x20, 0x00, nop_m(), popcnt(4, 3),
@@ -2912,6 +2924,7 @@ CASE_NAMES = (
     'mov_br_hint_decode',
     'mov_cpuid_indexed_decode',
     'mov_cpuid_madison_model',
+    'mov_cr_lid_ignored_high_bits_read_zero',
     'mov_cr_to_r0_ic_set_illegal',
     'mov_dahr_indexed_decode',
     'mov_dbr_ibr_indexed_decode',

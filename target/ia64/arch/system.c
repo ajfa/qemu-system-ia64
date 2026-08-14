@@ -296,7 +296,8 @@ uint64_t ia64_system_read_cr(CPUIA64State *env, uint32_t cr_num)
     }
     switch (cr_num) {
     case IA64_CR_SAPIC_LID:
-        return qatomic_read(&env->cr[cr_num]);
+        return qatomic_read(&env->cr[cr_num]) &
+               (IA64_SAPIC_LID_ID_MASK | IA64_SAPIC_LID_EID_MASK);
     case IA64_CR_SAPIC_IVR:
         return (uint64_t)ia64_sapic_get_ivr(env) & 0xFF;
     case IA64_CR_SAPIC_IRR0:
@@ -535,7 +536,8 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
         ia64_sapic_update_interrupt(env);
         break;
     case IA64_CR_SAPIC_LID:
-        qatomic_set(&env->cr[cr_num], value);
+        qatomic_set(&env->cr[cr_num],
+                    value & (IA64_SAPIC_LID_ID_MASK | IA64_SAPIC_LID_EID_MASK));
         break;
     case IA64_CR_SAPIC_EOI:
         ia64_sapic_eoi(env);
