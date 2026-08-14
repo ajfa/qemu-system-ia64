@@ -100,7 +100,8 @@ static uint64_t ia64_pr_rot_imm(uint64_t raw)
                    (ia64_bits(raw, 32, 1) << 26) |
                    (ia64_bits(raw, 36, 1) << 27);
 
-    return imm << 16;
+    /* imm28 encodes imm44{43:16}; imm44 is sign-extended to 64 bits. */
+    return (uint64_t)ia64_sign_extend(imm, 28) << 16;
 }
 
 static uint64_t ia64_psr_mask(uint64_t raw)
