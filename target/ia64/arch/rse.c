@@ -649,7 +649,12 @@ static void ia64_rse_complete_frame_loads(CPUIA64State *env, uintptr_t ra)
 /* br.call/cover: the current frame joins the dirty partition. */
 static void ia64_rse_preserve_frame(CPUIA64State *env, uint32_t nregs)
 {
-    uint32_t nats = ia64_rse_nat_words_grow(env->ar_bsp, nregs);
+    uint32_t nats;
+
+    if (nregs == 0) {
+        return;
+    }
+    nats = ia64_rse_nat_words_grow(env->ar_bsp, nregs);
 
     env->rse.rse_bol = ia64_rse_wrap_phys(env->rse.rse_bol + nregs);
     env->ar_bsp += (uint64_t)(nregs + nats) * 8;
