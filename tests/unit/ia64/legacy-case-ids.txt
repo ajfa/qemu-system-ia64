@@ -565,6 +565,7 @@ mov_cpuid_indexed_decode
 mov_cpuid_madison_model
 mov_cpuid_nat_index_consumes
 mov_cr_nat_source_consumes
+mov_cr_to_r0_ic_set_illegal
 mov_crgr_clears_stale_nat
 mov_dahr_indexed_decode
 mov_dbr_ibr_indexed_decode

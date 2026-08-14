@@ -93,14 +93,19 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
                             tcg_constant_i64(0xffffffffffff0000ULL));
         break;
     case IA64_OP_MOV_ARGR:
+        /*
+         * The application-register access check applies to the read itself, so
+         * it must run even when the destination is r0 (a discarded result).
+         */
+        if (!ia64_ar_is_simple(op->source)) {
+            ia64_gen_validate_ar_access(insn, tcg_constant_i64(0), false);
+        }
         if (op->destination != 0) {
             TCGv_i64 val = tcg_temp_new_i64();
 
             if (ia64_ar_is_simple(op->source)) {
                 ia64_gen_read_simple_ar(val, op->source);
             } else {
-                ia64_gen_validate_ar_access(insn, tcg_constant_i64(0),
-                                            false);
                 if (ia64_ar_access_reads_clock(op->source) &&
                     ia64_clock_access_needs_io(ctx)) {
                     translator_io_start(&ctx->base);
@@ -150,12 +155,15 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         }
         break;
     case IA64_OP_MOV_CRGR:
+    {
+        /* The CR access check applies even when the destination is r0. */
+        TCGv_i64 checked = tcg_temp_new_i64();
+
+        ia64_gen_validate_cr_access(checked, insn,
+                                    tcg_constant_i64(0), false);
         if (op->destination != 0) {
             TCGv_i64 val = tcg_temp_new_i64();
-            TCGv_i64 checked = tcg_temp_new_i64();
 
-            ia64_gen_validate_cr_access(checked, insn,
-                                        tcg_constant_i64(0), false);
             if (ia64_cr_read_is_plain_load(op->source)) {
                 tcg_gen_ld_i64(val, tcg_env,
                                offsetof(CPUIA64State, cr) +
@@ -167,6 +175,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             ia64_gen_gr_write_nat_clear(op->destination, val);
         }
         break;
+    }
     case IA64_OP_MOV_GRCR:
     {
         TCGv_i64 checked = tcg_temp_new_i64();
