@@ -852,31 +852,21 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
     }
 }
 
-static void ati_cce_execute(ATIVGAState *s, uint32_t rptr, uint32_t wptr)
+/*
+ * Process a stream of PM4 packets from [rptr, wptr) within a dword-addressed
+ * window (base is a card VM byte address, mask the power-of-two index mask).
+ * Shared by the ring-buffer engine and the indirect-buffer launcher: the ring
+ * is a circular window sized by PM4_BUFFER_CNTL, an indirect buffer a linear
+ * span [0, INDSIZE).  `guard` bounds the packet count at the window size so a
+ * malformed length field (a type-3 count that skips the tail pointer) cannot
+ * spin forever -- the circular `rptr != wptr` test alone does not bound this.
+ */
+static void ati_cce_run(ATIVGAState *s, uint32_t base, uint32_t mask,
+                        uint32_t rptr, uint32_t wptr)
 {
-    int off_slot = ati_init_aux_slot(0x0700);
-    int cntl_slot = ati_init_aux_slot(0x0704);
-    uint32_t base, mask;
-    unsigned l2qw;
+    uint32_t guard = mask + 2;
 
-    if (off_slot < 0 || cntl_slot < 0) {
-        return;
-    }
-    base = s->regs.init_aux[off_slot] & ~0x03u;
-    l2qw = s->regs.init_aux[cntl_slot] & 0x3f;
-    /*
-     * Mode 0 in PM4_BUFFER_CNTL bits 31:28 is PM4_NONPM4 - no command
-     * engine.  A base of 0 is valid: the XP driver runs its ring at card
-     * VM address 0 (translated through the PCI GART).
-     */
-    if (!((s->regs.init_aux[cntl_slot] >> 28) & 0xf) || l2qw > 17) {
-        return;
-    }
-    mask = (2u << l2qw) - 1;    /* ring size in dwords, power of two */
-    rptr &= mask;
-    wptr &= mask;
-
-    while (rptr != wptr) {
+    while (rptr != wptr && guard--) {
         uint32_t hdr = ati_cce_ring_dword(s, base, mask, rptr++);
         uint32_t count = ((hdr >> 16) & 0x3fff) + 1;
         unsigned i;
@@ -931,6 +921,60 @@ static void ati_cce_execute(ATIVGAState *s, uint32_t rptr, uint32_t wptr)
         }
         rptr &= mask;
     }
+}
+
+/*
+ * Launch an indirect buffer (PM4_IW_INDOFF / PM4_IW_INDSIZE).  The r128 DRM
+ * (unlike the XP inbox driver, which inlines type-3 packets in the ring)
+ * batches all 2D work into DMA buffers and only writes the buffer's card VM
+ * byte offset and dword length into the ring; writing INDSIZE makes the CCE
+ * fetch and run that buffer as an ordinary packet stream.  Without this every
+ * drawing command the DRM issues -- the whole X server render path -- is
+ * silently discarded.  Guard against a buffer that itself writes INDSIZE so a
+ * recursive launch cannot run away.
+ */
+static void ati_cce_execute_indirect(ATIVGAState *s)
+{
+    uint32_t size = s->cce_indsize;
+    uint32_t mask;
+
+    if (s->cce_in_indirect || !size) {
+        return;
+    }
+    for (mask = 1; mask < size; mask <<= 1) {
+        /* smallest power-of-two window that spans the buffer */
+    }
+    mask -= 1;
+    s->cce_in_indirect = true;
+    ati_cce_run(s, s->cce_indoff, mask, 0, size);
+    s->cce_in_indirect = false;
+}
+
+static void ati_cce_execute(ATIVGAState *s, uint32_t rptr, uint32_t wptr)
+{
+    int off_slot = ati_init_aux_slot(0x0700);
+    int cntl_slot = ati_init_aux_slot(0x0704);
+    uint32_t base, mask;
+    unsigned l2qw;
+
+    if (off_slot < 0 || cntl_slot < 0) {
+        return;
+    }
+    base = s->regs.init_aux[off_slot] & ~0x03u;
+    l2qw = s->regs.init_aux[cntl_slot] & 0x3f;
+    /*
+     * Mode 0 in PM4_BUFFER_CNTL bits 31:28 is PM4_NONPM4 - no command
+     * engine.  A base of 0 is valid: the XP driver runs its ring at card
+     * VM address 0 (translated through the PCI GART).
+     */
+    if (!((s->regs.init_aux[cntl_slot] >> 28) & 0xf) || l2qw > 17) {
+        return;
+    }
+    mask = (2u << l2qw) - 1;    /* ring size in dwords, power of two */
+    rptr &= mask;
+    wptr &= mask;
+
+    ati_cce_run(s, base, mask, rptr, wptr);
 }
 
 static void ati_pll_write(ATIVGAState *s, uint32_t data)
@@ -1341,6 +1385,14 @@ static void ati_mm_write(void *opaque, hwaddr addr,
     }
     case 0x710 ... 0x713: /* PM4_BUFFER_DL_RPTR */
         ati_reg_write_offs(&s->regs.pm4_dl_rptr, addr - 0x710, data, size);
+        break;
+    case PM4_IW_INDOFF ... PM4_IW_INDOFF + 3:
+        /* Indirect-buffer card VM byte offset; INDSIZE below launches it. */
+        ati_reg_write_offs(&s->cce_indoff, addr - PM4_IW_INDOFF, data, size);
+        break;
+    case PM4_IW_INDSIZE ... PM4_IW_INDSIZE + 3:
+        ati_reg_write_offs(&s->cce_indsize, addr - PM4_IW_INDSIZE, data, size);
+        ati_cce_execute_indirect(s);
         break;
     case 0x05c: /* CRTC_STATUS: bit 1 is write-1-to-clear */
         if (data & 2) {

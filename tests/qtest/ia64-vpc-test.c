@@ -2561,6 +2561,74 @@ static void test_ati_clr_cmp_clear(void)
     ati_dev_close(&a);
 }
 
+/* PM4 indirect-buffer launch registers and the CCE type-0 packet header. */
+#define ATI_PM4_IW_INDOFF       0x0738
+#define ATI_PM4_IW_INDSIZE      0x073c
+/* CCE_PACKET0(reg, n): type-0, writes n+1 registers from reg. n=0 -> one. */
+#define ATI_CCE_PACKET0_1(reg)  ((reg) >> 2)
+
+/*
+ * PM4 indirect buffers.  The r128 DRM (unlike the XP inbox driver, which
+ * inlines type-3 packets in the ring) batches all 2D work into DMA buffers and
+ * only writes the buffer's card VM byte offset and dword length into the ring;
+ * writing PM4_IW_INDSIZE makes the CCE fetch and run that buffer as a packet
+ * stream.  Build such a buffer in VRAM -- with no GART configured it is read
+ * straight from local video memory -- carrying the CCE_PACKET0 register writes
+ * for a solid fill, and confirm the fill reaches VRAM.  Critically, nothing
+ * may draw until the INDSIZE write fires the launch (writing INDOFF alone is
+ * inert), which is exactly the path that was dropped before: the greeter's
+ * whole render batch went unexecuted.
+ */
+static void test_ati_cce_indirect_buffer(void)
+{
+    ATITestDev a;
+    const uint32_t buf_off = 0x200000;   /* indirect buffer, in VRAM  */
+    const uint32_t dst_off = 0x100000;   /* fill destination, in VRAM */
+    const unsigned width = 32, height = 4;
+    const uint32_t color = 0xa1b2c3d4;
+    const uint32_t gmc = (6 << 8) | ATI_GMC_BRUSH_SOLID |    /* 32bpp */
+                         ATI_GMC_ROP3_PATCOPY | ATI_GMC_DST_POC;
+    const uint32_t prog[] = {
+        ATI_CCE_PACKET0_1(ATI_DEFAULT_SC_BR),      0x3fff3fff,
+        ATI_CCE_PACKET0_1(ATI_DP_CNTL),
+            ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM,
+        ATI_CCE_PACKET0_1(ATI_DST_OFFSET),         dst_off,
+        ATI_CCE_PACKET0_1(ATI_DST_PITCH),          32 / 8,
+        ATI_CCE_PACKET0_1(ATI_DP_BRUSH_FRGD_CLR),  color,
+        ATI_CCE_PACKET0_1(ATI_DP_GUI_MASTER_CNTL), gmc,
+        ATI_CCE_PACKET0_1(ATI_DST_Y_X),            0,
+        ATI_CCE_PACKET0_1(ATI_DST_HEIGHT_WIDTH),   (height << 16) | width,
+    };
+    unsigned i, x, y;
+
+    ati_dev_open(&a, NULL);
+
+    /* Lay the packet stream into VRAM and pre-poison the fill target. */
+    for (i = 0; i < ARRAY_SIZE(prog); i++) {
+        ati_vram_wr32(&a, buf_off + i * 4, prog[i]);
+    }
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            ati_vram_wr32(&a, dst_off + (y * width + x) * 4, 0xdeadbeef);
+        }
+    }
+
+    /* INDOFF alone is inert -- the launch is the INDSIZE write. */
+    ati_wr(&a, ATI_PM4_IW_INDOFF, buf_off);
+    g_assert_cmphex(ati_vram_rd32(&a, dst_off), ==, 0xdeadbeef);
+
+    /* Writing INDSIZE fetches and runs the buffer; the fill lands in VRAM. */
+    ati_wr(&a, ATI_PM4_IW_INDSIZE, ARRAY_SIZE(prog));
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            g_assert_cmphex(ati_vram_rd32(&a, dst_off + (y * width + x) * 4),
+                            ==, color);
+        }
+    }
+
+    ati_dev_close(&a);
+}
+
 int main(int argc, char **argv)
 {
     unsigned cpus;
@@ -2653,6 +2721,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ati/overlap-copy", test_ati_overlap_copy);
     qtest_add_func("/ia64-vpc/ati/sext14-coord", test_ati_sext14_coord);
     qtest_add_func("/ia64-vpc/ati/clr-cmp-clear", test_ati_clr_cmp_clear);
+    qtest_add_func("/ia64-vpc/ati/cce-indirect-buffer",
+                   test_ati_cce_indirect_buffer);
 
     return g_test_run();
 }

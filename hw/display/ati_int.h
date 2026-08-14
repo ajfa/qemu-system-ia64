@@ -160,6 +160,14 @@ struct ATIVGAState {
     MemoryRegion mm;
     ATIVGARegs regs;
     ATIHostDataState host_data;
+    /*
+     * Indirect-buffer launch state (PM4_IW_INDOFF / PM4_IW_INDSIZE).  Transient
+     * scratch consumed the instant INDSIZE is written, so it never spans a
+     * savevm; cce_in_indirect breaks a buffer that recursively launches itself.
+     */
+    uint32_t cce_indoff;
+    uint32_t cce_indsize;
+    bool cce_in_indirect;
 };
 
 const char *ati_reg_name(int num);
