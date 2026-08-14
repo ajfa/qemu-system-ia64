@@ -2361,6 +2361,31 @@ test_tak_not_present_dtlb_returns_one = require_registers(
         "r31": 1,
     }, entry=0x10)
 
+test_tak_unimplemented_va_does_not_alias_short_vhpt = require_registers(
+    "tak_unimplemented_va_does_not_alias_short_vhpt", [
+        (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
+        (0x20, *movl_mlx(17, 0xa000000000000000)),
+        (0x30, *movl_mlx(18, 0x539)),
+        (0x40, *movl_mlx(19, 0xbffc000000000000)),
+        (0x50, *movl_mlx(20, 0x0010000004009661)),
+        (0x60, *movl_mlx(21, 0x0010000004000661)),
+        (0x70, *movl_mlx(22, 0x4008000)),
+        (0x80, 0x00, st8(22, 21), nop_i(), nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(16, 8), adds(7, 0x38, 0), nop_i()),
+        (0xa0, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0xb0, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0xc0, 0x00, mov_m_gr_cr(7, 21), adds(5, 5, 0), nop_i()),
+        (0xd0, 0x00, itr_d(5, 20), nop_i(), nop_i()),
+        (0xe0, *movl_mlx(2, 0xa008000000000430)),
+        (0xf0, 0x00, ssm(1 << 17), nop_i(), nop_i()),
+        (0x100, 0x00, tak(31, 2), nop_i(), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0x110)),
+    ], {
+        "ip": 0x110,
+        "exception": IA64_EXCP_NONE,
+        "r31": 1,
+    }, entry=0x10, cpu="montecito")
+
 test_itr_d_not_present_raises_page_fault = require_registers(
     "itr_d_not_present_raises_page_fault", [
         (0x10, *movl_mlx(2, 0xa000000000000430)),
@@ -6583,6 +6608,7 @@ CASE_NAMES = (
     'ssm_pk_invalidates_cached_keyless_access',
     'tak_nat_source_consumes_non_access',
     'tak_not_present_dtlb_returns_one',
+    'tak_unimplemented_va_does_not_alias_short_vhpt',
     'tak_uses_short_vhpt_walk',
     'thash_same_reg_unimplemented_va_sets_nat',
     'thash_uses_pta_with_walker_disabled',

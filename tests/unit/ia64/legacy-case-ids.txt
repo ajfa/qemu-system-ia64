@@ -1076,6 +1076,7 @@ sxt1_decode
 sync_i_ignored_fields_do_not_write_gr
 tak_nat_source_consumes_non_access
 tak_not_present_dtlb_returns_one
+tak_unimplemented_va_does_not_alias_short_vhpt
 tak_uses_short_vhpt_walk
 tbit_nat_source_rules
 tbit_same_pred_illegal

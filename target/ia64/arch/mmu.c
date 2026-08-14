@@ -1658,12 +1658,21 @@ uint64_t ia64_mmu_advanced_load_allowed(CPUIA64State *env, uint64_t va)
 
 uint64_t ia64_mmu_tak(CPUIA64State *env, uint64_t va)
 {
-    uint32_t rid = ia64_region_rid(env, va);
+    uint32_t rid;
     const IA64TlbEntry *entry;
     uint64_t pa;
     uint8_t perm;
     uint64_t pte = 0;
 
+    /*
+     * An unimplemented virtual address returns the architected miss value; a
+     * TLB/VHPT lookup could otherwise return a spurious short-format alias.
+     */
+    if (!ia64_va_is_implemented(env, va)) {
+        return 1;
+    }
+
+    rid = ia64_region_rid(env, va);
     entry = ia64_tlb_find_cached(env, va, rid, false);
     if (entry && ia64_tlb_entry_present(entry)) {
         return entry->key;
