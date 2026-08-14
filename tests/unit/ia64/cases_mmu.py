@@ -4764,6 +4764,14 @@ test_ptc_e_nat_addr_consumes = register_nat_consumption_test(
     "ptc_e_nat_addr_consumes",
     (0x00, ptc_e(16), nop_i(), nop_i()))
 
+test_ptc_e_skips_uda_on_merced = require_registers(
+    "ptc_e_skips_uda_on_merced", [
+        (0x10, *movl_mlx(16, 1 << 51)),
+        (0x20, 0x00, ptc_e(16), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE}, entry=0x10,
+    cpu="merced")
+
 test_short_vhpt_thash_decode = require_registers(
     "short_vhpt_thash_decode", [
         (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
@@ -6518,6 +6526,7 @@ CASE_NAMES = (
     'probe_w_register_level_nat_consumption',
     'ptc_e_nat_addr_consumes',
     'ptc_e_purges_data_tc_on_srlz_i',
+    'ptc_e_skips_uda_on_merced',
     'ptc_l_4g_page_size_is_purgeable',
     'ptc_l_does_not_clear_local_alat',
     'ptc_l_keeps_nonoverlapping_tc',

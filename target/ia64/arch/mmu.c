@@ -800,7 +800,11 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
     uint32_t rid = ia64_region_rid(env, va);
     uint64_t ps = ia64_gr_page_size(size_reg);
 
-    if (!ia64_va_is_implemented(env, va)) {
+    /*
+     * ptc.e (mode 2) takes an implementation-specific purge count in r3, not a
+     * virtual address, so it must not raise an Unimplemented Data Address fault.
+     */
+    if (mode != 2 && !ia64_va_is_implemented(env, va)) {
         ia64_raise_unimplemented_data_address(
             env, va, 0, true, false, ia64_code_tlb_ed(env));
     }
