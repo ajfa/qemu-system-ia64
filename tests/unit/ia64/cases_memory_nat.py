@@ -700,6 +700,20 @@ test_store_invalidates_advanced_load = require_registers(
          0),
     ], {"ip": 0x70, "r4": 0xfeedfacecafebeef}, entry=0x10)
 
+test_fc_invalidates_advanced_load = require_registers(
+    "fc_invalidates_advanced_load", [
+        (0x10, 0x00, addl(3, 0x100, 0), nop_i(), nop_i()),
+        (0x20, *movl_mlx(5, 0x123456789abcdef0)),
+        (0x30, 0x00, st8(3, 5), nop_i(), nop_i()),
+        (0x40, 0x00, ld8_a(4, 3), nop_i(), nop_i()),
+        (0x50, *movl_mlx(4, 0xaa)),
+        # fc removes the cache line holding [0x100] -> ALAT collision, so the
+        # outstanding advanced load must be invalidated and ld.c must reload.
+        (0x60, 0x00, fc_i(3), nop_i(), nop_i()),
+        (0x70, 0x00, ld8_c_nc(4, 3), nop_i(), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {"ip": 0x80, "r4": 0x123456789abcdef0}, entry=0x10)
+
 test_semaphore_ops_invalidate_advanced_loads = require_registers(
     "semaphore_ops_invalidate_advanced_loads", [
         (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x10, 0),
@@ -2823,6 +2837,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'cmpxchg4_uses_ar_ccv',
     'data_big_endian_cmpxchg4',
     'data_big_endian_load_store',
+    'fc_invalidates_advanced_load',
     'fc_nat_source_consumes_non_access',
     'fetchadd4_nat_base_sets_read_write_isr',
     'fetchadd4_result_base_alias_invalidates_alat',

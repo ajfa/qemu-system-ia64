@@ -275,6 +275,8 @@ void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
     if (ia64_data_address_to_phys(env, addr, &pa)) {
         uint64_t start = pa & ~(IA64_L0_CACHE_LINE_SIZE - 1);
 
+        /* Removing a cache line is an architected ALAT-collision event. */
+        ia64_invalidate_alat_phys_range(env, start, IA64_L0_CACHE_LINE_SIZE);
         ia64_exec_invalidate_phys_range(env, start, IA64_L0_CACHE_LINE_SIZE);
     }
 }
