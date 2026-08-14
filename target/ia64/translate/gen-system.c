@@ -110,8 +110,12 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
                     ia64_clock_access_needs_io(ctx)) {
                     translator_io_start(&ctx->base);
                 }
-                gen_helper_read_ar(val, tcg_env,
-                                   tcg_constant_i32(op->source));
+                if (op->source == IA64_AR_ITC) {
+                    gen_helper_itc_read(val, tcg_env);
+                } else {
+                    gen_helper_read_ar(val, tcg_env,
+                                       tcg_constant_i32(op->source));
+                }
             }
             ia64_gen_gr_write_nat_clear(op->destination, val);
         }

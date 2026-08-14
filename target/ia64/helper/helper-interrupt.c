@@ -5,8 +5,7 @@
 #include "exec/helper-proto.h"
 #include "arch/arch.h"
 
-uint64_t helper_itc_read(CPUIA64State *env, uint32_t unused)
+uint64_t helper_itc_read(CPUIA64State *env)
 {
-    (void)unused;
     return ia64_interrupt_itc_read(env);
 }
