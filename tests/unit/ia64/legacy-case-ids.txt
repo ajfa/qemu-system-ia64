@@ -593,6 +593,7 @@ mov_psr_nat_source_consumes
 mov_psr_um_reserved_bit_fault
 mov_rr_indexed_decode
 mov_rr_nat_index_consumes
+mov_to_iipa_establishes_last_ip_for_rfi_to_fault
 mov_to_irr_illegal
 mov_to_ivr_illegal
 mov_to_read_only_cr_predicate_false

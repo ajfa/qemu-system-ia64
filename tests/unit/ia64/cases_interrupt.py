@@ -1448,6 +1448,39 @@ test_iipa_reports_current_bundle_after_prior_slot_success = require_registers(
         "r8": 0x40,
     }, entry=0x10)
 
+test_mov_to_iipa_establishes_last_ip_for_rfi_to_fault = require_registers(
+    "mov_to_iipa_establishes_last_ip_for_rfi_to_fault", [
+        (0x10, *movl_mlx(2, 1 << 13)),
+        (0x20, 0x10, mov_gr_psr_full(2), nop_i(),
+         br_cond(0x20, 0x40)),
+        (0x40, 0x00, nop_m(), nop_i(), nop_i()),
+        (0x50, 0x00, break_m(0x42), nop_i(), nop_i()),
+        (0x90, 0x00, break_m(0x43), nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR, 0x00, mov_m_cr_gr(9, 24), nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x10, 0x00,
+         cmp4_eq_unc_imm(6, 7, 0x42, 9), nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_BREAK_VECTOR + 0x20, IA64_BREAK_VECTOR + 0x50, qp=6)),
+        (IA64_BREAK_VECTOR + 0x30, 0x00, mov_m_cr_gr(8, 22), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR + 0x40, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_BREAK_VECTOR + 0x40, IA64_BREAK_VECTOR + 0x40)),
+        (IA64_BREAK_VECTOR + 0x50, *movl_mlx(19, 1 << 13)),
+        (IA64_BREAK_VECTOR + 0x60, *movl_mlx(20, 0x90)),
+        (IA64_BREAK_VECTOR + 0x70, *movl_mlx(21, 0x1230)),
+        (IA64_BREAK_VECTOR + 0x80, 0x00, mov_m_gr_cr(21, 22), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR + 0x90, 0x00, mov_m_gr_cr(19, 16), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR + 0xa0, 0x00, mov_m_gr_cr(20, 19), nop_i(),
+         nop_i()),
+        (IA64_BREAK_VECTOR + 0xb0, 0x10, nop_m(), nop_i(), rfi_b()),
+    ], {
+        "ip": IA64_BREAK_VECTOR + 0x40,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x1230,
+    }, entry=0x10)
+
 test_iipa_preserved_for_rfi_to_fault = require_registers(
     "iipa_preserved_for_rfi_to_fault", [
         (0x10, *movl_mlx(2, 1 << 13)),
@@ -4686,6 +4719,7 @@ CASE_NAMES = (
     'masking_itv_preserves_pended_timer_irr',
     'mov_from_psr_does_not_copy_execution_slot_to_rfi',
     'mov_pkr_does_not_alias_interruption_crs',
+    'mov_to_iipa_establishes_last_ip_for_rfi_to_fault',
     'mov_to_irr_illegal',
     'mov_to_ivr_illegal',
     'mov_to_read_only_cr_predicate_false',

@@ -205,6 +205,15 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             tcg_gen_st_i64(checked, tcg_env,
                            offsetof(CPUIA64State, cr) +
                            op->source * sizeof(uint64_t));
+            if (op->source == IA64_CR_IIPA) {
+                /*
+                 * mov to CR.IIPA re-establishes the last-executed-bundle
+                 * latch that a subsequent interruption reports as IIPA.
+                 */
+                tcg_gen_st_i64(checked, tcg_env,
+                               offsetof(CPUIA64State,
+                                        last_successful_bundle));
+            }
         } else if (op->source == IA64_CR_SAPIC_LID) {
             /* Atomic store for cross-CPU readers; no translation effect. */
             gen_helper_write_cr(tcg_env, tcg_constant_i32(op->source),
