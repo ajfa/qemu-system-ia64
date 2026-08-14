@@ -880,16 +880,22 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         } else if (insn->opcode == IA64_OP_THASH) {
             gen_helper_thash(result, tcg_env, ia64_gr_src(op->register_index));
             if (op->destination != 0) {
-                tcg_gen_mov_i64(cpu_gr[op->destination], result);
+                /*
+                 * Derive the result NaT from the source before overwriting r1:
+                 * thash may name the same GR for source and destination, and an
+                 * earlier write would hide an unimplemented input address.
+                 */
                 ia64_gen_gr_nat_from_1_or_unimplemented_va(ctx, op->destination,
                                                            op->register_index);
+                tcg_gen_mov_i64(cpu_gr[op->destination], result);
             }
         } else {
             gen_helper_ttag(result, tcg_env, ia64_gr_src(op->register_index));
             if (op->destination != 0) {
-                tcg_gen_mov_i64(cpu_gr[op->destination], result);
+                /* Same source==destination ordering hazard as thash above. */
                 ia64_gen_gr_nat_from_1_or_unimplemented_va(ctx, op->destination,
                                                            op->register_index);
+                tcg_gen_mov_i64(cpu_gr[op->destination], result);
             }
         }
         break;

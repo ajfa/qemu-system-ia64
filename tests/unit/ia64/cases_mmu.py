@@ -4822,6 +4822,19 @@ test_short_vhpt_thash_uses_implemented_va_bits = require_registers(
         "r21": 0x1fffff00001ff,
     }, entry=0x10)
 
+test_thash_same_reg_unimplemented_va_sets_nat = require_registers(
+    "thash_same_reg_unimplemented_va_sets_nat", [
+        # bit 55 is above Merced's implemented VA MSB (50) -> unimplemented VA.
+        (0x10, *movl_mlx(19, 1 << 55)),
+        (0x20, 0x00, thash(19, 19), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {
+        # The result NaT must come from the original (unimplemented) input,
+        # even though thash names the same GR for source and destination.
+        "ip": 0x30,
+        "r19_nat": 1,
+    }, entry=0x10, cpu="merced")
+
 # 245320-002 sec 5.4 and 5.5 publish the original Itanium's long-format VHPT
 # hash and tag exactly:
 #   Hash_Index  = HPN ^ (zero{63:18} || rid{17:0}),  HPN = VA{50:0} >> RR.ps
@@ -6562,6 +6575,7 @@ CASE_NAMES = (
     'tak_nat_source_consumes_non_access',
     'tak_not_present_dtlb_returns_one',
     'tak_uses_short_vhpt_walk',
+    'thash_same_reg_unimplemented_va_sets_nat',
     'thash_uses_pta_with_walker_disabled',
     'tpa_dt_disabled_miss_raises_alt_dtlb',
     'tpa_dt_disabled_uses_dtlb_entry',
