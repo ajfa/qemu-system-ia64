@@ -1978,6 +1978,64 @@ static void ati_pll_wr(ATITestDev *a, uint32_t idx, uint32_t v)
     ati_wr(a, ATI_CLOCK_CNTL_DATA, v);
 }
 
+/*
+ * 460GX GXB AGP host bridge + GART.  Lock in exactly what Linux's i460-agp
+ * driver inspects to bind (8086:84ea host bridge with an AGP capability,
+ * GXBCTL bit1 = 0 for 4 KiB pages, AGPSIZ size_value = 1 for 256 MiB) and the
+ * GART SRAM window at 0xFE200000: writing a GATT entry through it reads back,
+ * so the driver's create_gatt_table zero+read-back works.
+ */
+#define IA64_AGP_SLOT           31U
+#define IA64_AGP_GXBCTL         0xa0
+#define IA64_AGP_AGPSIZ         0xa2
+#define IA64_AGP_GART_WINDOW    0x00000000fe200000ULL
+
+static void test_agp_gxb(void)
+{
+    QTestState *qts = qtest_init("-machine ia64-vpc -m 256M -S");
+    QGenericPCIBus gbus;
+    QPCIDevice *dev;
+    uint8_t cap;
+    bool have_agp_cap = false;
+
+    ia64_qpci_init(&gbus, qts);
+    dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(IA64_AGP_SLOT, 0));
+    g_assert_nonnull(dev);
+
+    /* i460-agp binds by vendor/device + host-bridge class. */
+    g_assert_cmphex(qpci_config_readw(dev, PCI_VENDOR_ID), ==, 0x8086);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x84ea);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_CLASS_DEVICE), ==,
+                    PCI_CLASS_BRIDGE_HOST);
+
+    /* And it requires an AGP capability (id 0x02) or returns -ENODEV. */
+    cap = qpci_config_readb(dev, PCI_CAPABILITY_LIST);
+    while (cap != 0 && cap != 0xff) {
+        if (qpci_config_readb(dev, cap) == PCI_CAP_ID_AGP) {
+            have_agp_cap = true;
+            break;
+        }
+        cap = qpci_config_readb(dev, cap + PCI_CAP_LIST_NEXT);
+    }
+    g_assert_true(have_agp_cap);
+
+    /* 4 KiB GART pages (GXBCTL bit1 clear) and a 256 MiB aperture (AGPSIZ=1). */
+    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_GXBCTL) & 0x02, ==, 0);
+    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x07, ==, 1);
+
+    /* The GART SRAM window is writable/read-backable at its fixed address. */
+    qtest_writel(qts, IA64_AGP_GART_WINDOW + 4 * 7, 0x03001234);
+    g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 4 * 7), ==,
+                    0x03001234);
+    /* Parity bit 26 is HW-owned and must not stick. */
+    qtest_writel(qts, IA64_AGP_GART_WINDOW + 4 * 8, 0x04000005);
+    g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 4 * 8), ==,
+                    0x00000005);
+
+    g_free(dev);
+    qtest_quit(qts);
+}
+
 /* Config space: the machine reports the documented SVID=vendor/SID=device. */
 static void test_ati_config_ids(void)
 {
@@ -2710,6 +2768,7 @@ int main(int argc, char **argv)
                    test_sparse_io_pm_register);
     qtest_add_func("/ia64-vpc/savevm/platform-state",
                    test_savevm_restores_platform_state);
+    qtest_add_func("/ia64-vpc/agp/gxb", test_agp_gxb);
     qtest_add_func("/ia64-vpc/ati/config-ids", test_ati_config_ids);
     qtest_add_func("/ia64-vpc/ati/pll-regfile", test_ati_pll_regfile);
     qtest_add_func("/ia64-vpc/ati/dac-load-sense", test_ati_dac_load_sense);

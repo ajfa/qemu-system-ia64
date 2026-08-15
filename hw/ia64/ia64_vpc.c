@@ -42,6 +42,7 @@
 #include "hw/ia64/ia64_loader.h"
 #include "hw/ia64/ia64_pci.h"
 #include "hw/ia64/ia64_iosapic.h"
+#include "hw/ia64/ia64_agp.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "system/rtc.h"
@@ -395,6 +396,7 @@ struct IA64VpcMachineState {
     char *nvram_path;
     bool alat_full;
 
+    PCIDevice *agp_dev;
     PCIDevice *ahci_dev;
     PCIDevice *ide_dev;
     PCIDevice *ohci_dev;
@@ -2970,6 +2972,19 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         return false;
     }
     pci_bus = PCI_BUS(qdev_get_child_bus(pci_host, "pci"));
+
+    /*
+     * The 460GX GXB AGP host bridge + GART.  Created before any other PCI
+     * device so its pci_setup_iommu() covers them: every master then DMAs
+     * through the GART address space (an identity pass-through until the
+     * graphics aperture is enabled, so ordinary sub-4 GiB DMA is unaffected).
+     * Parked at a fixed high slot so it neither shifts the historical BDFs of
+     * the built-in devices nor is mistaken for a NIC by the slot-6+ scan.
+     */
+    s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
+    if (!pci_realize_and_unref(s->agp_dev, pci_bus, errp)) {
+        return false;
+    }
 
     /*
      * Slot 0 is intentionally empty in the default machine.  Reserve it while
