@@ -181,6 +181,8 @@
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
+/* Graphics (Rage 128) lands here: slots 0-4 are reserved/built-in, VGA next. */
+#define IA64_VPC_VGA_SLOT           5
 #define IA64_VPC_NIC_SLOT           6
 
 #define IA64_SAPIC_DELIVERY_INT     0
@@ -2975,13 +2977,17 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 
     /*
      * The 460GX GXB AGP host bridge + GART.  Created before any other PCI
-     * device so its pci_setup_iommu() covers them: every master then DMAs
-     * through the GART address space (an identity pass-through until the
-     * graphics aperture is enabled, so ordinary sub-4 GiB DMA is unaffected).
-     * Parked at a fixed high slot so it neither shifts the historical BDFs of
-     * the built-in devices nor is mistaken for a NIC by the slot-6+ scan.
+     * device so its pci_setup_iommu() installs the per-devfn DMA routing before
+     * any master's bus-master address space is resolved.  The GART translates
+     * only the AGP graphics master (the Rage 128, deterministically at the fixed
+     * graphics slot below); every other master identity-passes to memory, as on
+     * the real 460GX where only the GXB AGP port carries a GART.  Parked at a
+     * fixed high slot so it neither shifts the historical BDFs of the built-in
+     * devices nor is mistaken for a NIC by the slot-6+ scan.
      */
     s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
+    object_property_set_int(OBJECT(s->agp_dev), "agp-master-devfn",
+                            PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), &error_abort);
     if (!pci_realize_and_unref(s->agp_dev, pci_bus, errp)) {
         return false;
     }
@@ -3097,6 +3103,17 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     s->vga_dev = pci_vga_init(pci_bus);
+    /*
+     * The GART scoping above assumes the graphics device is the AGP master at
+     * IA64_VPC_VGA_SLOT.  pci_vga_init() auto-assigns the lowest free slot,
+     * which is 5 given the built-in layout; fail loudly if that ever drifts.
+     */
+    if (s->vga_dev != NULL &&
+        s->vga_dev->devfn != PCI_DEVFN(IA64_VPC_VGA_SLOT, 0)) {
+        error_setg(errp, "graphics device landed at devfn %#x, expected %#x",
+                   s->vga_dev->devfn, PCI_DEVFN(IA64_VPC_VGA_SLOT, 0));
+        return false;
+    }
 #endif
     if (!ia64_vpc_enable_vga_legacy_switch(s->vga_dev, errp)) {
         return false;

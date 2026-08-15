@@ -14,16 +14,35 @@
  *
  * Contract taken from Linux 2.6.8 drivers/char/agp/i460-agp.c:
  *   - binds to class host-bridge, 8086:84ea, and requires a PCI AGP capability;
- *   - APBASE (BAR0, 64-bit) is the aperture base; GXBCTL[0xa0] bit1 must read 0
- *     (4 KiB pages); AGPSIZ[0xa2] bits[2:0] select the size (1 = 256 MiB);
+ *   - GXBCTL[0xa0] bit1 must read 0 (4 KiB pages); AGPSIZ[0xa2] bits[2:0] select
+ *     the size (1 = 256 MiB); bit3 (BAPBASE_ENABLE) picks which register holds
+ *     the aperture base;
+ *   - the aperture base register is APBASE (BAR0, 0x10) when AGPSIZ bit3 is
+ *     clear, or the non-header BAPBASE (0x98) when it is set;
  *   - GATT entry = 0x03000000 | (paddr[35:12]); bit24 valid, bit25 coherent.
+ *
+ * Aperture placement (SSDM 248704-001 sec 7.2.1).  The AGP master here is an
+ * ATI Rage 128, whose AGP_BASE register (0x170) is only 32 bits wide -- it
+ * cannot issue the dual-address cycles a >4 GiB aperture would need -- so the
+ * aperture bus address must live below 4 GiB, and the GART translates those
+ * 32-bit aperture pages up to 36-bit DRAM physical addresses (which may be
+ * above 4 GiB).  The only sub-4 GiB range clear of DRAM on this platform is the
+ * PCI MMIO hole [0xEE000000, 0xFE000000), so the aperture reuses it -- exactly
+ * the SSDM "reserved gap in the PCI address space" placement.  Because the
+ * aperture is never touched by the processor (i460-agp sets cant_use_aperture),
+ * it is not a header BAR mapped into CPU space (which would collide with the
+ * VGA framebuffer BAR and trip the guest PCI resource allocator); it is exposed
+ * only in the per-bus DMA address space through the IOMMU below, and its base
+ * is advertised through BAPBASE with AGPSIZ bit3 set.
  */
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "hw/ia64/ia64_agp.h"
+#include "hw/ia64/ia64_vpc_abi.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
+#include "hw/core/qdev-properties.h"
 #include "system/address-spaces.h"
 #include "qemu/log.h"
 #include "qapi/error.h"
@@ -32,10 +51,13 @@
 #define I460_GART_WINDOW_BASE   0x00000000fe200000ULL
 
 /* Config-space registers the i460-agp driver touches. */
+#define I460_BAPBASE            0x98    /* 64-bit: above-header aperture base  */
 #define I460_GXBCTL             0xa0    /* 8-bit: bit1 = 4 MiB page select */
 #define I460_AGPSIZ             0xa2    /* 8-bit: [2:0] size, bit3/4 flags   */
 
 #define I460_GXBCTL_4M_PS       0x02
+#define I460_AGPSIZ_SIZE_256M   0x01    /* size_value 1 */
+#define I460_AGPSIZ_BAPBASE_EN  0x08    /* bit3: aperture base is in BAPBASE   */
 
 /* GATT entry bits. */
 #define I460_GATT_VALID         (1u << 24)
@@ -44,13 +66,13 @@
 
 /*
  * 256 MiB aperture (AGPSIZ size_value 1), 4 KiB pages => 65536 GATT entries
- * (256 KiB of SRAM).  Placed high in the DMA address space, clear of any DRAM
- * (max modelled guest RAM is a few GiB), so an out-of-aperture DMA still passes
- * straight through to system memory.
+ * (256 KiB of SRAM).  The aperture bus range reuses the platform PCI MMIO hole
+ * (see the placement note above); an out-of-aperture DMA still passes straight
+ * through to system memory.
  */
 #define I460_APERTURE_SIZE      (256 * MiB)
 #define I460_GATT_ENTRIES       (I460_APERTURE_SIZE / (4 * KiB))
-#define I460_APERTURE_BASE      0x0000000400000000ULL   /* 16 GiB */
+#define I460_APERTURE_BASE      IA64_PCI_MMIO_BASE
 
 static IA64AGPState *ia64_agp_from_iommu(IOMMUMemoryRegion *iommu)
 {
@@ -132,17 +154,43 @@ static const MemoryRegionOps ia64_agp_gart_ops = {
     .impl = { .min_access_size = 4, .max_access_size = 4 },
 };
 
-/* Every device on the bus DMAs through the GART address space. */
+
+/*
+ * Only the AGP graphics master's DMA traverses the GART.  On the real 460GX the
+ * GART is on the GXB's AGP port alone; the SAC/PXB PCI masters (SCSI, IDE, USB,
+ * NIC) reach memory directly, and must NOT be caught by the graphics aperture
+ * -- several of their BARs (e.g. the LSI SCRIPTS RAM) sit inside the aperture's
+ * bus-address range and would otherwise be mis-translated.  Every non-AGP
+ * devfn therefore gets a plain identity pass-through to system memory.
+ */
 static AddressSpace *ia64_agp_dma_as(PCIBus *bus, void *opaque, int devfn)
 {
     IA64AGPState *s = opaque;
 
-    return &s->dma_as;
+    if (devfn == s->agp_master_devfn) {
+        return &s->dma_as;
+    }
+    return &address_space_memory;
 }
 
 static const PCIIOMMUOps ia64_agp_iommu_ops = {
     .get_address_space = ia64_agp_dma_as,
 };
+
+/*
+ * The aperture base is the BAPBASE register (0x98) with its low control bits
+ * masked off -- the same value the i460-agp driver reads and stores in
+ * gart_bus_addr (see i460_configure()).  Translation is live whenever it is
+ * programmed; the GART's per-entry valid bit gates individual pages.
+ */
+static void ia64_agp_update_aperture(IA64AGPState *s)
+{
+    PCIDevice *dev = PCI_DEVICE(s);
+    uint64_t base = pci_get_quad(dev->config + I460_BAPBASE) & ~7ULL;
+
+    s->aperture_base = base;
+    s->aperture_enabled = base != 0;
+}
 
 static void ia64_agp_config_write(PCIDevice *dev, uint32_t addr,
                                   uint32_t val, int len)
@@ -150,13 +198,7 @@ static void ia64_agp_config_write(PCIDevice *dev, uint32_t addr,
     IA64AGPState *s = IA64_AGP(dev);
 
     pci_default_write_config(dev, addr, val, len);
-
-    /* Track the aperture base/enable straight from the BAR the driver reads. */
-    s->aperture_base = pci_get_bar_addr(dev, 0);
-    s->aperture_enabled = (pci_get_word(dev->config + PCI_COMMAND) &
-                           PCI_COMMAND_MEMORY) &&
-                          s->aperture_base != PCI_BAR_UNMAPPED &&
-                          s->aperture_base != 0;
+    ia64_agp_update_aperture(s);
 }
 
 static void ia64_agp_realize(PCIDevice *dev, Error **errp)
@@ -167,11 +209,25 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
     /* Host-bridge class so i460-agp's pci_device_id table matches. */
     pci_config_set_prog_interface(c, 0);
 
-    /* i460-agp reads GXBCTL bit1 (must be 0 = 4 KiB pages) and AGPSIZ[2:0]. */
+    /*
+     * i460-agp reads GXBCTL bit1 (must be 0 = 4 KiB pages) and AGPSIZ[2:0]
+     * (1 = 256 MiB).  AGPSIZ bit3 (BAPBASE_ENABLE) is set so the driver takes
+     * the aperture base from BAPBASE (a >4 GiB-capable, non-header BAR) rather
+     * than the standard header BAR -- see the placement note at the top.
+     */
     c[I460_GXBCTL] = 0x00;
-    c[I460_AGPSIZ] = 0x01;                    /* size_value 1 = 256 MiB */
+    c[I460_AGPSIZ] = I460_AGPSIZ_SIZE_256M | I460_AGPSIZ_BAPBASE_EN;
     dev->wmask[I460_GXBCTL] = 0x05;           /* driver writes OOG|BWC only */
     dev->wmask[I460_AGPSIZ] = 0x07;           /* size_value RMW, keep [7:3] */
+
+    /*
+     * BAPBASE (0x98): the aperture base, low 3 bits marking a 64-bit memory
+     * BAR (the driver masks them off).  Fixed at the platform PCI MMIO hole
+     * base; hardwired (read-only) since this synthetic chipset does not depend
+     * on firmware to size/relocate it.
+     */
+    pci_set_quad(c + I460_BAPBASE,
+                 I460_APERTURE_BASE | PCI_BASE_ADDRESS_MEM_TYPE_64);
 
     /* Mandatory: an AGP capability, or the driver returns -ENODEV. */
     if (pci_add_capability(dev, PCI_CAP_ID_AGP, 0, 8, errp) < 0) {
@@ -180,15 +236,6 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
     /* Advertise AGP 2.0, 1x/2x/4x so agp_generic_enable negotiates a rate. */
     pci_set_long(c + pci_find_capability(dev, PCI_CAP_ID_AGP) + PCI_AGP_STATUS,
                  0x1f000207);
-
-    /* The graphics aperture BAR (64-bit; CPU never touches it, DMA-only). */
-    memory_region_init(&s->aperture, OBJECT(s), "ia64-agp-aperture",
-                       I460_APERTURE_SIZE);
-    pci_register_bar(dev, 0,
-                     PCI_BASE_ADDRESS_SPACE_MEMORY |
-                     PCI_BASE_ADDRESS_MEM_TYPE_64 |
-                     PCI_BASE_ADDRESS_MEM_PREFETCH,
-                     &s->aperture);
 
     /* GART SRAM, exposed to the CPU at the fixed 0xFE200000 window. */
     s->gatt = g_new0(uint32_t, I460_GATT_ENTRIES);
@@ -203,16 +250,22 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
                              "ia64-agp-dma", UINT64_MAX);
     address_space_init(&s->dma_as, MEMORY_REGION(&s->iommu), "ia64-agp-dma");
     pci_setup_iommu(pci_get_bus(dev), &ia64_agp_iommu_ops, s);
+
+    ia64_agp_update_aperture(s);
 }
 
 static void ia64_agp_reset(DeviceState *dev)
 {
     IA64AGPState *s = IA64_AGP(dev);
 
+    /* GATT SRAM clears; BAPBASE is hardwired, so the aperture stays mapped. */
     memset(s->gatt, 0, I460_GATT_ENTRIES * sizeof(uint32_t));
-    s->aperture_base = 0;
-    s->aperture_enabled = false;
+    ia64_agp_update_aperture(s);
 }
+
+static const Property ia64_agp_properties[] = {
+    DEFINE_PROP_INT32("agp-master-devfn", IA64AGPState, agp_master_devfn, -1),
+};
 
 static void ia64_agp_class_init(ObjectClass *klass, const void *data)
 {
@@ -226,6 +279,7 @@ static void ia64_agp_class_init(ObjectClass *klass, const void *data)
     k->class_id = PCI_CLASS_BRIDGE_HOST;
     dc->desc = "Intel 460GX GXB AGP bridge";
     device_class_set_legacy_reset(dc, ia64_agp_reset);
+    device_class_set_props(dc, ia64_agp_properties);
     /* Chipset device, not user-pluggable. */
     dc->user_creatable = false;
 }

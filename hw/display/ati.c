@@ -450,28 +450,61 @@ static void ati_mm_write(void *opaque, hwaddr addr, uint64_t data,
  * specification as used by XFree86 4.x r128_reg.h and the Linux r128 DRM.
  */
 /*
- * PM4 addresses are card "VM space" addresses, not bus addresses.  When the
- * PCI pseudo-GART is configured (PCI_GART_PAGE points at a page table of
- * little-endian physical page addresses), ring fetches translate through it:
- * the XP inbox driver runs the ring at VM offset 0 with the bus-master
- * force-to-PCI bits set (BM_CHUNK_0_VAL bits 21-23), the r128 DRM addresses
- * the same window at VM 0x02000000 (R128_AGP_OFFSET).  Without a GART, low
- * addresses are local video memory.
+ * PM4 addresses are card "VM space" addresses, not bus addresses.  Three
+ * translation regimes, in priority order:
+ *
+ * 1. The r128 PCI pseudo-GART (PCI_GART_PAGE, 0x017c): a page table of
+ *    little-endian physical page addresses.  The XP inbox driver runs the ring
+ *    at VM offset 0 with the bus-master force-to-PCI bits set (BM_CHUNK_0_VAL
+ *    bits 21-23); the r128 DRM in PCI (scatter-gather) mode uses this too.
+ *    This GART is 32-bit and cannot reach DRAM above 4 GiB.
+ *
+ * 2. AGP mode: the r128 DRM, when agpgart is present, places its ring and
+ *    buffers in AGP memory and points AGP_BASE (0x0170) at the chipset AGP
+ *    aperture bus base (the i460 gart_bus_addr).  Two kinds of card address
+ *    reach here in this mode, and the DRM addresses them differently:
+ *      - the *ring* is imaged in the card's MC space at a fixed offset
+ *        R128_AGP_OFFSET (0x02000000; the "AGP system memory image" of
+ *        RRG-G04500-C sec 2.2.1, at AGP_APER_OFFSET), so PM4_BUFFER_OFFSET is
+ *        AGP_BASE-relative: a vm in [R128_AGP_OFFSET, AGP_BASE) maps to AGP bus
+ *        AGP_BASE + (vm - R128_AGP_OFFSET);
+ *      - an *indirect buffer* is referenced by PM4_IW_INDOFF = buf->bus_address
+ *        (Linux drm r128_cce_dispatch_indirect), which is already the absolute
+ *        AGP bus address (dev->agp->base + offset), i.e. vm >= AGP_BASE, and is
+ *        used as-is.
+ *    Either way the resulting AGP bus address is issued through the 460GX GXB
+ *    IOMMU, whose GART relocates the 4 KiB aperture page to 36-bit DRAM --
+ *    reaching above 4 GiB.
+ *
+ * 3. Otherwise low addresses are local video memory, and anything past it is a
+ *    raw bus address.
  */
+#define R128_AGP_OFFSET 0x02000000u
+
 uint32_t ati_cce_vm_dword(ATIVGAState *s, uint32_t vm)
 {
     int gart_slot = ati_init_aux_slot(0x017c); /* PCI_GART_PAGE */
     uint32_t gart = gart_slot >= 0 ? s->regs.init_aux[gart_slot] & ~0xfffu : 0;
+    int agp_slot = ati_init_aux_slot(0x0170);   /* AGP_BASE */
+    uint32_t agp_base = agp_slot >= 0 ? s->regs.init_aux[agp_slot] : 0;
     uint32_t le;
 
     if (gart) {
-        uint32_t off = vm >= 0x02000000 ? vm - 0x02000000 : vm;
+        uint32_t off = vm >= R128_AGP_OFFSET ? vm - R128_AGP_OFFSET : vm;
         uint32_t ent;
 
         pci_dma_read(&s->dev, gart + (off >> 12) * 4, &ent, sizeof(ent));
         ent = le32_to_cpu(ent);
         pci_dma_read(&s->dev, (ent & ~0xfffu) | (off & 0xfff), &le,
                      sizeof(le));
+        return le32_to_cpu(le);
+    }
+    if (agp_base && vm >= R128_AGP_OFFSET) {
+        hwaddr agp_bus = vm >= agp_base ?
+                         vm :                                 /* INDOFF: absolute */
+                         (hwaddr)agp_base + (vm - R128_AGP_OFFSET);  /* ring image */
+
+        pci_dma_read(&s->dev, agp_bus, &le, sizeof(le));
         return le32_to_cpu(le);
     }
     if (vm < s->vga.vram_size - 3) {

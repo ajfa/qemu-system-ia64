@@ -13585,6 +13585,20 @@ static void efi_init_memory_map(void)
                          IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE,
                          EFI_MEMORY_UC);
 
+    /*
+     * The 460GX chipset-specific area [4G-32M, 4G-20M) carries the GART SRAM
+     * programming window at 0xFE200000, which the SSDM (248704-001 sec 7.1.2)
+     * requires the processor to map UC.  We deliberately do NOT add an EFI
+     * memory-map descriptor for it: Linux's i460-agp reaches the GATT through
+     * ioremap(), which maps the physical window UC via the region-6 identity
+     * area on its own, independent of the EFI map -- and adding a descriptor
+     * here perturbs the descriptor layout the XP build-2600 SMP loader is
+     * exquisitely sensitive to (see plans/status.md 2.2 and the
+     * platform-map-460gx-realign notes), deadlocking that guest at kernel
+     * bring-up.  The GART window is left an undescribed chipset gap, exactly
+     * as it was before AGP support.
+     */
+
     efi_add_memory_range(&index, EfiMemoryMappedIO,
                          FW_FIRMWARE_ADDRESS_SPACE_BASE,
                          FW_RTC_BASE, EFI_MEMORY_UC);

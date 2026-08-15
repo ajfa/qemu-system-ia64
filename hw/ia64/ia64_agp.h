@@ -19,14 +19,21 @@ OBJECT_DECLARE_SIMPLE_TYPE(IA64AGPState, IA64_AGP)
 struct IA64AGPState {
     PCIDevice parent_obj;
 
-    MemoryRegion aperture;       /* BAR0: the graphics aperture (DMA-only)   */
     MemoryRegion gart_window;    /* GART SRAM window at 0xFE200000           */
     IOMMUMemoryRegion iommu;     /* per-bus DMA translation                  */
     AddressSpace dma_as;
 
     uint32_t *gatt;              /* GART SRAM, one 32-bit entry per 4 KiB    */
-    uint64_t aperture_base;      /* current APBASE (from BAR0)               */
+    uint64_t aperture_base;      /* current aperture base (from BAPBASE)     */
     bool aperture_enabled;
+
+    /*
+     * Devfn of the single AGP graphics master whose DMA the GART translates.
+     * On the real 460GX the GART sits only on the GXB's AGP port; other PCI
+     * masters do not traverse it.  Set by the machine; -1 leaves every master
+     * on a plain identity pass-through.
+     */
+    int32_t agp_master_devfn;
 };
 
 #endif /* HW_IA64_AGP_H */

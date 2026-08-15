@@ -1983,12 +1983,17 @@ static void ati_pll_wr(ATITestDev *a, uint32_t idx, uint32_t v)
  * driver inspects to bind (8086:84ea host bridge with an AGP capability,
  * GXBCTL bit1 = 0 for 4 KiB pages, AGPSIZ size_value = 1 for 256 MiB) and the
  * GART SRAM window at 0xFE200000: writing a GATT entry through it reads back,
- * so the driver's create_gatt_table zero+read-back works.
+ * so the driver's create_gatt_table zero+read-back works.  AGPSIZ bit3
+ * (BAPBASE_ENABLE) is set, so the aperture base is read from BAPBASE (0x98) --
+ * a non-header 64-bit BAR the driver masks to gart_bus_addr; it sits in the
+ * platform PCI MMIO hole (below 4 GiB, as the 32-bit r128 AGP_BASE requires).
  */
 #define IA64_AGP_SLOT           31U
+#define IA64_AGP_BAPBASE        0x98
 #define IA64_AGP_GXBCTL         0xa0
 #define IA64_AGP_AGPSIZ         0xa2
 #define IA64_AGP_GART_WINDOW    0x00000000fe200000ULL
+#define IA64_AGP_APERTURE_BASE  0x00000000ee000000ULL
 
 static void test_agp_gxb(void)
 {
@@ -1996,6 +2001,7 @@ static void test_agp_gxb(void)
     QGenericPCIBus gbus;
     QPCIDevice *dev;
     uint8_t cap;
+    uint64_t bapbase;
     bool have_agp_cap = false;
 
     ia64_qpci_init(&gbus, qts);
@@ -2022,6 +2028,12 @@ static void test_agp_gxb(void)
     /* 4 KiB GART pages (GXBCTL bit1 clear) and a 256 MiB aperture (AGPSIZ=1). */
     g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_GXBCTL) & 0x02, ==, 0);
     g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x07, ==, 1);
+
+    /* BAPBASE_ENABLE set, and BAPBASE holds the sub-4 GiB aperture base. */
+    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x08, ==, 0x08);
+    bapbase = ((uint64_t)qpci_config_readl(dev, IA64_AGP_BAPBASE + 4) << 32) |
+              qpci_config_readl(dev, IA64_AGP_BAPBASE);
+    g_assert_cmphex(bapbase & ~7ULL, ==, IA64_AGP_APERTURE_BASE);
 
     /* The GART SRAM window is writable/read-backable at its fixed address. */
     qtest_writel(qts, IA64_AGP_GART_WINDOW + 4 * 7, 0x03001234);
@@ -2691,6 +2703,89 @@ static void test_ati_cce_indirect_buffer(void)
     ati_dev_close(&a);
 }
 
+/*
+ * r128 AGP_BASE (0x0170) and where the r128 MC images the AGP aperture
+ * (R128_AGP_OFFSET).  IA64_AGP_GART_WINDOW / IA64_AGP_APERTURE_BASE are shared
+ * with test_agp_gxb above.
+ */
+#define ATI_AGP_BASE            0x0170
+#define R128_AGP_OFFSET         0x02000000u
+
+/*
+ * End-to-end >4 GiB DMA path: an r128 CCE fetch of an AGP-resident indirect
+ * buffer, routed through the 460GX GXB GART to DRAM.  This is the whole reason
+ * approach B exists -- prove the two halves compose:
+ *
+ *   1. r128 AGP forwarding: with AGP_BASE set, a card VM address at/above
+ *      R128_AGP_OFFSET maps to AGP bus AGP_BASE + (vm - R128_AGP_OFFSET) and is
+ *      issued as a DMA, hitting the GXB IOMMU (ati.c ati_cce_vm_dword);
+ *   2. GXB GART: that aperture page is relocated by its GATT entry to the DRAM
+ *      page the driver mapped.
+ *
+ * The indirect buffer (a solid-fill packet stream) lives ONLY in DRAM, reached
+ * exclusively through the aperture -- the VM offset used is past the 16 MiB
+ * framebuffer, so if either half were broken the CCE would read zeros and the
+ * fill would never land.
+ */
+static void test_agp_gart_dma(void)
+{
+    ATITestDev a;
+    const uint32_t dram_page = 0x08000000;       /* scratch DRAM (128 MiB)  */
+    const uint32_t agp_vm = R128_AGP_OFFSET;     /* aperture page 0         */
+    const uint32_t dst_off = 0x100000;           /* fill target, in VRAM    */
+    const unsigned width = 32, height = 4;
+    const uint32_t color = 0xcafe1260;
+    const uint32_t gmc = (6 << 8) | ATI_GMC_BRUSH_SOLID |
+                         ATI_GMC_ROP3_PATCOPY | ATI_GMC_DST_POC;
+    const uint32_t prog[] = {
+        ATI_CCE_PACKET0_1(ATI_DEFAULT_SC_BR),      0x3fff3fff,
+        ATI_CCE_PACKET0_1(ATI_DP_CNTL),
+            ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM,
+        ATI_CCE_PACKET0_1(ATI_DST_OFFSET),         dst_off,
+        ATI_CCE_PACKET0_1(ATI_DST_PITCH),          32 / 8,
+        ATI_CCE_PACKET0_1(ATI_DP_BRUSH_FRGD_CLR),  color,
+        ATI_CCE_PACKET0_1(ATI_DP_GUI_MASTER_CNTL), gmc,
+        ATI_CCE_PACKET0_1(ATI_DST_Y_X),            0,
+        ATI_CCE_PACKET0_1(ATI_DST_HEIGHT_WIDTH),   (height << 16) | width,
+    };
+    unsigned i, x, y;
+
+    ati_dev_open(&a, NULL);
+
+    /* The AGP fetch is a bus-master DMA cycle: enable bus mastering. */
+    qpci_config_writew(a.dev, PCI_COMMAND,
+                       qpci_config_readw(a.dev, PCI_COMMAND) |
+                       PCI_COMMAND_MASTER);
+
+    /* Map aperture page 0 -> the DRAM scratch page: valid | phys[35:12]. */
+    qtest_writel(a.qts, IA64_AGP_GART_WINDOW + 0,
+                 0x03000000u | (dram_page >> 12));
+    /* Point the card's AGP window at the chipset aperture base. */
+    ati_wr(&a, ATI_AGP_BASE, (uint32_t)IA64_AGP_APERTURE_BASE);
+
+    /* Indirect buffer lives in DRAM, reachable only through the aperture. */
+    for (i = 0; i < ARRAY_SIZE(prog); i++) {
+        qtest_writel(a.qts, dram_page + i * 4, prog[i]);
+    }
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            ati_vram_wr32(&a, dst_off + (y * width + x) * 4, 0xdeadbeef);
+        }
+    }
+
+    /* Launch: CCE fetches the buffer via AGP -> GART -> DRAM and runs it. */
+    ati_wr(&a, ATI_PM4_IW_INDOFF, agp_vm);
+    ati_wr(&a, ATI_PM4_IW_INDSIZE, ARRAY_SIZE(prog));
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            g_assert_cmphex(ati_vram_rd32(&a, dst_off + (y * width + x) * 4),
+                            ==, color);
+        }
+    }
+
+    ati_dev_close(&a);
+}
+
 int main(int argc, char **argv)
 {
     unsigned cpus;
@@ -2786,6 +2881,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ati/clr-cmp-clear", test_ati_clr_cmp_clear);
     qtest_add_func("/ia64-vpc/ati/cce-indirect-buffer",
                    test_ati_cce_indirect_buffer);
+    qtest_add_func("/ia64-vpc/agp/gart-dma", test_agp_gart_dma);
 
     return g_test_run();
 }
