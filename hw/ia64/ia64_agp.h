@@ -34,6 +34,15 @@ struct IA64AGPState {
      * on a plain identity pass-through.
      */
     int32_t agp_master_devfn;
+
+    /*
+     * Whether the GART SRAM I/O is enabled.  Set false by the ia64-vpc "agp=off"
+     * machine option to advertise AGPSIZ.SRAM_IO_DISABLE, so i460-agp declines
+     * the GART and the guest falls back to the Rage 128's own PCI GART -- a way
+     * out for guest drivers whose AGP path is broken, without altering the
+     * (always-present, as on real silicon) AGP capability.
+     */
+    bool gart_enabled;
 };
 
 #endif /* HW_IA64_AGP_H */

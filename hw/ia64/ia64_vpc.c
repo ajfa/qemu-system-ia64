@@ -394,6 +394,7 @@ struct IA64VpcMachineState {
     bool ahci_enabled;
     bool ide_enabled;
     bool firmware_ide_dma;
+    bool agp_enabled;
     uint64_t firmware_console;
     char *nvram_path;
     bool alat_full;
@@ -1727,6 +1728,24 @@ static void ia64_vpc_set_ide(Object *obj, bool value, Error **errp)
     s->ide_enabled = value;
 }
 
+static bool ia64_vpc_get_agp(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->agp_enabled;
+}
+
+static void ia64_vpc_set_agp(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    s->agp_enabled = value;
+}
+
 static bool ia64_vpc_get_firmware_ide_dma(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -2988,6 +3007,8 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
     object_property_set_int(OBJECT(s->agp_dev), "agp-master-devfn",
                             PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), &error_abort);
+    object_property_set_bool(OBJECT(s->agp_dev), "gart-enabled",
+                            s->agp_enabled, &error_abort);
     if (!pci_realize_and_unref(s->agp_dev, pci_bus, errp)) {
         return false;
     }
@@ -3199,6 +3220,8 @@ static void ia64_vpc_machine_instance_init(Object *obj)
 #else
     s->firmware_console = IA64_FW_CONSOLE_SERIAL;
 #endif
+    /* The 460GX GXB AGP GART is on by default, as on real hardware. */
+    s->agp_enabled = true;
 }
 
 static void ia64_vpc_machine_instance_finalize(Object *obj)
@@ -3270,6 +3293,13 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Set on/off to enable/disable the CMD646 PCI IDE controller "
         "(default off; on adds a dual-channel ATA/ATAPI controller in slot 0 "
         "and auto-attaches if=ide drives)");
+    object_class_property_add_bool(oc, "agp",
+                                   ia64_vpc_get_agp,
+                                   ia64_vpc_set_agp);
+    object_class_property_set_description(oc, "agp",
+        "Set on/off to enable/disable the 460GX AGP GART (default on, as on "
+        "real hardware); off makes the Rage 128 fall back to its 32-bit PCI "
+        "GART -- clean 2D, but graphics DMA cannot reach RAM above 4 GiB");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,
                                    ia64_vpc_set_firmware_ide_dma);

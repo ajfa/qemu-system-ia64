@@ -58,6 +58,7 @@
 #define I460_GXBCTL_4M_PS       0x02
 #define I460_AGPSIZ_SIZE_256M   0x01    /* size_value 1 */
 #define I460_AGPSIZ_BAPBASE_EN  0x08    /* bit3: aperture base is in BAPBASE   */
+#define I460_AGPSIZ_SRAM_IO_DIS 0x10    /* bit4: GART SRAM I/O disabled        */
 
 /* GATT entry bits. */
 #define I460_GATT_VALID         (1u << 24)
@@ -189,7 +190,7 @@ static void ia64_agp_update_aperture(IA64AGPState *s)
     uint64_t base = pci_get_quad(dev->config + I460_BAPBASE) & ~7ULL;
 
     s->aperture_base = base;
-    s->aperture_enabled = base != 0;
+    s->aperture_enabled = s->gart_enabled && base != 0;
 }
 
 static void ia64_agp_config_write(PCIDevice *dev, uint32_t addr,
@@ -213,10 +214,14 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
      * i460-agp reads GXBCTL bit1 (must be 0 = 4 KiB pages) and AGPSIZ[2:0]
      * (1 = 256 MiB).  AGPSIZ bit3 (BAPBASE_ENABLE) is set so the driver takes
      * the aperture base from BAPBASE (a >4 GiB-capable, non-header BAR) rather
-     * than the standard header BAR -- see the placement note at the top.
+     * than the standard header BAR -- see the placement note at the top.  When
+     * the machine turns the GART off (agp=off), also assert bit4
+     * (SRAM_IO_DISABLE), on which i460_fetch_size() bails ("GART SRAMS
+     * disabled") so the OS keeps to the Rage 128's own PCI GART.
      */
     c[I460_GXBCTL] = 0x00;
-    c[I460_AGPSIZ] = I460_AGPSIZ_SIZE_256M | I460_AGPSIZ_BAPBASE_EN;
+    c[I460_AGPSIZ] = I460_AGPSIZ_SIZE_256M | I460_AGPSIZ_BAPBASE_EN |
+                     (s->gart_enabled ? 0 : I460_AGPSIZ_SRAM_IO_DIS);
     dev->wmask[I460_GXBCTL] = 0x05;           /* driver writes OOG|BWC only */
     dev->wmask[I460_AGPSIZ] = 0x07;           /* size_value RMW, keep [7:3] */
 
@@ -265,6 +270,7 @@ static void ia64_agp_reset(DeviceState *dev)
 
 static const Property ia64_agp_properties[] = {
     DEFINE_PROP_INT32("agp-master-devfn", IA64AGPState, agp_master_devfn, -1),
+    DEFINE_PROP_BOOL("gart-enabled", IA64AGPState, gart_enabled, true),
 };
 
 static void ia64_agp_class_init(ObjectClass *klass, const void *data)

@@ -2048,6 +2048,43 @@ static void test_agp_gxb(void)
     qtest_quit(qts);
 }
 
+/*
+ * agp=off disables the GART: the AGP capability stays present (as on real
+ * silicon), but AGPSIZ asserts SRAM_IO_DISABLE (bit4) so i460-agp's
+ * fetch_size() bails and the guest keeps to the Rage 128's own PCI GART.
+ */
+static void test_agp_off(void)
+{
+    QTestState *qts = qtest_init("-machine ia64-vpc,agp=off -m 3G -S");
+    QGenericPCIBus gbus;
+    QPCIDevice *dev;
+    uint8_t cap;
+    bool have_agp_cap = false;
+
+    ia64_qpci_init(&gbus, qts);
+    dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(IA64_AGP_SLOT, 0));
+    g_assert_nonnull(dev);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x84ea);
+
+    /* The AGP capability is unchanged -- only the GART SRAM I/O is off. */
+    cap = qpci_config_readb(dev, PCI_CAPABILITY_LIST);
+    while (cap != 0 && cap != 0xff) {
+        if (qpci_config_readb(dev, cap) == PCI_CAP_ID_AGP) {
+            have_agp_cap = true;
+            break;
+        }
+        cap = qpci_config_readb(dev, cap + PCI_CAP_LIST_NEXT);
+    }
+    g_assert_true(have_agp_cap);
+
+    /* SRAM_IO_DISABLE (bit4) set; size/BAPBASE_ENABLE fields intact. */
+    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x10, ==, 0x10);
+    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x0f, ==, 0x09);
+
+    g_free(dev);
+    qtest_quit(qts);
+}
+
 /* Config space: the machine reports the documented SVID=vendor/SID=device. */
 static void test_ati_config_ids(void)
 {
@@ -2864,6 +2901,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/savevm/platform-state",
                    test_savevm_restores_platform_state);
     qtest_add_func("/ia64-vpc/agp/gxb", test_agp_gxb);
+    qtest_add_func("/ia64-vpc/agp/off", test_agp_off);
     qtest_add_func("/ia64-vpc/ati/config-ids", test_ati_config_ids);
     qtest_add_func("/ia64-vpc/ati/pll-regfile", test_ati_pll_regfile);
     qtest_add_func("/ia64-vpc/ati/dac-load-sense", test_ati_dac_load_sense);
