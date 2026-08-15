@@ -2384,7 +2384,7 @@ static BOOLEAN test_acpi_topology(const TEST_TABLE_CONTEXT *Context)
             madt_processors |= 1U << id;
         } else if (madt[offset] == 6U && length >= 16U) {
             iosapic = get_u32(madt + offset + 4U) == 0 &&
-                get_u64(madt + offset + 8U) == 0x80110000U;
+                get_u64(madt + offset + 8U) == 0xfec00000U;
         }
         offset += length;
     }
