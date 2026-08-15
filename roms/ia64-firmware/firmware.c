@@ -80,7 +80,8 @@
 #define ACPI_RECLAIM_TABLE_BASE \
     (ACPI_RECLAIM_BASE + IA64_EFI_MEMORY_ALIGN)
 #define ACPI_RECLAIM_END 0x0000000000820000ULL
-#define IOSAPIC_BASE     0x0000000080110000ULL
+/* 460GX/i2000 SDV SAPIC message block, just below the local SAPIC. */
+#define IOSAPIC_BASE     0x00000000fec00000ULL
 #define IOSAPIC_SIZE     0x0000000000002000ULL
 #define ACPI_PM_IO_BASE  0x00002000U
 #define ACPI_PM1_EVT_OFFSET 0x0U
@@ -174,9 +175,12 @@
 #define IA64_EFI_MIN_STACK_BYTES   0x0000000000020000ULL
 #define IA64_EFI_MIN_BACKING_BYTES 0x0000000000004000ULL
 #define FW_LOW_RUNTIME_IMAGE_BASE 0x0000000008000000ULL
-#define FW_LOW_RAM_LIMIT  0x0000000080000000ULL
-#define FW_HIGH_RAM_BASE  0x0000000080200000ULL
-#define FW_HIGH_RAM_BELOW_PCI_END IA64_PCI_MMIO_BASE
+/*
+ * Low (sub-aperture) DRAM ends at the PCI/MMIO aperture: it runs contiguously
+ * from 0 to here, matching real 460GX, and any RAM beyond it is remapped above
+ * 4 GiB.  There is no sub-4 GiB DRAM island above the aperture.
+ */
+#define FW_LOW_RAM_LIMIT  IA64_PCI_MMIO_BASE
 #define FW_HIGH_RAM_AFTER_PCI_BASE (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE)
 #define FW_LOCAL_SAPIC_BASE 0x00000000fee00000ULL
 #define FW_LOCAL_SAPIC_SIZE 0x0000000000200000ULL
@@ -2248,26 +2252,13 @@ static void fw_init_guest_high_ram_ranges(UINT64 RamSize)
     }
 
     /*
-     * Consume installed RAM across the same platform holes used by QEMU.
-     * Match real 460GX behaviour: anything displaced by the top-of-memory
-     * PCI/MMIO gap is remapped ABOVE 4 GiB -- there is no DRAM island in
-     * [PCI_MMIO_end, SAPIC).
-     *
-     * The sub-4 GiB high window [HIGH_RAM_BASE, PCI_MMIO_BASE) is only used
-     * when the installed RAM fills it COMPLETELY.  A partially-filled window
-     * leaves DRAM ending mid-band below 4 GiB with no RAM above 4 GiB, which
-     * Linux 2.6.8 IA-64's zone/bootmem/virtual-mem-map init mishandles
-     * (page-table corruption in early userspace) for any RAM in the
-     * ~(2 GiB, 3.72 GiB) band.  When the window would be partial, remap all
-     * high DRAM above 4 GiB instead.  (Keep this in lockstep with
-     * ia64_vpc_map_ram() in hw/ia64/ia64_vpc.c.)
+     * Match real 460GX: low DRAM is contiguous from 0 to the PCI/MMIO aperture
+     * (mGuestLowRamEnd), and anything displaced by the top-of-memory gap is
+     * remapped ABOVE 4 GiB.  There is no sub-4 GiB DRAM island above the
+     * aperture.  (Keep this in lockstep with ia64_vpc_map_ram() in
+     * hw/ia64/ia64_vpc.c.)
      */
     remaining = RamSize > mGuestLowRamEnd ? RamSize - mGuestLowRamEnd : 0;
-    if (remaining > FW_HIGH_RAM_BELOW_PCI_END - FW_HIGH_RAM_BASE) {
-        fw_add_guest_high_ram_range(FW_HIGH_RAM_BASE,
-                                    FW_HIGH_RAM_BELOW_PCI_END,
-                                    &remaining);
-    }
     fw_add_guest_high_ram_range(FW_FIRMWARE_ADDRESS_SPACE_END,
                                 ~0ULL, &remaining);
 }
@@ -13550,9 +13541,21 @@ static void efi_init_memory_map(void)
     efi_add_boot_stack_low_ram(&index, FW_LOW_RAM_STAGING_BASE,
                                low_ram_end);
 
-    /* Keep the high firmware scratch page unavailable to loaders. */
-    efi_add_memory_range(&index, EfiReservedMemoryType, 0x80000000,
-                         0x80100000, EFI_MEMORY_WB);
+    /*
+     * XP RTM (build 2600) SMP bring-up requires the 2 GiB firmware scratch
+     * page to appear as a reserved descriptor: without it the two processors
+     * deadlock spinning during kernel init (measured -- the IOSAPIC relocation
+     * is harmless, this descriptor is what XP needs).  The page only fits as a
+     * reserved hole while it lies above installed low RAM; once low DRAM runs
+     * past 2 GiB (contiguous to the aperture, as real 460GX provides) the page
+     * is ordinary WB DRAM and must not be carved out, so gate on the low-RAM
+     * end.  Guests that run past 2 GiB here are the ones that specifically
+     * need the unbroken contiguous DRAM (Linux), so this costs them nothing.
+     */
+    if (low_ram_end <= 0x80000000ULL) {
+        efi_add_memory_range(&index, EfiReservedMemoryType, 0x80000000,
+                             0x80100000, EFI_MEMORY_WB);
+    }
 
     efi_add_memory_range(&index, EfiMemoryMappedIO, IOSAPIC_BASE,
                          IOSAPIC_BASE + IOSAPIC_SIZE, EFI_MEMORY_UC);

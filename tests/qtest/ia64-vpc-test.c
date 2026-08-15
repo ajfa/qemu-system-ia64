@@ -37,7 +37,7 @@
 #define IA64_NVRAM_SIZE              (64 * KiB)
 #define IA64_NVRAM_COMMIT_OFFSET     (IA64_NVRAM_SIZE - 8)
 #define IA64_NVRAM_COMMIT_MAGIC      0x54494d4d4f43564eULL
-#define IA64_IOSAPIC_BASE            0x0000000080110000ULL
+#define IA64_IOSAPIC_BASE            0x00000000fec00000ULL
 #define IA64_IOSAPIC_IOREGSEL        0x00ULL
 #define IA64_IOSAPIC_IOWIN           0x10ULL
 #define IA64_IOSAPIC_EOI             0x40ULL
@@ -684,13 +684,16 @@ static void test_firmware_handoff_defaults(void)
 }
 
 /*
- * The sub-4 GiB high-RAM window [0x80200000, 0xEE000000) is used only when the
- * installed RAM fills it completely; otherwise all DRAM above 2 GiB is remapped
- * above 4 GiB.  A partially-filled window corrupts Linux 2.6.8 IA-64's MM (see
- * ia64_vpc_map_ram()/fw_init_guest_high_ram_ranges()).  Guard both branches by
- * probing where DRAM actually lands.  The -m values reserve a large address
- * space but qtest only touches a couple of pages, so the RSS stays tiny.
+ * Real 460GX layout: low DRAM is a single contiguous run from 0 up to the PCI
+ * aperture (0xEE000000, ~3.72 GiB); only RAM displaced by that top-of-memory
+ * gap spills above 4 GiB.  There is no sub-4 GiB DRAM island and no hole at
+ * 2 GiB (the IOSAPIC no longer parks there).  Probe where DRAM actually lands
+ * for both the below-aperture and above-4 GiB cases.  The -m values reserve a
+ * large address space but qtest only touches a couple of pages, so RSS stays
+ * tiny.  Keep in lockstep with ia64_vpc_map_ram() /
+ * fw_init_guest_high_ram_ranges().
  */
+#define IA64_RAM_AT_2GIB             0x0000000080000000ULL /* was the hole */
 #define IA64_HIGH_RAM_BELOW_PCI_BASE 0x0000000080200000ULL
 #define IA64_HIGH_RAM_ABOVE_4G_BASE  0x0000000100000000ULL
 
@@ -699,25 +702,26 @@ static void test_ram_high_remap(void)
     const uint64_t magic = 0x0123456789abcdefULL;
 
     /*
-     * 2304 MiB lands in the toxic band (256 MiB above the 2 GiB low limit,
-     * far short of the ~1758 MiB window): the window is skipped and the high
-     * DRAM is remapped above 4 GiB.
+     * 2304 MiB fits entirely below the aperture, so DRAM is contiguous across
+     * the old 2 GiB seam (both 0x80000000 and 0x80200000 are ordinary backed
+     * RAM now) and nothing lands above 4 GiB.
      */
     QTestState *qts = qtest_init("-machine ia64-vpc -m 2304M -S");
 
-    qtest_writeq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE), ==, magic);
-    /* The below-PCI window must NOT be backed by DRAM at this size. */
+    qtest_writeq(qts, IA64_RAM_AT_2GIB, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_RAM_AT_2GIB), ==, magic);
     qtest_writeq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE), !=, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE), ==, magic);
+    /* No DRAM above 4 GiB at this size. */
+    qtest_writeq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE), !=, magic);
     qtest_quit(qts);
 
     /*
-     * 3808 MiB more than fills the window, so the below-PCI window is used
-     * (contiguous DRAM up to the aperture) and only the small remainder lands
-     * above 4 GiB - the layout large guests have always had.
+     * 4096 MiB exceeds the aperture: DRAM is contiguous up to it AND the
+     * displaced remainder is remapped above 4 GiB.
      */
-    qts = qtest_init("-machine ia64-vpc -m 3808M -S");
+    qts = qtest_init("-machine ia64-vpc -m 4096M -S");
     qtest_writeq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE, magic);
     g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE), ==, magic);
     qtest_writeq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, magic);

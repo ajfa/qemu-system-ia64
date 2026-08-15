@@ -58,8 +58,13 @@
  * binary (share/), so an unpacked package runs without naming it every time.
  */
 #define IA64_VPC_DEFAULT_FIRMWARE "ia64-firmware.bin"
-#define IA64_LOW_RAM_LIMIT 0x0000000080000000ULL
-#define IA64_HIGH_RAM_BASE 0x0000000080200000ULL
+/*
+ * Low (sub-aperture) DRAM runs contiguously from 0 up to the PCI/MMIO
+ * aperture, exactly as the real 460GX keeps a single MMIO gap at the top of
+ * the 32-bit space; RAM displaced by that gap is remapped above 4 GiB.  There
+ * is no DRAM island between the aperture and the chipset/SAPIC region.
+ */
+#define IA64_LOW_RAM_LIMIT IA64_PCI_MMIO_BASE
 #define IA64_FIRMWARE_ADDRESS_SPACE_BASE 0x00000000ff000000ULL
 #define IA64_FIRMWARE_ADDRESS_SPACE_SIZE (16 * MiB)
 #define IA64_RTC_BASE 0x00000000ffef0000ULL
@@ -157,7 +162,13 @@
 #define IA64_ATI_PLL_MIN_FREQ     12500U
 #define IA64_ATI_PLL_MAX_FREQ     40000U
 #endif
-#define IA64_IOSAPIC_BASE       0x0000000080110000ULL
+/*
+ * IOSAPIC at the 460GX/i2000 SDV address (SAPIC/IOAPIC message block just
+ * below the local SAPIC at 0xFEE00000), inside the fixed chipset region above
+ * the PCI aperture.  Keeping it here -- rather than the old 2 GiB parking spot
+ * -- leaves low DRAM contiguous all the way to the aperture.
+ */
+#define IA64_IOSAPIC_BASE       0x00000000fec00000ULL
 #define IA64_IOSAPIC_SIZE       0x0000000000002000ULL
 #define IA64_ACPI_PM_IO_BASE    0x00002000U
 #define IA64_ACPI_PM_IO_SIZE    0x00000010U
@@ -2114,42 +2125,21 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
     }
 
     /*
-     * Keep the RAM backing densely packed while leaving the platform's
-     * firmware and PCI apertures free in the guest physical address space.
-     * RAM displaced by those apertures is mapped above 4 GiB instead of
-     * being hidden by higher-priority device regions.
+     * Real 460GX layout: DRAM is contiguous from 0 up to the top-of-memory
+     * MMIO gap (the PCI aperture just below the fixed chipset/SAPIC/firmware
+     * region at [0xFE000000, 4 GiB)), and only RAM displaced by that gap is
+     * remapped above 4 GiB.  There is no DRAM island between the aperture and
+     * the chipset region.  With the IOSAPIC no longer parked at 2 GiB the low
+     * band is a single unbroken run, which also avoids the fragmented
+     * single-DMA-zone layout that Linux 2.6.8 IA-64 mishandled.  Keep this in
+     * lockstep with fw_init_guest_high_ram_ranges() in
+     * roms/ia64-firmware/firmware.c.
      */
     size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
                                   IA64_LOW_RAM_LIMIT,
                                   "ia64-vpc.low-ram");
     offset += size;
     remaining -= size;
-
-    /*
-     * The sub-4 GiB high-RAM window [HIGH_RAM_BASE, PCI_MMIO_BASE) is only
-     * used when the installed RAM fills it COMPLETELY.  A partially-filled
-     * window leaves DRAM ending mid-band below 4 GiB with no RAM above 4 GiB;
-     * Linux 2.6.8 IA-64 (and the -mckinley zone/bootmem/virtual-mem-map init)
-     * mishandles that fragmented single-DMA-zone layout and corrupts page
-     * tables during early userspace (do_wp_page "bogus page" -> slab/rmap
-     * cascade).  Reproduces at any RAM in ~(2 GiB, 3.72 GiB); <=2 GiB (no
-     * window) and >=~3.72 GiB (window full + DRAM above 4 GiB, so a non-empty
-     * ZONE_NORMAL) both boot cleanly.  When the window would be partial,
-     * remap all high DRAM above 4 GiB instead, matching what real 460GX does
-     * with DRAM displaced by the top-of-memory PCI gap.  The test is strict so
-     * that using the window always leaves a remainder above 4 GiB: DRAM is then
-     * both contiguous up to the aperture AND present above 4 GiB, exactly the
-     * layout that boots cleanly.  Keep this in lockstep with
-     * fw_init_guest_high_ram_ranges() in roms/ia64-firmware/firmware.c.
-     */
-    if (remaining > IA64_PCI_MMIO_BASE - IA64_HIGH_RAM_BASE) {
-        size = ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_BASE, offset,
-                                      remaining,
-                                      IA64_PCI_MMIO_BASE - IA64_HIGH_RAM_BASE,
-                                      "ia64-vpc.high-ram-below-pci");
-        offset += size;
-        remaining -= size;
-    }
 
     ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_AFTER_FIRMWARE_BASE,
                            offset, remaining, remaining,
