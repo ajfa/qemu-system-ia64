@@ -1,0 +1,250 @@
+/*
+ * QEMU ATI Mach64 "3D Rage" (DEV_4754) register definitions
+ *
+ * Register numbers here are the Mach64 "IOPortTag" block index (tag >> 2 &
+ * 0x1ff), NOT a byte offset.  A guest reaches a register through MMIO BAR2:
+ * Block 0 registers (index 0x00-0xff, the CRTC/DAC/config plus the GUI engine)
+ * sit at BAR2 + 0x400 + index*4; Block 1 registers (index 0x100-0x1ff, the
+ * overlay/scaler, not modelled here yet) sit at BAR2 + (index-0x100)*4.  See
+ * xf86-video-mach64 atimach64io.h and the Mach64 Register Reference Guide.
+ *
+ * This work is licensed under the GNU GPL license version 2 or later.
+ */
+
+#ifndef MACH64_REGS_H
+#define MACH64_REGS_H
+
+/* BAR2 (MMIO register aperture) size. */
+#define MACH64_MMIO_SIZE        0x1000
+
+/*
+ * Decode a BAR2 byte offset to a Block-0/Block-1 register index (see the file
+ * header).  Block 0 lives in the upper half of the 2 KiB register window at
+ * BAR2 + 0x400; Block 1 (overlay/scaler) in the lower half.
+ */
+#define MACH64_REG_BLOCK0_BASE  0x400
+#define MACH64_OFF_TO_REG(off)                                          \
+    (((off) >= MACH64_REG_BLOCK0_BASE) ?                                \
+     (((off) - MACH64_REG_BLOCK0_BASE) >> 2) :                          \
+     (0x100 + ((off) >> 2)))
+
+/* Number of Block-0 register slots we back with storage. */
+#define MACH64_NREGS            0x100
+
+/* ---- Block 0: CRTC / DAC / clock / config / cursor ---- */
+#define CRTC_H_TOTAL_DISP       0x00
+#define CRTC_H_SYNC_STRT_WID    0x01
+#define CRTC_V_TOTAL_DISP       0x02
+#define CRTC_V_SYNC_STRT_WID    0x03
+#define CRTC_VLINE_CRNT_VLINE   0x04
+#define CRTC_OFF_PITCH          0x05
+#define CRTC_INT_CNTL           0x06
+#define CRTC_GEN_CNTL           0x07
+#define DSP_CONFIG              0x08
+#define DSP_ON_OFF              0x09
+#define OVR_CLR                 0x10
+#define OVR_WID_LEFT_RIGHT      0x11
+#define OVR_WID_TOP_BOTTOM      0x12
+#define CUR_CLR0                0x18
+#define CUR_CLR1                0x19
+#define CUR_OFFSET              0x1a
+#define CUR_HORZ_VERT_POSN      0x1b
+#define CUR_HORZ_VERT_OFF       0x1c
+#define SCRATCH_REG0            0x20
+#define SCRATCH_REG1            0x21
+#define SCRATCH_REG2            0x22
+#define SCRATCH_REG3            0x23
+#define CLOCK_CNTL              0x24
+#define BUS_CNTL                0x28
+#define MEM_CNTL                0x2c
+#define MEM_VGA_WP_SEL          0x2d
+#define MEM_VGA_RP_SEL          0x2e
+#define DAC_REGS                0x30
+#define DAC_CNTL                0x31
+#define GEN_TEST_CNTL           0x34
+#define CUSTOM_MACRO_CNTL       0x35
+#define CONFIG_CNTL             0x37
+#define CONFIG_CHIP_ID          0x38
+#define CONFIG_STAT0            0x39
+
+/* ---- Block 0: GUI (2D) engine ---- */
+#define DST_OFF_PITCH           0x40
+#define DST_X                   0x41
+#define DST_Y                   0x42
+#define DST_Y_X                 0x43
+#define DST_WIDTH               0x44
+#define DST_HEIGHT              0x45
+#define DST_HEIGHT_WIDTH        0x46
+#define DST_X_WIDTH             0x47
+#define DST_BRES_LNTH           0x48
+#define DST_BRES_ERR            0x49
+#define DST_BRES_INC            0x4a
+#define DST_BRES_DEC            0x4b
+#define DST_CNTL                0x4c
+#define SRC_OFF_PITCH           0x60
+#define SRC_X                   0x61
+#define SRC_Y                   0x62
+#define SRC_Y_X                 0x63
+#define SRC_WIDTH1              0x64
+#define SRC_HEIGHT1             0x65
+#define SRC_HEIGHT1_WIDTH1      0x66
+#define SRC_X_START             0x67
+#define SRC_Y_START             0x68
+#define SRC_Y_X_START           0x69
+#define SRC_HEIGHT2_WIDTH2      0x6a
+#define SRC_CNTL                0x6d
+#define HOST_DATA0              0x80
+#define HOST_DATA1              0x81
+#define HOST_DATA2              0x82
+#define HOST_DATA3              0x83
+#define HOST_DATA4              0x84
+#define HOST_DATA5              0x85
+#define HOST_DATA6              0x86
+#define HOST_DATA7              0x87
+#define HOST_DATA8              0x88
+#define HOST_DATA9              0x89
+#define HOST_DATAA              0x8a
+#define HOST_DATAB              0x8b
+#define HOST_DATAC              0x8c
+#define HOST_DATAD              0x8d
+#define HOST_DATAE              0x8e
+#define HOST_DATAF              0x8f
+#define HOST_CNTL               0x90
+#define PAT_REG0                0xa0
+#define PAT_REG1                0xa1
+#define PAT_CNTL                0xa2
+#define SC_LEFT                 0xa8
+#define SC_RIGHT                0xa9
+#define SC_LEFT_RIGHT           0xaa
+#define SC_TOP                  0xab
+#define SC_BOTTOM               0xac
+#define SC_TOP_BOTTOM           0xad
+#define DP_BKGD_CLR             0xb0
+#define DP_FRGD_CLR             0xb1
+#define DP_WRITE_MASK           0xb2
+#define DP_CHAIN_MASK           0xb3
+#define DP_PIX_WIDTH            0xb4
+#define DP_MIX                  0xb5
+#define DP_SRC                  0xb6
+#define DST_X_Y                 0xba
+#define DST_WIDTH_HEIGHT        0xbb
+#define CLR_CMP_CLR             0xc0
+#define CLR_CMP_MSK             0xc1
+#define CLR_CMP_CNTL            0xc2
+#define FIFO_STAT               0xc4
+#define CONTEXT_MASK            0xc8
+#define CONTEXT_LOAD_CNTL       0xcb
+#define GUI_TRAJ_CNTL           0xcc
+#define GUI_STAT                0xce
+
+/* ---- CRTC_GEN_CNTL bits ---- */
+#define CRTC_PIX_WIDTH          0x00000700ul
+#define CRTC_PIX_WIDTH_SHIFT    8
+#define CRTC_EXT_DISP_EN        0x01000000ul
+#define CRTC_EN                 0x02000000ul
+
+/* ---- CRTC_H_TOTAL_DISP / CRTC_V_TOTAL_DISP ---- */
+#define CRTC_H_DISP             0x01ff0000ul   /* (chars - 1) in high half */
+#define CRTC_V_DISP             0x07ff0000ul   /* (lines - 1) in high half */
+
+/* ---- CRTC_OFF_PITCH ---- */
+#define CRTC_OFFSET_MASK        0x000ffffful   /* in units of 8 bytes */
+#define CRTC_PITCH_MASK         0xffc00000ul   /* in units of 8 pixels */
+#define CRTC_PITCH_SHIFT        22
+
+/* ---- DAC_CNTL ---- */
+#define DAC_8BIT_EN             0x00000100ul
+
+/* ---- GEN_TEST_CNTL ---- */
+#define GEN_CUR_EN              0x00000080ul   /* hardware cursor enable */
+#define GEN_GUI_RESETB          0x00000100ul   /* 264xT: 0 = engine in reset */
+#define GEN_SOFT_RESET          0x00000200ul   /* VTB/GTB: engine soft reset */
+
+/* ---- CONFIG_CHIP_ID ---- */
+#define CFG_CHIP_TYPE           0x0000fffful   /* = PCI device id */
+#define CFG_CHIP_CLASS          0x00ff0000ul
+#define CFG_CHIP_REV            0xff000000ul
+
+/* ---- GUI_STAT / FIFO_STAT ---- */
+#define GUI_ACTIVE              0x00000001ul
+
+/* ---- pixel-width codes (CRTC_PIX_WIDTH and DP_*_PIX_WIDTH nibbles) ---- */
+#define PIX_WIDTH_1BPP          0x00
+#define PIX_WIDTH_4BPP          0x01
+#define PIX_WIDTH_8BPP          0x02
+#define PIX_WIDTH_15BPP         0x03
+#define PIX_WIDTH_16BPP         0x04
+#define PIX_WIDTH_24BPP         0x05
+#define PIX_WIDTH_32BPP         0x06
+
+/* ---- DP_PIX_WIDTH fields ---- */
+#define DP_DST_PIX_WIDTH        0x0000000ful
+#define DP_SRC_PIX_WIDTH        0x00000f00ul
+#define DP_SRC_PIX_WIDTH_SHIFT  8
+#define DP_HOST_PIX_WIDTH       0x000f0000ul
+#define DP_HOST_PIX_WIDTH_SHIFT 16
+
+/* ---- DP_MIX ---- */
+#define DP_BKGD_MIX             0x0000001ful
+#define DP_FRGD_MIX             0x001f0000ul
+#define DP_FRGD_MIX_SHIFT       16
+
+/* ROP / mix codes (DP_FRGD_MIX and DP_BKGD_MIX). */
+#define MIX_NOT_DST             0x00
+#define MIX_0                   0x01
+#define MIX_1                   0x02
+#define MIX_DST                 0x03
+#define MIX_NOT_SRC             0x04
+#define MIX_XOR                 0x05
+#define MIX_XNOR                0x06
+#define MIX_SRC                 0x07
+#define MIX_NAND                0x08
+#define MIX_NOT_SRC_OR_DST      0x09
+#define MIX_SRC_OR_NOT_DST      0x0a
+#define MIX_OR                  0x0b
+#define MIX_AND                 0x0c
+#define MIX_SRC_AND_NOT_DST     0x0d
+#define MIX_NOT_SRC_AND_DST     0x0e
+#define MIX_NOR                 0x0f
+
+/* ---- DP_SRC ---- */
+#define DP_BKGD_SRC             0x00000007ul
+#define DP_FRGD_SRC             0x00000700ul
+#define DP_FRGD_SRC_SHIFT       8
+#define DP_MONO_SRC             0x00030000ul
+#define DP_MONO_SRC_SHIFT       16
+#define DP_MONO_SRC_ALLONES     0x0
+#define DP_MONO_SRC_PATTERN     0x1
+#define DP_MONO_SRC_HOST        0x2
+#define DP_MONO_SRC_BLIT        0x3
+
+/* Source-select codes for DP_FRGD_SRC / DP_BKGD_SRC. */
+#define SRC_BKGD                0x0            /* DP_BKGD_CLR */
+#define SRC_FRGD                0x1            /* DP_FRGD_CLR */
+#define SRC_HOST                0x2            /* HOST_DATA* */
+#define SRC_BLIT                0x3            /* blit source pixels */
+#define SRC_PATTERN             0x4            /* pattern */
+
+/* ---- DST_CNTL ---- */
+#define DST_X_DIR               0x00000001ul   /* 1 = left-to-right */
+#define DST_Y_DIR               0x00000002ul   /* 1 = top-to-bottom */
+#define DST_LAST_PEL            0x00000020ul
+
+/* ---- SRC_CNTL ---- */
+#define SRC_PATT_EN             0x00000001ul
+#define SRC_LINEAR_EN           0x00000004ul
+
+/* ---- PAT_CNTL ---- */
+#define PAT_MONO_EN             0x00000001ul
+
+/* ---- CLR_CMP_CNTL ---- */
+#define CLR_CMP_FN              0x00000007ul
+#define CLR_CMP_FN_FALSE        0x0            /* always draw */
+#define CLR_CMP_FN_TRUE         0x1            /* never draw */
+#define CLR_CMP_FN_NOT_EQUAL    0x4            /* draw where src != key */
+#define CLR_CMP_FN_EQUAL        0x5            /* draw where src == key */
+#define CLR_CMP_SRC             0x03000000ul
+#define CLR_CMP_SRC_DST         0x0
+#define CLR_CMP_SRC_2D          0x1
+
+#endif /* MACH64_REGS_H */
