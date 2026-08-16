@@ -2823,6 +2823,132 @@ static void test_agp_gart_dma(void)
     ati_dev_close(&a);
 }
 
+/*
+ * Mach64 3D Rage (DEV_4754) tests.  The adapter is selected with
+ * -machine ia64-vpc,vga=mach64; its BAR2 register block and BAR0 framebuffer
+ * land on the same fixed windows the machine assigns to any VGA-slot device.
+ * A Block-0 register at Mach64 block index r decodes to BAR2 + 0x400 + r*4.
+ */
+#define M64_REG(r)              (0x400u + (unsigned)(r) * 4u)
+#define M64_CONFIG_CHIP_ID      0x38
+#define M64_SCRATCH_REG0        0x20
+#define M64_DST_OFF_PITCH       0x40
+#define M64_DST_Y_X             0x43
+#define M64_DST_HEIGHT_WIDTH    0x46
+#define M64_SC_LEFT             0xa8
+#define M64_SC_RIGHT            0xa9
+#define M64_SC_TOP              0xab
+#define M64_SC_BOTTOM           0xac
+#define M64_DP_BKGD_CLR         0xb0
+#define M64_DP_FRGD_CLR         0xb1
+#define M64_DP_WRITE_MASK       0xb2
+#define M64_DP_PIX_WIDTH        0xb4
+#define M64_DP_MIX              0xb5
+#define M64_DP_SRC              0xb6
+
+/* Mach64 DP_*_PIX_WIDTH codes (2 = 8bpp, 4 = 16bpp, 6 = 32bpp). */
+#define M64_PIX_WIDTH_8BPP      2
+#define M64_PIX_WIDTH_16BPP     4
+#define M64_PIX_WIDTH_32BPP     6
+
+typedef struct {
+    QTestState *qts;
+    QGenericPCIBus gbus;
+    QPCIDevice *dev;
+    uint64_t mmio;
+    uint64_t fb;
+} Mach64TestDev;
+
+static void mach64_dev_open(Mach64TestDev *a)
+{
+    a->qts = ia64_vpc_start("-machine vga=mach64");
+    ia64_qpci_init(&a->gbus, a->qts);
+    a->dev = qpci_device_find(&a->gbus.bus, QPCI_DEVFN(ATI_SLOT, 0));
+    g_assert_nonnull(a->dev);
+    g_assert_cmphex(qpci_config_readw(a->dev, PCI_VENDOR_ID), ==, 0x1002);
+    g_assert_cmphex(qpci_config_readw(a->dev, PCI_DEVICE_ID), ==, 0x4754);
+    a->mmio = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_2) & 0xfffffff0;
+    a->fb = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_0) & 0xfffffff0;
+    g_assert_cmphex(a->mmio, ==, 0xf5000000);
+    g_assert_cmphex(a->fb, ==, 0xf0000000);
+}
+
+static void mach64_dev_close(Mach64TestDev *a)
+{
+    g_free(a->dev);
+    qtest_quit(a->qts);
+}
+
+static inline void m64_wr(Mach64TestDev *a, unsigned reg, uint32_t v)
+{
+    qtest_writel(a->qts, a->mmio + M64_REG(reg), v);
+}
+
+static inline uint32_t m64_rd(Mach64TestDev *a, unsigned reg)
+{
+    return qtest_readl(a->qts, a->mmio + M64_REG(reg));
+}
+
+static void test_mach64_ids(void)
+{
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    /* CONFIG_CHIP_ID reports the device id in its type field. */
+    g_assert_cmphex(m64_rd(&a, M64_CONFIG_CHIP_ID) & 0xffff, ==, 0x4754);
+    /* subsystem falls back to vendor/device (set by the machine). */
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_VENDOR_ID), ==,
+                    0x1002);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_ID), ==, 0x4754);
+    /* a scratch register round-trips. */
+    m64_wr(&a, M64_SCRATCH_REG0, 0xdeadbeef);
+    g_assert_cmphex(m64_rd(&a, M64_SCRATCH_REG0), ==, 0xdeadbeef);
+    mach64_dev_close(&a);
+}
+
+static void mach64_do_fill(Mach64TestDev *a, unsigned pixw, unsigned bypp,
+                           uint32_t color)
+{
+    const unsigned width = 32, height = 4;
+    const unsigned pitch_px = 32;
+
+    m64_wr(a, M64_DP_PIX_WIDTH, pixw);                 /* DST pixel width */
+    m64_wr(a, M64_DST_OFF_PITCH, (pitch_px / 8) << 22);/* offset 0, pitch */
+    m64_wr(a, M64_DP_FRGD_CLR, color);
+    m64_wr(a, M64_DP_MIX, 0x7u << 16);                 /* FRGD_MIX = SRC */
+    m64_wr(a, M64_DP_SRC, 0x1u << 8);                  /* FRGD_SRC = FRGD_CLR */
+    m64_wr(a, M64_DP_WRITE_MASK, 0xffffffff);
+    m64_wr(a, M64_SC_LEFT, 0);
+    m64_wr(a, M64_SC_RIGHT, 0x3fff);
+    m64_wr(a, M64_SC_TOP, 0);
+    m64_wr(a, M64_SC_BOTTOM, 0x3fff);
+    m64_wr(a, M64_DST_Y_X, 0);                          /* x=0, y=0 */
+    /* the DST_HEIGHT_WIDTH write (W high, H low) triggers the fill */
+    m64_wr(a, M64_DST_HEIGHT_WIDTH, (width << 16) | height);
+
+    for (unsigned y = 0; y < height; y++) {
+        for (unsigned x = 0; x < width; x++) {
+            uint64_t p = a->fb + y * (pitch_px * bypp) + x * bypp;
+
+            for (unsigned b = 0; b < bypp; b++) {
+                g_assert_cmphex(qtest_readb(a->qts, p + b), ==,
+                                (color >> (b * 8)) & 0xff);
+            }
+        }
+    }
+}
+
+static void test_mach64_2d_solid_fill(void)
+{
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    mach64_do_fill(&a, M64_PIX_WIDTH_8BPP,  1, 0x0000005a);
+    mach64_do_fill(&a, M64_PIX_WIDTH_16BPP, 2, 0x00001234);
+    mach64_do_fill(&a, M64_PIX_WIDTH_32BPP, 4, 0x11223344);
+    mach64_dev_close(&a);
+}
+
 int main(int argc, char **argv)
 {
     unsigned cpus;
@@ -2920,6 +3046,9 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ati/cce-indirect-buffer",
                    test_ati_cce_indirect_buffer);
     qtest_add_func("/ia64-vpc/agp/gart-dma", test_agp_gart_dma);
+    qtest_add_func("/ia64-vpc/mach64/ids", test_mach64_ids);
+    qtest_add_func("/ia64-vpc/mach64/2d-solid-fill",
+                   test_mach64_2d_solid_fill);
 
     return g_test_run();
 }
