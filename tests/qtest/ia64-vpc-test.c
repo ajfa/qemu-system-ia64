@@ -454,6 +454,17 @@ static void test_int10_vbe_for_device(const char *extra_args)
     g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_ENABLE) & 0x41,
                     ==, 0x41);
 
+    /*
+     * A VBE mode-set must also re-enable video output at the VGA attribute
+     * controller (Palette-Address-Source, bit 0x20).  Without it QEMU's VGA
+     * core forces GMODE_BLANK and the guest desktop, though rendered into
+     * VRAM, never reaches the screen.  Reset the attribute flip-flop to the
+     * index state (read Input Status 1) and read the index register back.
+     */
+    qtest_readb(qts, IA64_LEGACY_IO_BASE + VGA_IS1_RC);
+    g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE + VGA_ATT_W) &
+                    VGA_AR_ENABLE_DISPLAY, ==, VGA_AR_ENABLE_DISPLAY);
+
     memset(&regs, 0, sizeof(regs));
     regs.ax = 0x4f03;
     length = int10_call(qts, &regs,

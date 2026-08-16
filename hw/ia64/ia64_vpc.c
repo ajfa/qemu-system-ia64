@@ -865,6 +865,28 @@ static void ia64_int10_set_mode(IA64VpcMachineState *s)
         enable |= VBE_DISPI_NOCLEARMEM;
     }
     ia64_vbe_write(VBE_DISPI_INDEX_ENABLE, enable);
+
+    /*
+     * Enabling the Bochs VBE registers programs the packed-pixel layout but
+     * leaves the VGA attribute controller's Palette-Address-Source bit clear,
+     * exactly as it is after reset.  QEMU's VGA core treats a clear PAS bit as
+     * "screen disabled" and forces GMODE_BLANK in vga_update_display(), so the
+     * guest would render its desktop into VRAM yet the console would stay
+     * black.  A real VGABIOS finishes every mode-set by writing 0x20 to the
+     * attribute-controller write port to re-enable video output; the legacy
+     * text/planar path above already does this.  Do the same for VBE modes so
+     * the linear framebuffer is actually scanned out.
+     *
+     * The attribute controller shares an address/data flip-flop that a read of
+     * Input Status 1 resets to the index state.  That register is only decoded
+     * at its colour alias (0x3DA) when the Misc Output register selects colour
+     * I/O addressing, so force that bit first; otherwise the reset (and hence
+     * the enable) would silently depend on whatever mode ran before.
+     */
+    ia64_vga_writeb(VGA_MIS_W, ia64_vga_readb(VGA_MIS_R) | 0x01);
+    (void)ia64_vga_readb(VGA_IS1_RC);
+    ia64_vga_writeb(VGA_ATT_W, VGA_AR_ENABLE_DISPLAY);
+
     if (getenv("IA64_INT10_TRACE")) {
         fprintf(stderr, "int10: set_mode bx=%04x -> %dx%dx%d img=%u vbemem=%u "
                 "enable=%04x readback=%04x\n", s->int10_request.bx,
