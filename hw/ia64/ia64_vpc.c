@@ -1004,6 +1004,17 @@ static void ia64_int10_execute(IA64VpcMachineState *s)
     s->int10_result = s->int10_request;
     ia64_int10_response_clear(s);
 
+    if (getenv("IA64_INT10_TRACE")) {
+        bool handled = (s->int10_request.ax & 0xff00) == 0x4f00 ||
+                       (s->int10_request.ax >> 8) == 0x00 ||
+                       (s->int10_request.ax >> 8) == 0x0f ||
+                       (s->int10_request.ax >> 8) == 0x1a;
+        fprintf(stderr, "int10: ax=%04x bx=%04x cx=%04x dx=%04x di=%04x "
+                "es=%04x%s\n", s->int10_request.ax, s->int10_request.bx,
+                s->int10_request.cx, s->int10_request.dx, s->int10_request.di,
+                s->int10_request.es, handled ? "" : "  [UNHANDLED]");
+    }
+
     if ((s->int10_request.ax & 0xff00) == 0x4f00) {
         switch (s->int10_request.ax & 0xff) {
         case 0x00:
