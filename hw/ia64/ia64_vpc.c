@@ -397,6 +397,7 @@ struct IA64VpcMachineState {
     bool agp_enabled;
     uint64_t firmware_console;
     char *nvram_path;
+    char *vga_model;
     bool alat_full;
 
     PCIDevice *agp_dev;
@@ -1636,6 +1637,8 @@ static const IA64VpcCompatDefault ia64_vpc_compat_defaults[] = {
      * pixels at the exact hardware position, so every cursor type is correct.
      */
     { "ati-vga", "guest_hwcursor", "on" },
+    /* Same reasoning for the Mach64 hardware cursor. */
+    { "mach64-vga", "guest_hwcursor", "on" },
 };
 
 static void ia64_vpc_add_compat_defaults(MachineClass *mc)
@@ -1802,6 +1805,29 @@ static void ia64_vpc_set_firmware_console(Object *obj, const char *value,
     }
 
     error_setg(errp, "firmware-console must be 'serial' or 'vga'");
+}
+
+static char *ia64_vpc_get_vga(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return g_strdup(s->vga_model ? s->vga_model : "rage128");
+}
+
+static void ia64_vpc_set_vga(Object *obj, const char *value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    if (g_strcmp0(value, "rage128") != 0 &&
+        g_strcmp0(value, "mach64") != 0 &&
+        g_strcmp0(value, "std") != 0) {
+        error_setg(errp, "vga must be 'rage128', 'mach64' or 'std'");
+        return;
+    }
+    g_free(s->vga_model);
+    s->vga_model = g_strdup(value);
 }
 
 static char *ia64_vpc_get_alat(Object *obj, Error **errp)
@@ -2403,8 +2429,9 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
      * configuration space chapter).  Drivers index board tables by it.
      */
     pci_set_word(pci_dev->config + PCI_SUBSYSTEM_VENDOR_ID,
-                 IA64_ATI_VENDOR_ID);
-    pci_set_word(pci_dev->config + PCI_SUBSYSTEM_ID, IA64_ATI_RAGE128_PF_ID);
+                 pci_get_word(pci_dev->config + PCI_VENDOR_ID));
+    pci_set_word(pci_dev->config + PCI_SUBSYSTEM_ID,
+                 pci_get_word(pci_dev->config + PCI_DEVICE_ID));
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
                              IA64_VGA_FB_PCI_BASE, 4);
@@ -3123,7 +3150,19 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
-    s->vga_dev = pci_vga_init(pci_bus);
+    if (g_strcmp0(s->vga_model, "mach64") == 0) {
+        /*
+         * The Mach64 3D Rage (DEV_4754): a PCI 2D adapter with no AGP, chosen
+         * with -machine ia64-vpc,vga=mach64.  Create it explicitly at the VGA
+         * slot rather than through pci_vga_init()/-vga.
+         */
+        s->vga_dev = pci_new(PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), "mach64-vga");
+        if (!pci_realize_and_unref(s->vga_dev, pci_bus, errp)) {
+            return false;
+        }
+    } else {
+        s->vga_dev = pci_vga_init(pci_bus);
+    }
     /*
      * The GART scoping above assumes the graphics device is the AGP master at
      * IA64_VPC_VGA_SLOT.  pci_vga_init() auto-assigns the lowest free slot,
@@ -3222,6 +3261,8 @@ static void ia64_vpc_machine_instance_init(Object *obj)
 #endif
     /* The 460GX GXB AGP GART is on by default, as on real hardware. */
     s->agp_enabled = true;
+    /* Default display adapter: the Rage 128 (honouring -vga); mach64 opt-in. */
+    s->vga_model = g_strdup("rage128");
 }
 
 static void ia64_vpc_machine_instance_finalize(Object *obj)
@@ -3233,6 +3274,7 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
     }
     g_free(s->nvram_path);
     g_free(s->nvram_resolved_path);
+    g_free(s->vga_model);
 }
 
 static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
@@ -3300,6 +3342,13 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Set on/off to enable/disable the 460GX AGP GART (default on, as on "
         "real hardware); off makes the Rage 128 fall back to its 32-bit PCI "
         "GART -- clean 2D, but graphics DMA cannot reach RAM above 4 GiB");
+    object_class_property_add_str(oc, "vga",
+                                  ia64_vpc_get_vga,
+                                  ia64_vpc_set_vga);
+    object_class_property_set_description(oc, "vga",
+        "Display adapter: 'rage128' (default, ATI Rage 128, honours -vga), "
+        "'mach64' (ATI Mach64 3D Rage, a PCI 2D adapter with no AGP), or "
+        "'std'");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,
                                    ia64_vpc_set_firmware_ide_dma);

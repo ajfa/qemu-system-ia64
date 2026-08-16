@@ -16,6 +16,7 @@ config IA64_VPC_GRAPHICS
     bool
     depends on IA64_VPC
     select ATI_VGA
+    select MACH64_VGA
     select VGA_PCI
 
 config IA64_VPC_NETWORK
