@@ -2859,18 +2859,25 @@ typedef struct {
     uint64_t fb;
 } Mach64TestDev;
 
-static void mach64_dev_open(Mach64TestDev *a)
+static void mach64_dev_open_id(Mach64TestDev *a, const char *extra,
+                               uint16_t dev_id)
 {
-    a->qts = ia64_vpc_start("-machine vga=mach64");
+    a->qts = ia64_vpc_start(extra ?: "-machine vga=mach64");
     ia64_qpci_init(&a->gbus, a->qts);
     a->dev = qpci_device_find(&a->gbus.bus, QPCI_DEVFN(ATI_SLOT, 0));
     g_assert_nonnull(a->dev);
     g_assert_cmphex(qpci_config_readw(a->dev, PCI_VENDOR_ID), ==, 0x1002);
-    g_assert_cmphex(qpci_config_readw(a->dev, PCI_DEVICE_ID), ==, 0x4754);
+    g_assert_cmphex(qpci_config_readw(a->dev, PCI_DEVICE_ID), ==, dev_id);
     a->mmio = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_2) & 0xfffffff0;
     a->fb = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_0) & 0xfffffff0;
     g_assert_cmphex(a->mmio, ==, 0xf5000000);
     g_assert_cmphex(a->fb, ==, 0xf0000000);
+}
+
+static void mach64_dev_open(Mach64TestDev *a)
+{
+    /* default adapter is the Rage XL (0x4752). */
+    mach64_dev_open_id(a, "-machine vga=mach64", 0x4752);
 }
 
 static void mach64_dev_close(Mach64TestDev *a)
@@ -2893,16 +2900,27 @@ static void test_mach64_ids(void)
 {
     Mach64TestDev a;
 
+    /* Default: Rage XL 0x4752, auto revision 0x27 (the id both XP builds match). */
     mach64_dev_open(&a);
-    /* CONFIG_CHIP_ID reports the device id in its type field. */
-    g_assert_cmphex(m64_rd(&a, M64_CONFIG_CHIP_ID) & 0xffff, ==, 0x4754);
+    g_assert_cmphex(qpci_config_readb(a.dev, PCI_REVISION_ID), ==, 0x27);
+    /* CONFIG_CHIP_ID: device id in the type field, PCI revision in [31:24]. */
+    g_assert_cmphex(m64_rd(&a, M64_CONFIG_CHIP_ID) & 0xffff, ==, 0x4752);
+    g_assert_cmphex(m64_rd(&a, M64_CONFIG_CHIP_ID) >> 24, ==, 0x27);
     /* subsystem falls back to vendor/device (set by the machine). */
     g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_VENDOR_ID), ==,
                     0x1002);
-    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_ID), ==, 0x4754);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_ID), ==, 0x4752);
     /* a scratch register round-trips. */
     m64_wr(&a, M64_SCRATCH_REG0, 0xdeadbeef);
     g_assert_cmphex(m64_rd(&a, M64_SCRATCH_REG0), ==, 0xdeadbeef);
+    mach64_dev_close(&a);
+
+    /* x-device-id=0x4754 selects 3D Rage II with auto revision 0x9A. */
+    mach64_dev_open_id(&a, "-machine vga=mach64 -global mach64-vga.x-device-id=0x4754",
+                       0x4754);
+    g_assert_cmphex(qpci_config_readb(a.dev, PCI_REVISION_ID), ==, 0x9a);
+    g_assert_cmphex(m64_rd(&a, M64_CONFIG_CHIP_ID) & 0xffff, ==, 0x4754);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_ID), ==, 0x4754);
     mach64_dev_close(&a);
 }
 

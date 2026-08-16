@@ -345,7 +345,8 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
 
     switch (reg) {
     case CONFIG_CHIP_ID:
-        val = s->dev_id;   /* type = PCI device id; class/rev left 0 */
+        /* type field = PCI device id, rev field [31:24] = PCI revision. */
+        val = s->dev_id | ((uint32_t)s->chip_rev << 24);
         break;
     case CONFIG_STAT0:
         val = 0;
@@ -574,11 +575,29 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
     Mach64VGAState *s = MACH64_VGA(dev);
     VGACommonState *vga = &s->vga;
 
-    if (s->dev_id != PCI_DEVICE_ID_ATI_MACH64_GT) {
-        error_setg(errp, "mach64: only device id 0x4754 is supported");
+    if (s->dev_id != PCI_DEVICE_ID_ATI_MACH64_GR &&
+        s->dev_id != PCI_DEVICE_ID_ATI_MACH64_GT) {
+        error_setg(errp, "mach64: only device id 0x4752 (Rage XL) or 0x4754 "
+                   "(3D Rage II) is supported");
         return;
     }
     pci_set_word(dev->config + PCI_DEVICE_ID, s->dev_id);
+
+    /*
+     * Resolve the PCI revision.  Windows' inbox INFs bind the miniport by
+     * hardware id: Rage XL (0x4752) carries no REV qualifier so any value
+     * matches on both XP 2002 and XP 2003; 3D Rage II (0x4754) matches only
+     * with a REV in the display.inf set, of which 0x9A ("3D RAGE II+ PCI") is
+     * one.  A revision of 0 (our previous default) matched nothing, which is
+     * why the driver never installed.
+     */
+    if (s->revision > 0xff) {
+        s->chip_rev = (s->dev_id == PCI_DEVICE_ID_ATI_MACH64_GT) ?
+                      MACH64_REV_3DRAGE_II : MACH64_REV_RAGE_XL;
+    } else {
+        s->chip_rev = s->revision;
+    }
+    pci_set_byte(dev->config + PCI_REVISION_ID, s->chip_rev);
 
     if (!vga_common_init(vga, OBJECT(s), errp)) {
         return;
@@ -637,7 +656,9 @@ static void mach64_vga_exit(PCIDevice *dev)
 static const Property mach64_vga_properties[] = {
     DEFINE_PROP_UINT32("vgamem_mb", Mach64VGAState, vga.vram_size_mb, 8),
     DEFINE_PROP_UINT16("x-device-id", Mach64VGAState, dev_id,
-                       PCI_DEVICE_ID_ATI_MACH64_GT),
+                       PCI_DEVICE_ID_ATI_MACH64_GR),
+    DEFINE_PROP_UINT16("x-revision", Mach64VGAState, revision,
+                       MACH64_REV_AUTO),
     DEFINE_PROP_BOOL("guest_hwcursor", Mach64VGAState, cursor_guest_mode,
                      false),
     DEFINE_PROP_UINT8("x-pixman", Mach64VGAState, use_pixman,
@@ -657,7 +678,7 @@ static void mach64_vga_class_init(ObjectClass *klass, const void *data)
 
     k->class_id = PCI_CLASS_DISPLAY_VGA;
     k->vendor_id = PCI_VENDOR_ID_ATI;
-    k->device_id = PCI_DEVICE_ID_ATI_MACH64_GT;
+    k->device_id = PCI_DEVICE_ID_ATI_MACH64_GR;
     k->romfile = "vgabios-mach64.bin";
     k->realize = mach64_vga_realize;
     k->exit = mach64_vga_exit;

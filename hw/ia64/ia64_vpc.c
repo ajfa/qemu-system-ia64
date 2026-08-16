@@ -2415,6 +2415,57 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
     rom[declared - 1] = (uint8_t)(-checksum);
 }
 
+/*
+ * Restate a video BIOS's PCI Data Structure vendor/device id to match the
+ * adapter's configuration header, and fix the ROM image checksum.  A real ATI
+ * ROM carries the id of the exact board it shipped on (e.g. a Mach64 GT VBIOS
+ * declares 1002:4754 in its PCIR), but we may present that same silicon under
+ * a different, driver-friendlier id (the Rage XL 1002:4752, the one both XP
+ * IA-64 builds auto-match).  EFI 1.10 12.4 requires the PCIR id to match the
+ * device, and a driver that validates its ROM against the bound device rejects
+ * a mismatch, so bring the two into agreement.  A no-op when they already
+ * agree (e.g. the Rage 128 SeaBIOS path, whose PCIR is fixed up above).
+ */
+static void ia64_vpc_match_rom_pcir(PCIDevice *pci_dev)
+{
+    uint8_t *rom;
+    uint64_t rom_size;
+    uint32_t declared, pcir, i;
+    uint16_t ven, dev;
+    uint8_t checksum = 0;
+
+    if (pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
+        return;
+    }
+    rom = memory_region_get_ram_ptr(&pci_dev->rom);
+    rom_size = memory_region_size(&pci_dev->rom);
+    if (rom == NULL || rom_size < 0x400 || rom[0] != 0x55 || rom[1] != 0xaa) {
+        return;
+    }
+    declared = (uint32_t)rom[2] * 512U;
+    if (declared == 0 || declared > rom_size) {
+        return;
+    }
+    pcir = lduw_le_p(rom + 0x18);
+    if (pcir == 0 || pcir + 0x18U > declared ||
+        memcmp(rom + pcir, "PCIR", 4) != 0) {
+        return;
+    }
+    ven = pci_get_word(pci_dev->config + PCI_VENDOR_ID);
+    dev = pci_get_word(pci_dev->config + PCI_DEVICE_ID);
+    if (lduw_le_p(rom + pcir + 0x04) == ven &&
+        lduw_le_p(rom + pcir + 0x06) == dev) {
+        return; /* already matches */
+    }
+    stw_le_p(rom + pcir + 0x04, ven);
+    stw_le_p(rom + pcir + 0x06, dev);
+    rom[declared - 1] = 0;
+    for (i = 0; i < declared - 1U; i++) {
+        checksum += rom[i];
+    }
+    rom[declared - 1] = (uint8_t)(-checksum);
+}
+
 static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
@@ -2452,6 +2503,7 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
      */
     if (pci_dev->io_regions[PCI_ROM_SLOT].size != 0) {
         ia64_vpc_install_ati_rom_tables(pci_dev);
+        ia64_vpc_match_rom_pcir(pci_dev);
         /*
          * Assign the ROM BAR but leave its enable bit CLEAR.  With the bit
          * set at enumeration time, Windows' pci.sys generates a fourth

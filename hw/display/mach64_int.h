@@ -21,8 +21,18 @@
 #include "mach64_regs.h"
 
 #define PCI_VENDOR_ID_ATI            0x1002
-/* Mach64 GT = "3D Rage" / Rage Pro */
+/* Mach64 GR = Rage XL (the default: the one id XP 2002 *and* XP 2003 auto-match) */
+#define PCI_DEVICE_ID_ATI_MACH64_GR  0x4752
+/* Mach64 GT = "3D Rage II"; XP 2002 only, and only with a matching REV */
 #define PCI_DEVICE_ID_ATI_MACH64_GT  0x4754
+
+/* Auto-selected revision sentinel for the x-revision property. */
+#define MACH64_REV_AUTO              0x100
+/* Plausible per-chip PCI revisions.  For Rage XL the inbox INFs carry no REV
+ * qualifier so any value matches; for 3D Rage II XP 2002 requires one of
+ * {01,19,1A,41,5A,9A} (display.inf), 9A = "3D RAGE II+ PCI". */
+#define MACH64_REV_RAGE_XL           0x27
+#define MACH64_REV_3DRAGE_II         0x9a
 
 #define MACH64_LINEAR_APER_SIZE      (8 * MiB)
 
@@ -47,6 +57,8 @@ struct Mach64VGAState {
     VGACommonState vga;
 
     uint16_t dev_id;
+    uint16_t revision;            /* x-revision property; MACH64_REV_AUTO = pick */
+    uint8_t chip_rev;             /* effective PCI revision, resolved in realize */
     uint8_t mode;                 /* VGA_MODE or EXT_MODE */
     uint8_t use_pixman;
     bool cursor_guest_mode;
