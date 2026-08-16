@@ -59,7 +59,7 @@
 #define IA64_INT10_ROM_ATI_HEADER_OFFSET 0x0080U
 #define IA64_INT10_ROM_ATI_PLL_OFFSET 0x00c0U
 #define IA64_INT10_ROM_HANDLER_OFFSET 0x0100U
-#define IA64_INT10_HANDLER_SIZE      116U
+#define IA64_INT10_HANDLER_SIZE      128U
 #define IA64_INT10_ROM_OEM_OFFSET    0x0180U
 #define IA64_INT10_ROM_MODES_OFFSET  0x01d0U
 #define IA64_INT10_IO_BASE           0x01e0U
@@ -358,8 +358,9 @@ static void test_int10_rom(void)
                     ==, 0x111);
     g_assert_cmphex(rom[IA64_INT10_ROM_HANDLER_OFFSET], ==, 0x55);
     g_assert_cmphex(rom[IA64_INT10_ROM_HANDLER_OFFSET + 1], ==, 0x89);
+    /* The handler ends in iret (0xcf) and abuts the OEM string at its size. */
     g_assert_cmphex(rom[IA64_INT10_ROM_HANDLER_OFFSET +
-                       IA64_INT10_HANDLER_SIZE], ==, 0);
+                       IA64_INT10_HANDLER_SIZE - 1], ==, 0xcf);
     for (i = 0; i < sizeof(rom); i++) {
         checksum += rom[i];
     }

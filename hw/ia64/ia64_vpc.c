@@ -332,8 +332,14 @@ static const char ia64_vbe_revision[] = "1.0";
  *     in   ax, dx
  *     mov  cx, ax
  *     jcxz response_done
- *     push di
- *     add  dx, 2
+ *     push di                 ; deliver the response to the RESULT es:di.  For
+ *     mov  dx, 1e8h           ; VBE that is the request es:di (unchanged); the
+ *     in   ax, dx             ; ATI BIOS query sets it to the caller's dx:bx
+ *     mov  di, ax             ; buffer instead.
+ *     mov  dx, 1eah
+ *     in   ax, dx
+ *     mov  es, ax
+ *     mov  dx, 1eeh
  *     cld
  * response_loop:
  *     in   ax, dx
@@ -368,12 +374,13 @@ static const uint8_t ia64_int10_handler[] = {
     0x75, 0x0f, 0x83, 0xc2, 0x02, 0x26, 0x8b, 0x05,
     0xef, 0x26, 0x8b, 0x45, 0x02, 0xef, 0x83, 0xea,
     0x02, 0xb8, 0x41, 0x49, 0xef, 0xed, 0x89, 0xc1,
-    0xe3, 0x0a, 0x57, 0x83, 0xc2, 0x02, 0xfc, 0xed,
-    0xab, 0xe2, 0xfc, 0x5f, 0xba, 0xe0, 0x01, 0xed,
-    0x89, 0x46, 0xfe, 0x83, 0xc2, 0x02, 0xed, 0x89,
-    0xc3, 0x83, 0xc2, 0x02, 0xed, 0x89, 0xc1, 0x83,
-    0xc2, 0x02, 0xed, 0x89, 0xc2, 0x8b, 0x46, 0xfe,
-    0x89, 0xec, 0x5d, 0xcf,
+    0xe3, 0x16, 0x57, 0xba, 0xe8, 0x01, 0xed, 0x89,
+    0xc7, 0xba, 0xea, 0x01, 0xed, 0x8e, 0xc0, 0xba,
+    0xee, 0x01, 0xfc, 0xed, 0xab, 0xe2, 0xfc, 0x5f,
+    0xba, 0xe0, 0x01, 0xed, 0x89, 0x46, 0xfe, 0x83,
+    0xc2, 0x02, 0xed, 0x89, 0xc3, 0x83, 0xc2, 0x02,
+    0xed, 0x89, 0xc1, 0x83, 0xc2, 0x02, 0xed, 0x89,
+    0xc2, 0x8b, 0x46, 0xfe, 0x89, 0xec, 0x5d, 0xcf,
 };
 
 /* Option-ROM initialization entry: install C000:0100 as vector 10h. */
@@ -858,6 +865,13 @@ static void ia64_int10_set_mode(IA64VpcMachineState *s)
         enable |= VBE_DISPI_NOCLEARMEM;
     }
     ia64_vbe_write(VBE_DISPI_INDEX_ENABLE, enable);
+    if (getenv("IA64_INT10_TRACE")) {
+        fprintf(stderr, "int10: set_mode bx=%04x -> %dx%dx%d img=%u vbemem=%u "
+                "enable=%04x readback=%04x\n", s->int10_request.bx,
+                mode->width, mode->height, mode->bpp, image_size,
+                (unsigned)ia64_vbe_memory_size(), enable,
+                ia64_vbe_read(VBE_DISPI_INDEX_ENABLE));
+    }
     ia64_int10_vbe_success(s);
 }
 
@@ -997,6 +1011,58 @@ static void ia64_int10_ddc(IA64VpcMachineState *s)
     ia64_int10_vbe_success(s);
 }
 
+/*
+ * ATI Accelerator-BIOS INT 10h functions (BIOS prefix 0xA000, "VGA enabled").
+ * The native Mach64 miniport calls these to obtain the card's configuration;
+ * the function number is the low byte of AX.  The synthesised VBE handler does
+ * not otherwise answer them, so without this the driver reports "Unable to
+ * obtain configuration information for graphics card" and never brings up a
+ * mode.  Contract from the ATI Mach64 SDK (M64BIOS.C long_query) and the
+ * query_structure layout (Mach64 driver source amach1.h / SDK MAIN.H):
+ *   0x08 BIOS_GET_QUERY_SIZE -> CX = header size in bytes, AH = 0.
+ *   0x09 BIOS_QUERY          -> write the query_structure header to the buffer
+ *                               at DX:BX (segment:offset), AH = 0.
+ */
+static void ia64_int10_ati_bios(IA64VpcMachineState *s)
+{
+    unsigned fn = s->int10_request.ax & 0xff;
+    uint8_t *q;
+
+    switch (fn) {
+    case 0x08:  /* BIOS_GET_QUERY_SIZE */
+        s->int10_result.cx = 0x20;              /* 32-byte header */
+        s->int10_result.ax &= 0x00ff;           /* AH = 0: success */
+        break;
+    case 0x09:  /* BIOS_QUERY: deliver the header to DX:BX via the stub copy */
+        ia64_int10_response_size(s, 0x20);
+        q = s->int10_response;
+        stw_le_p(q + 0x00, 0x20);               /* q_sizeof_struct */
+        q[0x02] = 0x02;                         /* q_structure_rev */
+        q[0x03] = 0x00;                         /* q_number_modes (header only) */
+        stw_le_p(q + 0x04, 0x0000);             /* q_mode_offset */
+        q[0x06] = 0x00;                         /* q_sizeof_mode */
+        q[0x07] = 0x01;                         /* q_VGA_type: enabled */
+        stw_le_p(q + 0x08, 0x4752);             /* q_asic_id (Rage XL) */
+        q[0x0a] = 0x00;                         /* q_VGA_boundary */
+        q[0x0b] = 0x20;                         /* q_memory_size: 32 * 256KiB = 8MiB */
+        q[0x0c] = 0x05;                         /* q_DAC_type (internal) */
+        q[0x0d] = 0x0a;                         /* q_memory_type: SDRAM */
+        q[0x0e] = 0x07;                         /* q_bus_type: BUS_PCI */
+        q[0x0f] = 0x00;                         /* q_monitor_cntl */
+        stw_le_p(q + 0x10, IA64_VGA_FB_PCI_BASE >> 20); /* q_aperture_addr (MiB) */
+        q[0x12] = 0x02;                         /* q_aperture_cfg: 8MiB linear */
+        q[0x13] = 0x2f;                         /* colour depths 565/555/RGB/BGR/RGBA */
+        s->int10_result.es = s->int10_request.dx;
+        s->int10_result.di = s->int10_request.bx;
+        s->int10_result.ax &= 0x00ff;           /* AH = 0: success */
+        break;
+    default:
+        /* Acknowledge other ATI functions (e.g. 0x14) as success no-ops. */
+        s->int10_result.ax &= 0x00ff;
+        break;
+    }
+}
+
 static void ia64_int10_execute(IA64VpcMachineState *s)
 {
     uint16_t current_mode;
@@ -1013,6 +1079,11 @@ static void ia64_int10_execute(IA64VpcMachineState *s)
                 "es=%04x%s\n", s->int10_request.ax, s->int10_request.bx,
                 s->int10_request.cx, s->int10_request.dx, s->int10_request.di,
                 s->int10_request.es, handled ? "" : "  [UNHANDLED]");
+    }
+
+    if ((s->int10_request.ax & 0xff00) == 0xa000) {
+        ia64_int10_ati_bios(s);
+        return;
     }
 
     if ((s->int10_request.ax & 0xff00) == 0x4f00) {
