@@ -26,6 +26,49 @@
 
 enum { VGA_MODE, EXT_MODE };
 
+/*
+ * Opt-in mode-set/scanout diagnostic (MACH64_TRACE=1 in the environment).
+ * Logs the infrequent CRTC/DAC/clock register writes and the extended-mode
+ * switch decision to stderr; never hooks a guest tight loop.
+ */
+static bool mach64_trace_on(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        on = getenv("MACH64_TRACE") != NULL;
+    }
+    return on;
+}
+#define M64_TRACE(fmt, ...) do {                                        \
+    if (mach64_trace_on()) {                                            \
+        fprintf(stderr, "mach64: " fmt "\n", ##__VA_ARGS__);           \
+    }                                                                   \
+} while (0)
+
+/* Deduplicated register-access trace (collapses poll loops). */
+static void mach64_trace_access(char rw, unsigned reg, uint32_t val)
+{
+    static char last_rw;
+    static unsigned last_reg = ~0u, rep;
+
+    if (!mach64_trace_on()) {
+        return;
+    }
+    if (rw != last_rw || reg != last_reg) {
+        if (rep) {
+            fprintf(stderr, "mach64:   (repeated x%u)\n", rep);
+        }
+        fprintf(stderr, "mach64: %c reg[%03x] %s %08x\n", rw, reg,
+                rw == 'r' ? "->" : "<-", val);
+        last_rw = rw;
+        last_reg = reg;
+        rep = 0;
+    } else {
+        rep++;
+    }
+}
+
 #ifdef CONFIG_PIXMAN
 #define MACH64_DEFAULT_PIXMAN 3
 #else
@@ -98,11 +141,21 @@ static void mach64_switch_mode(Mach64VGAState *s)
 {
     VGACommonState *vga = &s->vga;
 
+    M64_TRACE("switch_mode gen_cntl=%08x ext=%d en=%d htd=%08x vtd=%08x "
+              "off_pitch=%08x pixw=%08x dac_cntl=%08x",
+              s->regs[CRTC_GEN_CNTL],
+              !!(s->regs[CRTC_GEN_CNTL] & CRTC_EXT_DISP_EN),
+              !!(s->regs[CRTC_GEN_CNTL] & CRTC_EN),
+              s->regs[CRTC_H_TOTAL_DISP], s->regs[CRTC_V_TOTAL_DISP],
+              s->regs[CRTC_OFF_PITCH], s->regs[DP_PIX_WIDTH],
+              s->regs[DAC_CNTL]);
+
     if (!(s->regs[CRTC_GEN_CNTL] & CRTC_EXT_DISP_EN) ||
         !(s->regs[CRTC_GEN_CNTL] & CRTC_EN)) {
         s->mode = VGA_MODE;
         vbe_ioport_write_index(vga, 0, VBE_DISPI_INDEX_ENABLE);
         vbe_ioport_write_data(vga, 0, VBE_DISPI_DISABLED);
+        M64_TRACE("  -> VGA_MODE (ext/en not both set)");
         return;
     }
 
@@ -135,9 +188,11 @@ static void mach64_switch_mode(Mach64VGAState *s)
         break;
     default:
         qemu_log_mask(LOG_UNIMP, "mach64: unsupported CRTC pix width %u\n", pw);
+        M64_TRACE("  -> BAIL unsupported pix width %u", pw);
         return;
     }
     if (h <= 0 || v <= 0) {
+        M64_TRACE("  -> BAIL bad geometry h=%d v=%d", h, v);
         return;
     }
     if (pitch_px <= 0) {
@@ -159,9 +214,13 @@ static void mach64_switch_mode(Mach64VGAState *s)
         vbe_ioport_write_data(vga, 0, pitch_px);
     }
     int bypp = DIV_ROUND_UP(vga->vbe_regs[VBE_DISPI_INDEX_BPP], 8);
-    if (bypp && (uint64_t)v * pitch_px * bypp + offs <= vga->vbe_size) {
+    bool off_ok = bypp && (uint64_t)v * pitch_px * bypp + offs <= vga->vbe_size;
+    if (off_ok) {
         vga->vbe_start_addr = offs / 4;
     }
+    M64_TRACE("  -> EXT_MODE %dx%d bpp=%d pitch_px=%d offs=%#x start=%#x "
+              "off_ok=%d vbe_size=%#x", h, v, bpp, pitch_px, offs,
+              vga->vbe_start_addr, off_ok, vga->vbe_size);
 }
 
 /* ---- hardware cursor (64x64 2bpp AND/XOR, identical model to the Rage 128) ---- */
@@ -340,6 +399,7 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
     uint32_t val;
 
     if (reg >= MACH64_NREGS) {
+        mach64_trace_access('r', reg, 0);
         return 0; /* Block 1 (overlay/scaler): not modelled yet */
     }
 
@@ -347,9 +407,6 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
     case CONFIG_CHIP_ID:
         /* type field = PCI device id, rev field [31:24] = PCI revision. */
         val = s->dev_id | ((uint32_t)s->chip_rev << 24);
-        break;
-    case CONFIG_STAT0:
-        val = 0;
         break;
     case GUI_STAT:
     case FIFO_STAT:
@@ -367,6 +424,10 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
     default:
         val = s->regs[reg];
         break;
+    }
+
+    if (reg != CRTC_VLINE_CRNT_VLINE && reg != DAC_REGS) {
+        mach64_trace_access('r', reg, val);
     }
 
     if (size < 4) {
@@ -394,6 +455,7 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
     unsigned byte = addr & 3;
 
     if (reg >= MACH64_NREGS) {
+        mach64_trace_access('w', reg, data);
         return; /* Block 1 (overlay/scaler): not modelled yet */
     }
 
@@ -404,9 +466,18 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
         return;
     }
 
+    if (reg != DAC_REGS) {
+        mach64_trace_access('w', reg, data);
+    }
+
     switch (reg) {
     case DAC_REGS:
         if (size == 1) {
+            static unsigned dac_n;
+            if (mach64_trace_on() && byte == 1 && (dac_n++ % 256) == 0) {
+                M64_TRACE("dac palette data burst @#%u (widx=%u)", dac_n,
+                          s->vga.dac_write_index);
+            }
             mach64_dac_write(s, byte, data & 0xff);
             return;
         }
@@ -614,8 +685,14 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
     /* MMIO register block (BAR2). */
     memory_region_init_io(&s->mm, OBJECT(s), &mach64_mm_ops, s,
                           "mach64.mmregs", MACH64_MMIO_SIZE);
-    /* Block-I/O alias (BAR1): the first 256 bytes of the register window. */
-    memory_region_init_alias(&s->io, OBJECT(s), "mach64.io", &s->mm, 0, 0x100);
+    /*
+     * Block-I/O alias (BAR1): CPIO register access.  A block-I/O port at
+     * offset N reaches Block-0 register index N/4, which lives at BAR2 + 0x400
+     * + N in the MMIO window - so alias the I/O BAR onto the Block-0 region,
+     * not the start of the window (which decodes as the unmodelled Block 1).
+     */
+    memory_region_init_alias(&s->io, OBJECT(s), "mach64.io", &s->mm,
+                             MACH64_REG_BLOCK0_BASE, 0x100);
 
     /* Linear framebuffer aperture (BAR0). */
     memory_region_init(&s->linear_aper, OBJECT(dev), "mach64.vram",
@@ -640,6 +717,22 @@ static void mach64_vga_reset(DeviceState *dev)
     s->cursor_offset = 0;
     /* Engine out of reset on 264xT parts. */
     s->regs[GEN_TEST_CNTL] = GEN_GUI_RESETB;
+
+    /*
+     * The IA-64 firmware runs no Mach64 video-BIOS POST, so populate the
+     * configuration straps a real POST would leave in the chip: the miniport
+     * reads CONFIG_STAT0 for the chip/VGA-enable bits and memory type, and
+     * MEM_CNTL for the installed VRAM size.  Without these it fails with
+     * "Unable to obtain configuration information for graphics card" and never
+     * initialises the display.
+     */
+    s->regs[CONFIG_STAT0] = CFG_CHIP_EN | CFG_VGA_EN | CFG_VGA_EN_T |
+                            MEM_264_SGRAM;
+    if (s->dev_id == PCI_DEVICE_ID_ATI_MACH64_GT) {
+        s->regs[MEM_CNTL] = CTL_MEM_SIZE_8M;    /* <264VTB reads bits[2:0] */
+    } else {
+        s->regs[MEM_CNTL] = CTL_MEM_SIZEB_8M;   /* 264VTB+ reads bits[3:0] */
+    }
 }
 
 static void mach64_vga_exit(PCIDevice *dev)
@@ -665,6 +758,21 @@ static const Property mach64_vga_properties[] = {
                       MACH64_DEFAULT_PIXMAN),
 };
 
+/* Diagnostic: trace PCI config writes to the ROM BAR / command register. */
+static void mach64_config_write(PCIDevice *dev, uint32_t addr, uint32_t val,
+                                int len)
+{
+    if (mach64_trace_on() &&
+        (ranges_overlap(addr, len, PCI_ROM_ADDRESS, 4) ||
+         ranges_overlap(addr, len, PCI_COMMAND, 2))) {
+        M64_TRACE("pci cfg wr [%02x/%d] <- %08x (rom_bar now %08x cmd %04x)",
+                  addr, len, val,
+                  pci_get_long(dev->config + PCI_ROM_ADDRESS),
+                  pci_get_word(dev->config + PCI_COMMAND));
+    }
+    pci_default_write_config(dev, addr, val, len);
+}
+
 static void mach64_vga_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -682,6 +790,7 @@ static void mach64_vga_class_init(ObjectClass *klass, const void *data)
     k->romfile = "vgabios-mach64.bin";
     k->realize = mach64_vga_realize;
     k->exit = mach64_vga_exit;
+    k->config_write = mach64_config_write;
 }
 
 static const TypeInfo mach64_vga_info = {

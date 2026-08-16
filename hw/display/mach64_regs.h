@@ -165,6 +165,19 @@
 #define CFG_CHIP_CLASS          0x00ff0000ul
 #define CFG_CHIP_REV            0xff000000ul
 
+/* ---- CONFIG_STAT0 (CONFIG_STATUS64_0) straps a real VBIOS POST leaves ---- */
+#define CFG_MEM_TYPE_T          0x00000007ul   /* 264xT memory type (bits[2:0]) */
+#define CFG_VGA_EN_T            0x00000010ul   /* VT/GT VGA enable */
+#define CFG_VGA_EN              0x00800000ul   /* GX/CX VGA enable */
+#define CFG_CHIP_EN             0x02000000ul   /* GX/CX chip enable */
+#define MEM_264_SGRAM           0x5            /* SGRAM (1:1) memory type */
+
+/* ---- MEM_CNTL memory-size fields ---- */
+#define CTL_MEM_SIZE            0x00000007ul   /* <264VTB: index into size table */
+#define CTL_MEM_SIZEB          0x0000000ful    /* 264VTB+: encoded size */
+#define CTL_MEM_SIZE_8M         0x5            /* videoRamSizes[5] = 8192 KiB */
+#define CTL_MEM_SIZEB_8M        0xB            /* (0xB-3)*1024 = 8192 KiB */
+
 /* ---- GUI_STAT / FIFO_STAT ---- */
 #define GUI_ACTIVE              0x00000001ul
 
