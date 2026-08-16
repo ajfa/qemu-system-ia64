@@ -406,6 +406,12 @@ static void mach64_update_irq(Mach64VGAState *s)
     bool level = ((ic & CRTC_VBLANK_INT) && (ic & CRTC_VBLANK_INT_EN)) ||
                  ((ic & CRTC_VLINE_INT) && (ic & CRTC_VLINE_INT_EN));
 
+    /* EXPERIMENT (MACH64_FORCE_VBLANK_IRQ): assert on vblank regardless of the
+     * enable bit, to test whether the native driver waits on an unenabled
+     * vblank interrupt. */
+    if (getenv("MACH64_FORCE_VBLANK_IRQ") && (ic & CRTC_VBLANK_INT)) {
+        level = true;
+    }
     pci_set_irq(&s->dev, level);
 }
 
@@ -543,19 +549,17 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
     case GUI_STAT:
     case FIFO_STAT:
         return; /* read-only */
-    case CRTC_INT_CNTL: {
+    case CRTC_INT_CNTL:
         /*
-         * The _INT status bits are write-1-to-ack; the _INT_EN and other bits
-         * are stored from the write (the driver programs it as a full dword).
+         * Plain R/W: the hardware sets the _INT status bits on the event (the
+         * vblank timer ORs CRTC_VBLANK_INT in); the driver's ISR clears them by
+         * reading the register and writing it back with the bit cleared (a
+         * read-modify-write to 0), not write-1-to-ack.  Store the value as
+         * written and re-evaluate the interrupt line.
          */
-        uint32_t v = data;
-        uint32_t status = s->regs[reg] & CRTC_INT_STATUS_BITS;
-
-        status &= ~(v & CRTC_INT_STATUS_BITS);
-        s->regs[reg] = (v & ~CRTC_INT_STATUS_BITS) | status;
+        s->regs[reg] = data;
         mach64_update_irq(s);
         return;
-    }
     }
 
     mach64_reg_store(s, reg, byte, size, data);
