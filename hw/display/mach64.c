@@ -392,6 +392,33 @@ static uint32_t mach64_crtc_vline(Mach64VGAState *s)
     return (now % frame_ns) * lines / frame_ns;
 }
 
+/* True while the synthetic raster is in the vertical-blank region. */
+static bool mach64_in_vblank(Mach64VGAState *s)
+{
+    int vdisp = ((s->regs[CRTC_V_TOTAL_DISP] & CRTC_V_DISP) >> 16) + 1;
+
+    return (int)mach64_crtc_vline(s) >= vdisp;
+}
+
+static void mach64_update_irq(Mach64VGAState *s)
+{
+    uint32_t ic = s->regs[CRTC_INT_CNTL];
+    bool level = ((ic & CRTC_VBLANK_INT) && (ic & CRTC_VBLANK_INT_EN)) ||
+                 ((ic & CRTC_VLINE_INT) && (ic & CRTC_VLINE_INT_EN));
+
+    pci_set_irq(&s->dev, level);
+}
+
+static void mach64_vblank_timer(void *opaque)
+{
+    Mach64VGAState *s = opaque;
+
+    timer_mod(&s->vblank_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+              NANOSECONDS_PER_SECOND / 60);
+    s->regs[CRTC_INT_CNTL] |= CRTC_VBLANK_INT;
+    mach64_update_irq(s);
+}
+
 /* Diagnostic wrapper: log the VBE/scanout state each render (MACH64_TRACE=1). */
 static bool mach64_gfx_update(void *opaque)
 {
@@ -434,7 +461,14 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
         val = 0;           /* engine idle, FIFO empty: WaitForIdle/FIFO pass */
         break;
     case CRTC_VLINE_CRNT_VLINE:
-        val = mach64_crtc_vline(s) << 16;
+        val = (mach64_crtc_vline(s) << CRTC_CRNT_VLINE_SHIFT) & CRTC_CRNT_VLINE;
+        val |= s->regs[reg] & CRTC_VLINE;   /* keep the programmed compare value */
+        break;
+    case CRTC_INT_CNTL:
+        val = s->regs[reg] & ~CRTC_VBLANK;
+        if (mach64_in_vblank(s)) {
+            val |= CRTC_VBLANK;             /* live vblank status bit */
+        }
         break;
     case DAC_REGS:
         if (size == 1) {
@@ -509,6 +543,19 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
     case GUI_STAT:
     case FIFO_STAT:
         return; /* read-only */
+    case CRTC_INT_CNTL: {
+        /*
+         * The _INT status bits are write-1-to-ack; the _INT_EN and other bits
+         * are stored from the write (the driver programs it as a full dword).
+         */
+        uint32_t v = data;
+        uint32_t status = s->regs[reg] & CRTC_INT_STATUS_BITS;
+
+        status &= ~(v & CRTC_INT_STATUS_BITS);
+        s->regs[reg] = (v & ~CRTC_INT_STATUS_BITS) | status;
+        mach64_update_irq(s);
+        return;
+    }
     }
 
     mach64_reg_store(s, reg, byte, size, data);
@@ -627,6 +674,7 @@ static int mach64_post_load(void *opaque, int version_id)
     } else if (mach64_cursor_enabled(s)) {
         mach64_cursor_define(s);
     }
+    mach64_update_irq(s);
     graphic_hw_invalidate(s->vga.con);
     return 0;
 }
@@ -656,6 +704,7 @@ static const VMStateDescription vmstate_mach64_vga = {
         VMSTATE_UINT32_ARRAY(regs, Mach64VGAState, MACH64_NREGS),
         VMSTATE_STRUCT(host_data, Mach64VGAState, 0, vmstate_mach64_host_data,
                        Mach64HostData),
+        VMSTATE_TIMER(vblank_timer, Mach64VGAState),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -728,6 +777,9 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
     pci_register_bar(dev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->mm);
 
     dev->config[PCI_INTERRUPT_PIN] = 1;
+    timer_init_ns(&s->vblank_timer, QEMU_CLOCK_VIRTUAL, mach64_vblank_timer, s);
+    timer_mod(&s->vblank_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+              NANOSECONDS_PER_SECOND / 60);
 }
 
 static void mach64_vga_reset(DeviceState *dev)
@@ -741,6 +793,7 @@ static void mach64_vga_reset(DeviceState *dev)
     s->cursor_offset = 0;
     /* Engine out of reset on 264xT parts. */
     s->regs[GEN_TEST_CNTL] = GEN_GUI_RESETB;
+    mach64_update_irq(s);
 
     /*
      * The IA-64 firmware runs no Mach64 video-BIOS POST, so populate the
@@ -763,6 +816,7 @@ static void mach64_vga_exit(PCIDevice *dev)
 {
     Mach64VGAState *s = MACH64_VGA(dev);
 
+    timer_del(&s->vblank_timer);
     graphic_console_close(s->vga.con);
     if (s->cursor) {
         cursor_unref(s->cursor);

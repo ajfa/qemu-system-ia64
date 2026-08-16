@@ -152,6 +152,19 @@
 #define CRTC_PITCH_MASK         0xffc00000ul   /* in units of 8 pixels */
 #define CRTC_PITCH_SHIFT        22
 
+/* ---- CRTC_INT_CNTL (reg 0x06): interrupt enable + status ---- */
+#define CRTC_VBLANK             0x00000001ul   /* vblank status (read-only) */
+#define CRTC_VBLANK_INT_EN      0x00000002ul
+#define CRTC_VBLANK_INT         0x00000004ul   /* status; write 1 to ack */
+#define CRTC_VLINE_INT_EN       0x00000008ul
+#define CRTC_VLINE_INT          0x00000010ul   /* status; write 1 to ack */
+#define CRTC_INT_STATUS_BITS    (CRTC_VBLANK_INT | CRTC_VLINE_INT)
+
+/* ---- CRTC_VLINE_CRNT_VLINE (reg 0x04): current scanline ---- */
+#define CRTC_VLINE              0x000007fful   /* programmed compare value */
+#define CRTC_CRNT_VLINE         0x07ff0000ul   /* current scanline */
+#define CRTC_CRNT_VLINE_SHIFT   16
+
 /* ---- DAC_CNTL ---- */
 #define DAC_8BIT_EN             0x00000100ul
 

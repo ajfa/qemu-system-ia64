@@ -14,6 +14,7 @@
 #define MACH64_INT_H
 
 #include "qemu/units.h"
+#include "qemu/timer.h"
 #include "hw/pci/pci_device.h"
 #include "vga_int.h"
 #include "qom/object.h"
@@ -76,6 +77,9 @@ struct Mach64VGAState {
     uint32_t regs[MACH64_NREGS];
 
     Mach64HostData host_data;
+
+    /* Synthetic 60 Hz vertical-blank interrupt (CRTC_INT_CNTL). */
+    QEMUTimer vblank_timer;
 };
 
 /* mach64_2d.c */
