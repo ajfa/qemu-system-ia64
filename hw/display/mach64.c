@@ -26,6 +26,9 @@
 
 enum { VGA_MODE, EXT_MODE };
 
+static const GraphicHwOps *mach64_vga_hw_ops;
+static GraphicHwOps mach64_hw_ops;
+
 /*
  * Opt-in mode-set/scanout diagnostic (MACH64_TRACE=1 in the environment).
  * Logs the infrequent CRTC/DAC/clock register writes and the extended-mode
@@ -389,6 +392,24 @@ static uint32_t mach64_crtc_vline(Mach64VGAState *s)
     return (now % frame_ns) * lines / frame_ns;
 }
 
+/* Diagnostic wrapper: log the VBE/scanout state each render (MACH64_TRACE=1). */
+static bool mach64_gfx_update(void *opaque)
+{
+    VGACommonState *vga = opaque;
+    bool r = mach64_vga_hw_ops->gfx_update(opaque);
+
+    if (mach64_trace_on()) {
+        M64_TRACE("gfx_update vbe_en=%04x %ux%u bpp=%u start=%#x "
+                  "graphic_mode=%d ret=%d",
+                  vga->vbe_regs[VBE_DISPI_INDEX_ENABLE],
+                  vga->vbe_regs[VBE_DISPI_INDEX_XRES],
+                  vga->vbe_regs[VBE_DISPI_INDEX_YRES],
+                  vga->vbe_regs[VBE_DISPI_INDEX_BPP],
+                  vga->vbe_start_addr, vga->graphic_mode, r);
+    }
+    return r;
+}
+
 /* ---- MMIO register access ---- */
 
 static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
@@ -426,7 +447,7 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
         break;
     }
 
-    if (reg != CRTC_VLINE_CRNT_VLINE && reg != DAC_REGS) {
+    if (reg != DAC_REGS) {
         mach64_trace_access('r', reg, val);
     }
 
@@ -676,7 +697,10 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
     vga->vbe_legacy_mode_switch = true;
     vga_init(vga, OBJECT(s), pci_address_space(dev),
              pci_address_space_io(dev), true);
-    vga->con = graphic_console_init(DEVICE(s), 0, vga->hw_ops, vga);
+    mach64_vga_hw_ops = vga->hw_ops;
+    mach64_hw_ops = *vga->hw_ops;
+    mach64_hw_ops.gfx_update = mach64_gfx_update;
+    vga->con = graphic_console_init(DEVICE(s), 0, &mach64_hw_ops, vga);
     if (s->cursor_guest_mode) {
         vga->cursor_invalidate = mach64_cursor_invalidate;
         vga->cursor_draw_line = mach64_cursor_draw_line;
