@@ -1066,8 +1066,17 @@ static void ia64_int10_ati_bios(IA64VpcMachineState *s)
         q[0x07] = 0x01;                         /* q_VGA_type: enabled */
         stw_le_p(q + 0x08, 0x4752);             /* q_asic_id (Rage XL) */
         q[0x0a] = 0x00;                         /* q_VGA_boundary */
-        q[0x0b] = 0x20;                         /* q_memory_size: 32 * 256KiB = 8MiB */
-        q[0x0c] = 0x05;                         /* q_DAC_type (internal) */
+        /*
+         * q_memory_size is an INDEX into the miniport's video-RAM-size table,
+         * NOT a byte/quarter-meg count.  The XP Rage XL miniport (atimpae.sys
+         * .BiosQueryAdapter) rejects the whole query with
+         * "Unable to obtain configuration information" (0xC1010003, event
+         * DumpData UniqueId 0x106) when this index is >= 16, then falls back to
+         * VgaSave.  Its table (ex_ulaVideoRamSize) maps 0->512K, 1->1M, 2->2M,
+         * 3->4M, 4->6M, 5->8M, ... so 8 MiB of VRAM is index 5.
+         */
+        q[0x0b] = 0x05;                         /* q_memory_size: index 5 = 8MiB */
+        q[0x0c] = 0x00;                         /* q_DAC_type: 0 = internal (CT) DAC */
         q[0x0d] = 0x0a;                         /* q_memory_type: SDRAM */
         q[0x0e] = 0x07;                         /* q_bus_type: BUS_PCI */
         q[0x0f] = 0x00;                         /* q_monitor_cntl */
@@ -1274,7 +1283,35 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
                                              uint16_t vendor,
                                              uint16_t device)
 {
-    if (vendor != IA64_ATI_VENDOR_ID || device != IA64_ATI_RAGE128_PF_ID) {
+    if (vendor != IA64_ATI_VENDOR_ID) {
+        return;
+    }
+
+    /*
+     * ATI's drivers locate and validate the video BIOS by the ROM signature
+     * " 761295520" at 30h before following the pointer chain at 48h.  All
+     * three retail Rage 128 Pro dumps carry it there.  Windows Whistler
+     * build 2462's miniport (ati2mpaa.sys, "RAGE128/128PRO Miniport Driver
+     * VersionR128.121") embeds the string and bugchecks 0x1E dereferencing
+     * the NULL table pointer it is left with when the signature is absent.
+     *
+     * The Server 2003 (build 3790) inbox *mach64* miniport (ati2mpad.sys)
+     * needs it too: its GetVgaEnabledRomImage scans offsets 30h..80h of the
+     * C0000h shadow for "761295520" (Get_BIOS_Seg, WSRV03 drivers/video/ms/
+     * ati/mini/services.c:1472) and, when absent, returns a NULL RomImage
+     * that RageProEnable->InitializeBiosInfoStructure dereferences unchecked
+     * at base+78h -> STOP 0x8E in videoprt!VideoPortReadRegisterBufferUchar.
+     * So the signature is published for every ATI adapter, not just Rage128.
+     */
+    memcpy(rom + IA64_INT10_ROM_ATI_SIG_OFFSET, " 761295520", 10);
+
+    if (device != IA64_ATI_RAGE128_PF_ID) {
+        /*
+         * mach64 (DEV_4752 Rage XL): ati2mpad reads its adapter configuration
+         * through the a009 INT 10h query (ia64_int10_ati_bios), not the legacy
+         * 48h Rage128 PLL pointer chain, so only the signature is required
+         * here.  Do not publish the Rage128-format header/PLL block below.
+         */
         return;
     }
 
@@ -1290,15 +1327,6 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
      * are in 10 kHz units.  They match the range supported by QEMU's
      * Rage128-compatible display model and its existing VGA BIOS.
      */
-    /*
-     * ATI's drivers locate and validate the video BIOS by the ROM signature
-     * " 761295520" at 30h before following the pointer chain at 48h.  All
-     * three retail Rage 128 Pro dumps carry it there.  Windows Whistler
-     * build 2462's miniport (ati2mpaa.sys, "RAGE128/128PRO Miniport Driver
-     * VersionR128.121") embeds the string and bugchecks 0x1E dereferencing
-     * the NULL table pointer it is left with when the signature is absent.
-     */
-    memcpy(rom + IA64_INT10_ROM_ATI_SIG_OFFSET, " 761295520", 10);
     stw_le_p(rom + 0x48, IA64_INT10_ROM_ATI_HEADER_OFFSET);
     stw_le_p(rom + IA64_INT10_ROM_ATI_HEADER_OFFSET + 0x30,
              IA64_INT10_ROM_ATI_PLL_OFFSET);
