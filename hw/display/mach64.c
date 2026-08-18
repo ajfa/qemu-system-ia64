@@ -386,7 +386,16 @@ static uint8_t mach64_dac_read(Mach64VGAState *s, unsigned byte)
 static uint32_t mach64_crtc_vline(Mach64VGAState *s)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    int lines = ((s->regs[CRTC_V_TOTAL_DISP] & 0x7ff) + 1) ? : 525;
+    unsigned total = s->regs[CRTC_V_TOTAL_DISP] & 0x7ff;
+    /*
+     * The CRTC free-runs: it generates raster timing (and therefore a toggling
+     * vblank status) whenever the chip is powered, even before software programs
+     * a custom mode.  When CRTC_V_TOTAL is still zero (unprogrammed, or reset
+     * mid-init) fall back to a standard 525-line frame so the scanline counter
+     * keeps cycling; otherwise the count would be pinned at 0 and the vblank
+     * status could never toggle, hanging any driver that waits on it.
+     */
+    int lines = total ? (int)total + 1 : 525;
     int64_t frame_ns = NANOSECONDS_PER_SECOND / 60;
 
     return (now % frame_ns) * lines / frame_ns;
@@ -395,7 +404,9 @@ static uint32_t mach64_crtc_vline(Mach64VGAState *s)
 /* True while the synthetic raster is in the vertical-blank region. */
 static bool mach64_in_vblank(Mach64VGAState *s)
 {
-    int vdisp = ((s->regs[CRTC_V_TOTAL_DISP] & CRTC_V_DISP) >> 16) + 1;
+    unsigned vd = (s->regs[CRTC_V_TOTAL_DISP] & CRTC_V_DISP) >> 16;
+    /* Match the crtc_vline free-run default: 480 active lines when unprogrammed. */
+    int vdisp = vd ? (int)vd + 1 : 480;
 
     return (int)mach64_crtc_vline(s) >= vdisp;
 }
