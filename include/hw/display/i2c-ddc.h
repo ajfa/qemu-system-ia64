@@ -31,7 +31,7 @@ struct I2CDDCState {
     bool firstbyte;
     uint8_t reg;
     qemu_edid_info edid_info;
-    uint8_t edid_blob[128];
+    uint8_t edid_blob[256];
 };
 
 

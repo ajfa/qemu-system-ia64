@@ -42,6 +42,7 @@ blobs = [
   'vgabios-ramfb.bin',
   'vgabios-bochs-display.bin',
   'vgabios-ati.bin',
+  'vgabios-mach64.bin',
   'openbios-sparc32',
   'openbios-sparc64',
   'openbios-ppc',

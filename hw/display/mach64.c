@@ -54,22 +54,35 @@ static void mach64_trace_access(char rw, unsigned reg, uint32_t val)
 {
     static char last_rw;
     static unsigned last_reg = ~0u, rep;
+    /*
+     * Hard line cap: an A/B/A/B poll loop can defeat the consecutive-dedup
+     * below, and this trace is reachable from a guest poll, so bound the output
+     * so it cannot fill the disk (CLAUDE.md tight-loop rule).
+     */
+    static unsigned long emitted;
+#define MACH64_TRACE_LINE_CAP 40000UL
 
-    if (!mach64_trace_on()) {
+    if (!mach64_trace_on() || emitted >= MACH64_TRACE_LINE_CAP) {
         return;
     }
     if (rw != last_rw || reg != last_reg) {
         if (rep) {
             fprintf(stderr, "mach64:   (repeated x%u)\n", rep);
+            emitted++;
         }
         fprintf(stderr, "mach64: %c reg[%03x] %s %08x\n", rw, reg,
                 rw == 'r' ? "->" : "<-", val);
+        emitted++;
+        if (emitted == MACH64_TRACE_LINE_CAP) {
+            fprintf(stderr, "mach64: (trace line cap reached, silencing)\n");
+        }
         last_rw = rw;
         last_reg = reg;
         rep = 0;
     } else {
         rep++;
     }
+#undef MACH64_TRACE_LINE_CAP
 }
 
 #ifdef CONFIG_PIXMAN
@@ -417,12 +430,6 @@ static void mach64_update_irq(Mach64VGAState *s)
     bool level = ((ic & CRTC_VBLANK_INT) && (ic & CRTC_VBLANK_INT_EN)) ||
                  ((ic & CRTC_VLINE_INT) && (ic & CRTC_VLINE_INT_EN));
 
-    /* EXPERIMENT (MACH64_FORCE_VBLANK_IRQ): assert on vblank regardless of the
-     * enable bit, to test whether the native driver waits on an unenabled
-     * vblank interrupt. */
-    if (getenv("MACH64_FORCE_VBLANK_IRQ") && (ic & CRTC_VBLANK_INT)) {
-        level = true;
-    }
     pci_set_irq(&s->dev, level);
 }
 
@@ -434,6 +441,183 @@ static void mach64_vblank_timer(void *opaque)
               NANOSECONDS_PER_SECOND / 60);
     s->regs[CRTC_INT_CNTL] |= CRTC_VBLANK_INT;
     mach64_update_irq(s);
+}
+
+/*
+ * CRT DDC bit-bang.  LCD register 7 (via LCD_INDEX/LCD_DATA) carries the two
+ * open-drain I2C lines SCL=bit6, SDA=bit5: a written 0 drives the line low, a 1
+ * releases it; a read samples the wired-AND line level.  Drive the shared
+ * bitbang_i2c master, which clocks the i2c-ddc EDID slave, and latch the
+ * resulting line levels for readback.
+ */
+/* DDC I2C bus decoder states (mach64_ddc_clock). */
+enum { DDC_IDLE, DDC_ADDR, DDC_WRITE, DDC_READ };
+
+/*
+ * Decode the guest's SCL/SDA bit-bang into I2C transactions on s->ddc_bus.
+ * Unlike hw/i2c/bitbang_i2c, SDA is modelled as a true open-drain wired-AND of
+ * the master drive and the slave (s->ddc_slave_sda): a master that releases SDA
+ * while the slave holds it low (reading an ACK/data bit with SCL high) is NOT
+ * mistaken for a STOP.  The ATI miniport releases SDA to sample the ACK while
+ * SCL is high, which bitbang_i2c would misread as a STOP.
+ *
+ * scl/sda_m are the master's line intents (1 = high/released, 0 = pulled low).
+ */
+static void mach64_ddc_clock(Mach64VGAState *s, int scl, int sda_m)
+{
+    I2CBus *bus = s->ddc_bus;
+    int prev_scl = s->ddc_scl;
+    int prev_sda = s->ddc_sda_m;
+
+    if (scl && prev_scl) {
+        /* SCL steady high: an SDA edge is a START or (open-drain) STOP. */
+        if (prev_sda && !sda_m) {
+            if (s->ddc_bus_state != DDC_IDLE) {
+                i2c_end_transfer(bus);
+            }
+            s->ddc_bus_state = DDC_ADDR;
+            s->ddc_cnt = 0;
+            s->ddc_buf = 0;
+            s->ddc_addr = -1;
+            s->ddc_slave_sda = 1;
+        } else if (!prev_sda && sda_m && s->ddc_slave_sda) {
+            /* Line actually rose (slave not holding it low): STOP. */
+            if (s->ddc_bus_state != DDC_IDLE) {
+                i2c_end_transfer(bus);
+            }
+            s->ddc_bus_state = DDC_IDLE;
+            s->ddc_addr = -1;
+            s->ddc_slave_sda = 1;
+        }
+    } else if (scl && !prev_scl) {
+        /* SCL rising: the receiver samples.  ddc_cnt: 0-7 data bits, 8 the ACK
+         * bit, 9 = ACK clocked (waiting for the falling edge to advance). */
+        switch (s->ddc_bus_state) {
+        case DDC_ADDR:
+        case DDC_WRITE:
+            if (s->ddc_cnt < 8) {
+                s->ddc_buf = (s->ddc_buf << 1) | (sda_m & 1);
+                if (++s->ddc_cnt == 8) {
+                    int nack;
+                    if (s->ddc_bus_state == DDC_ADDR) {
+                        s->ddc_addr = s->ddc_buf;
+                        nack = i2c_start_transfer(bus, s->ddc_addr >> 1,
+                                                  s->ddc_addr & 1);
+                    } else {
+                        nack = i2c_send(bus, s->ddc_buf);
+                    }
+                    s->ddc_slave_sda = nack ? 1 : 0;   /* drive the ACK low */
+                }
+            } else if (s->ddc_cnt == 8) {
+                s->ddc_cnt = 9;                        /* master read the ACK */
+            }
+            break;
+        case DDC_READ:
+            if (s->ddc_cnt < 8) {
+                s->ddc_cnt++;                          /* master read a bit */
+            } else if (s->ddc_cnt == 8) {
+                if (sda_m == 0) {                      /* master ACK: continue */
+                    i2c_ack(bus);
+                    s->ddc_read_nacked = 0;
+                } else {                               /* master NACK: end */
+                    i2c_nack(bus);
+                    s->ddc_read_nacked = 1;
+                }
+                s->ddc_cnt = 9;
+            }
+            break;
+        default:
+            break;
+        }
+    } else if (!scl && prev_scl) {
+        /* SCL falling: the transmitter sets up the next bit. */
+        switch (s->ddc_bus_state) {
+        case DDC_ADDR:
+        case DDC_WRITE:
+            if (s->ddc_cnt == 9) {                     /* ACK complete */
+                s->ddc_slave_sda = 1;                  /* release the ACK */
+                s->ddc_cnt = 0;
+                s->ddc_buf = 0;
+                if (s->ddc_addr >= 0 && (s->ddc_addr & 1)) {
+                    s->ddc_bus_state = DDC_READ;
+                    s->ddc_buf = i2c_recv(bus);
+                    s->ddc_slave_sda = (s->ddc_buf >> 7) & 1;
+                } else {
+                    s->ddc_bus_state = DDC_WRITE;
+                }
+            }
+            break;
+        case DDC_READ:
+            if (s->ddc_cnt < 8) {                      /* drive the next bit */
+                s->ddc_slave_sda = (s->ddc_buf >> (7 - s->ddc_cnt)) & 1;
+            } else if (s->ddc_cnt == 8) {
+                s->ddc_slave_sda = 1;                  /* release for master ACK */
+            } else {                                   /* cnt == 9: after ACK */
+                s->ddc_cnt = 0;
+                if (s->ddc_read_nacked) {
+                    s->ddc_slave_sda = 1;              /* done; wait for STOP */
+                } else {
+                    s->ddc_buf = i2c_recv(bus);        /* fetch next byte */
+                    s->ddc_slave_sda = (s->ddc_buf >> 7) & 1;
+                }
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
+    s->ddc_scl = scl;
+    s->ddc_sda_m = sda_m;
+}
+
+static void mach64_ddc_access(Mach64VGAState *s, unsigned byte, uint32_t data)
+{
+    bool sda_out, scl_out, sda_st, scl_st;
+    int scl_m, sda_m, sda_line, sda_rd, scl_rd;
+
+    /*
+     * The miniport drives each line with a direction (byte 3) and a state
+     * (byte 1); latch whichever byte it just wrote.  A line is pulled low only
+     * when it is an output with state 0, otherwise it is released.
+     */
+    if (byte == MACH64_DDC_DIR_BYTE) {
+        s->ddc_dir = data & (MACH64_DDC_SDA | MACH64_DDC_SCL);
+    } else if (byte == MACH64_DDC_STATE_BYTE) {
+        s->ddc_state = data & (MACH64_DDC_SDA | MACH64_DDC_SCL);
+    } else {
+        return;
+    }
+
+    sda_out = s->ddc_dir & MACH64_DDC_SDA;
+    scl_out = s->ddc_dir & MACH64_DDC_SCL;
+    sda_st  = s->ddc_state & MACH64_DDC_SDA;
+    scl_st  = s->ddc_state & MACH64_DDC_SCL;
+
+    scl_m = (scl_out && !scl_st) ? 0 : 1;
+    sda_m = (sda_out && !sda_st) ? 0 : 1;
+    mach64_ddc_clock(s, scl_m, sda_m);
+
+    /* Byte-1 state reads back the driven value while an output, else the live
+     * wired-AND bus level (so a released SDA senses the slave). */
+    sda_line = sda_m & s->ddc_slave_sda;
+    sda_rd = sda_out ? (sda_st ? 1 : 0) : sda_line;
+    scl_rd = scl_out ? (scl_st ? 1 : 0) : scl_m;
+    s->ddc_gpio = (sda_out ? MACH64_DDC_SDA_DIR : 0) |
+                  (scl_out ? MACH64_DDC_SCL_DIR : 0) |
+                  (sda_rd ? MACH64_DDC_SDA_ST : 0) |
+                  (scl_rd ? MACH64_DDC_SCL_ST : 0);
+}
+
+/*
+ * I2C_CNTL_0 (reg 0x0F) hardware-I2C engine status.  ati2mpad issues a CRT-DDC
+ * transfer and then polls the low-byte status field for I2C_CNTL_DONE.  The
+ * modelled engine has no latency, so every transfer is already complete: report
+ * DONE with the rest of the status field (NACK/HALT/FULL) clear.
+ */
+static uint32_t mach64_i2c0_readback(uint32_t val)
+{
+    return (val & ~I2C_CNTL_STAT) | I2C_CNTL_DONE;
 }
 
 /* Diagnostic wrapper: log the VBE/scanout state each render (MACH64_TRACE=1). */
@@ -486,6 +670,39 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
         if (mach64_in_vblank(s)) {
             val |= CRTC_VBLANK;             /* live vblank status bit */
         }
+        break;
+    case CLOCK_CNTL: {
+        /*
+         * Indirect PLL read window: byte 2 reflects the PLL register selected
+         * by byte 1, not the last value latched into CLOCK_CNTL itself.  A
+         * native driver setting PLL_ADDR and reading the register back must see
+         * the addressed PLL register (ati2mpad's GetMCLK/ReadPllRegisterUchar
+         * poll it), otherwise it spins forever on the stale latch.
+         */
+        unsigned pll_addr = (s->regs[reg] & CLOCK_CNTL_PLL_ADDR_MASK)
+                            >> CLOCK_CNTL_PLL_ADDR_SHIFT;
+        uint8_t pll_data = s->pll_regs[pll_addr];
+        /*
+         * PLL register 0x1C behaves as a self-clearing command/strobe: the
+         * miniport writes a command byte and then polls the register until the
+         * hardware clears it.  Modelled as an instantaneous operation, so it
+         * always reads back idle (0); a plain data latch would spin forever
+         * (ati2mpad's clock path writes 0x18 here and waits for it to change).
+         */
+        if (pll_addr == 0x1c) {
+            pll_data = 0;
+        }
+        val = s->regs[reg] & ~CLOCK_CNTL_PLL_DATA_MASK;
+        val |= (uint32_t)pll_data << CLOCK_CNTL_PLL_DATA_SHIFT;
+        break;
+    }
+    case LCD_DATA:
+        /* LCD register 7 is the DDC I2C GPIO; other indices are plain latches. */
+        val = (s->lcd_index == MACH64_LCD_DDC_INDEX) ? s->ddc_gpio : s->regs[reg];
+        break;
+    case I2C_CNTL_0:
+        /* CRT DDC bit-bang: patch bit4 with the live wired-AND SDA level. */
+        val = mach64_i2c0_readback(s->regs[reg]);
         break;
     case DAC_REGS:
         if (size == 1) {
@@ -571,11 +788,34 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
         s->regs[reg] = data;
         mach64_update_irq(s);
         return;
+    case LCD_INDEX:
+        s->lcd_index = data & 0xff;
+        mach64_reg_store(s, reg, byte, size, data);
+        return;
+    case LCD_DATA:
+        if (s->lcd_index == MACH64_LCD_DDC_INDEX) {
+            mach64_ddc_access(s, byte, data);   /* drive the DDC I2C bus */
+        }
+        mach64_reg_store(s, reg, byte, size, data);
+        return;
     }
 
     mach64_reg_store(s, reg, byte, size, data);
 
     switch (reg) {
+    case CLOCK_CNTL:
+        /*
+         * Indirect PLL write: when PLL_WR_EN is set, byte 2 is committed to the
+         * PLL register selected by byte 1.  (For a read the driver leaves
+         * PLL_WR_EN clear and byte 2 is a don't-care window filled in on read.)
+         */
+        if (s->regs[reg] & CLOCK_CNTL_PLL_WR_EN) {
+            unsigned pll_addr = (s->regs[reg] & CLOCK_CNTL_PLL_ADDR_MASK)
+                                >> CLOCK_CNTL_PLL_ADDR_SHIFT;
+            s->pll_regs[pll_addr] = (s->regs[reg] & CLOCK_CNTL_PLL_DATA_MASK)
+                                    >> CLOCK_CNTL_PLL_DATA_SHIFT;
+        }
+        break;
     case CRTC_GEN_CNTL:
     case CRTC_H_TOTAL_DISP:
     case CRTC_V_TOTAL_DISP:
@@ -720,6 +960,18 @@ static const VMStateDescription vmstate_mach64_vga = {
         VMSTATE_STRUCT(host_data, Mach64VGAState, 0, vmstate_mach64_host_data,
                        Mach64HostData),
         VMSTATE_TIMER(vblank_timer, Mach64VGAState),
+        VMSTATE_UINT8(lcd_index, Mach64VGAState),
+        VMSTATE_UINT8(ddc_dir, Mach64VGAState),
+        VMSTATE_UINT8(ddc_state, Mach64VGAState),
+        VMSTATE_UINT32(ddc_gpio, Mach64VGAState),
+        VMSTATE_UINT8(ddc_scl, Mach64VGAState),
+        VMSTATE_UINT8(ddc_sda_m, Mach64VGAState),
+        VMSTATE_UINT8(ddc_slave_sda, Mach64VGAState),
+        VMSTATE_UINT8(ddc_bus_state, Mach64VGAState),
+        VMSTATE_UINT8(ddc_cnt, Mach64VGAState),
+        VMSTATE_UINT8(ddc_buf, Mach64VGAState),
+        VMSTATE_UINT8(ddc_read_nacked, Mach64VGAState),
+        VMSTATE_INT16(ddc_addr, Mach64VGAState),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -795,6 +1047,15 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
     timer_init_ns(&s->vblank_timer, QEMU_CLOCK_VIRTUAL, mach64_vblank_timer, s);
     timer_mod(&s->vblank_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
               NANOSECONDS_PER_SECOND / 60);
+
+    /* DDC/EDID: an i2c-ddc slave at 0x50 driven by the LCD-reg-7 bit-bang. */
+    s->ddc_bus = i2c_init_bus(DEVICE(s), "mach64.ddc");
+    i2c_slave_set_address(I2C_SLAVE(&s->i2cddc), 0x50);
+    qdev_realize(DEVICE(&s->i2cddc), BUS(s->ddc_bus), &error_abort);
+    s->ddc_scl = 1;
+    s->ddc_sda_m = 1;
+    s->ddc_slave_sda = 1;
+    s->ddc_addr = -1;
 }
 
 static void mach64_vga_reset(DeviceState *dev)
@@ -806,9 +1067,45 @@ static void mach64_vga_reset(DeviceState *dev)
     s->mode = VGA_MODE;
     s->cursor_size = 0;
     s->cursor_offset = 0;
+    s->lcd_index = 0;
+    s->ddc_dir = 0;
+    s->ddc_state = 0;
+    s->ddc_gpio = 0;
+    s->ddc_scl = 1;
+    s->ddc_sda_m = 1;
+    s->ddc_slave_sda = 1;
+    s->ddc_bus_state = DDC_IDLE;
+    s->ddc_cnt = 0;
+    s->ddc_buf = 0;
+    s->ddc_read_nacked = 0;
+    s->ddc_addr = -1;
     /* Engine out of reset on 264xT parts. */
     s->regs[GEN_TEST_CNTL] = GEN_GUI_RESETB;
     mach64_update_irq(s);
+
+    /*
+     * Seed the internal PLL with divider values a real video-BIOS POST would
+     * leave, so the miniport's clock reads return a sane, non-zero clock (the
+     * checked Server 2003 ati2mpad GetMCLK reads PLL_REF_DIV[2], MCLK_FB_DIV[4]
+     * and PLL_XCLK_CNTL[0x0b] and float-divides them, breaking on a zero ref
+     * divider) and its PLL read-back polls terminate instead of spinning on a
+     * stale CLOCK_CNTL latch.
+     */
+    memset(s->pll_regs, 0, sizeof(s->pll_regs));
+    /* Power-on defaults from the mach64 264VT/3D RAGE Register Reference Guide
+     * (RRG-G02700, internal-PLL register table). */
+    s->pll_regs[0x01] = 0xd4;   /* PLL_MACRO_CNTL */
+    s->pll_regs[0x02] = 0x36;   /* PLL_REF_DIV */
+    s->pll_regs[0x03] = 0x4f;   /* PLL_GEN_CNTL */
+    s->pll_regs[0x04] = 0x97;   /* MCLK_FB_DIV (40 MHz) */
+    s->pll_regs[0x05] = 0x04;   /* PLL_VCLK_CNTL */
+    s->pll_regs[0x06] = 0x6a;   /* VCLK_POST_DIV */
+    s->pll_regs[0x07] = 0xbe;   /* VCLK0_FB_DIV */
+    s->pll_regs[0x08] = 0xd6;   /* VCLK1_FB_DIV */
+    s->pll_regs[0x09] = 0xee;   /* VCLK2_FB_DIV */
+    s->pll_regs[0x0a] = 0x88;   /* VCLK3_FB_DIV */
+    s->pll_regs[0x0b] = 0x00;   /* PLL_XCLK_CNTL */
+    s->pll_regs[0x0c] = 0x41;   /* PLL_FCP_CNTL */
 
     /*
      * The IA-64 firmware runs no Mach64 video-BIOS POST, so populate the
@@ -849,7 +1146,15 @@ static const Property mach64_vga_properties[] = {
                      false),
     DEFINE_PROP_UINT8("x-pixman", Mach64VGAState, use_pixman,
                       MACH64_DEFAULT_PIXMAN),
+    DEFINE_EDID_PROPERTIES(Mach64VGAState, i2cddc.edid_info),
 };
+
+static void mach64_vga_instance_init(Object *obj)
+{
+    Mach64VGAState *s = MACH64_VGA(obj);
+
+    object_initialize_child(obj, "ddc", &s->i2cddc, TYPE_I2CDDC);
+}
 
 /* Diagnostic: trace PCI config writes to the ROM BAR / command register. */
 static void mach64_config_write(PCIDevice *dev, uint32_t addr, uint32_t val,
@@ -890,6 +1195,7 @@ static const TypeInfo mach64_vga_info = {
     .name = TYPE_MACH64_VGA,
     .parent = TYPE_PCI_DEVICE,
     .instance_size = sizeof(Mach64VGAState),
+    .instance_init = mach64_vga_instance_init,
     .class_init = mach64_vga_class_init,
     .interfaces = (const InterfaceInfo[]) {
         { INTERFACE_CONVENTIONAL_PCI_DEVICE },

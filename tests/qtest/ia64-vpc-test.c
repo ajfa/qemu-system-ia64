@@ -2979,6 +2979,153 @@ static void test_mach64_2d_solid_fill(void)
     mach64_dev_close(&a);
 }
 
+/*
+ * DDC/EDID monitor detection.  The native Rage XL miniport bit-bangs I2C over
+ * "LCD register 7" (LCD_INDEX selects 7, LCD_DATA is the GPIO byte) to read the
+ * monitor EDID; without a valid EDID it spins forever in a DAC load-sense
+ * fallback.  Drive that same register here as an I2C master and confirm the
+ * i2c-ddc slave ACKs and returns a well-formed EDID.  This exercises exactly
+ * the register bit model the guest driver depends on, with no guest boot.
+ */
+#define M64_LCD_INDEX           0x29
+#define M64_LCD_DATA            0x2a
+#define M64_DDC_INDEX_I2C       7
+/*
+ * LCD-reg-7 DDC uses the Mach64 direction+state open-drain model split across
+ * two bytes of LCD_DATA, each accessed on its own (read-modify-write):
+ *   byte 1 (dword bits 13/14) = STATE     (SDA bit5, SCL bit6 within the byte)
+ *   byte 3 (dword bits 29/30) = DIRECTION (SDA bit5, SCL bit6; 1 = output)
+ * A line is low only when output with state 0; otherwise released.  A state
+ * read gives the driven value while output, else the live bus level.
+ */
+#define M64_DDC_SDA             (1u << 5)      /* within a byte */
+#define M64_DDC_SCL             (1u << 6)
+#define M64_DDC_STATE_BYTE      1              /* value / live level */
+#define M64_DDC_DIR_BYTE        3              /* direction (1 = output) */
+
+/* RMW one byte of LCD_DATA (byte-wise, exactly like the miniport). */
+static void ddc_bit(Mach64TestDev *a, unsigned byteoff, uint8_t mask, int set)
+{
+    uint64_t addr = a->mmio + M64_REG(M64_LCD_DATA) + byteoff;
+    uint8_t v = qtest_readb(a->qts, addr);
+    v = set ? (v | mask) : (v & ~mask);
+    qtest_writeb(a->qts, addr, v);
+}
+
+/* Drive a line to `level` (1 = release/high, 0 = pull low): output+state 0 to
+ * pull low, input to release. */
+static void ddc_line(Mach64TestDev *a, uint8_t mask, int level)
+{
+    if (level) {
+        ddc_bit(a, M64_DDC_DIR_BYTE, mask, 0);      /* input -> released */
+    } else {
+        ddc_bit(a, M64_DDC_STATE_BYTE, mask, 0);    /* state 0 */
+        ddc_bit(a, M64_DDC_DIR_BYTE, mask, 1);      /* output -> pulls low */
+    }
+}
+
+static void ddc_drive(Mach64TestDev *a, int scl, int sda)
+{
+    ddc_line(a, M64_DDC_SCL, scl);
+    ddc_line(a, M64_DDC_SDA, sda);
+}
+
+static int ddc_sda(Mach64TestDev *a)
+{
+    ddc_bit(a, M64_DDC_DIR_BYTE, M64_DDC_SDA, 0);   /* input: release SDA */
+    return !!(qtest_readb(a->qts, a->mmio + M64_REG(M64_LCD_DATA) +
+                          M64_DDC_STATE_BYTE) & M64_DDC_SDA);
+}
+
+static void i2c_start(Mach64TestDev *a)
+{
+    ddc_drive(a, 1, 1);
+    ddc_drive(a, 1, 0);         /* SDA falls while SCL high */
+    ddc_drive(a, 0, 0);
+}
+
+static void i2c_stop(Mach64TestDev *a)
+{
+    ddc_drive(a, 0, 0);
+    ddc_drive(a, 1, 0);
+    ddc_drive(a, 1, 1);         /* SDA rises while SCL high */
+}
+
+/* Clock one bit out; returns nothing. */
+static void i2c_wr_bit(Mach64TestDev *a, int b)
+{
+    ddc_drive(a, 0, b);
+    ddc_drive(a, 1, b);         /* slave samples on the rising edge */
+    ddc_drive(a, 0, b);
+}
+
+/* Release SDA, clock, sample the line the slave now drives. */
+static int i2c_rd_bit(Mach64TestDev *a)
+{
+    int b;
+    ddc_drive(a, 0, 1);
+    ddc_drive(a, 1, 1);
+    b = ddc_sda(a);
+    ddc_drive(a, 0, 1);
+    return b;
+}
+
+/* Returns 1 if the slave ACKed (pulled SDA low on the 9th clock). */
+static int i2c_wr_byte(Mach64TestDev *a, uint8_t v)
+{
+    int i;
+    for (i = 7; i >= 0; i--) {
+        i2c_wr_bit(a, (v >> i) & 1);
+    }
+    return i2c_rd_bit(a) == 0;
+}
+
+static uint8_t i2c_rd_byte(Mach64TestDev *a, int ack)
+{
+    uint8_t v = 0;
+    int i;
+    for (i = 7; i >= 0; i--) {
+        v = (v << 1) | i2c_rd_bit(a);
+    }
+    i2c_wr_bit(a, ack ? 0 : 1);   /* master ACK (0) to continue, NAK (1) to end */
+    return v;
+}
+
+static void test_mach64_ddc_edid(void)
+{
+    Mach64TestDev a;
+    uint8_t edid[128];
+    unsigned sum = 0;
+    int i;
+
+    mach64_dev_open(&a);
+    m64_wr(&a, M64_LCD_INDEX, M64_DDC_INDEX_I2C);
+
+    /* DDC2B: address the EDID EEPROM at 0xA0, set the byte offset to 0, then
+     * repeated-start into a read of all 128 bytes of block 0. */
+    i2c_start(&a);
+    g_assert_cmpint(i2c_wr_byte(&a, 0xA0), ==, 1);   /* slave must ACK its addr */
+    g_assert_cmpint(i2c_wr_byte(&a, 0x00), ==, 1);   /* offset 0 */
+    i2c_start(&a);
+    g_assert_cmpint(i2c_wr_byte(&a, 0xA1), ==, 1);   /* read */
+    for (i = 0; i < 128; i++) {
+        edid[i] = i2c_rd_byte(&a, i < 127);
+    }
+    i2c_stop(&a);
+
+    /* Fixed EDID 1.x header and a correct block checksum. */
+    g_assert_cmphex(edid[0], ==, 0x00);
+    g_assert_cmphex(edid[1], ==, 0xff);
+    g_assert_cmphex(edid[2], ==, 0xff);
+    g_assert_cmphex(edid[7], ==, 0x00);
+    for (i = 0; i < 128; i++) {
+        sum += edid[i];
+    }
+    g_assert_cmphex(sum & 0xff, ==, 0);
+
+    mach64_dev_close(&a);
+}
+
 int main(int argc, char **argv)
 {
     unsigned cpus;
@@ -3079,6 +3226,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/ids", test_mach64_ids);
     qtest_add_func("/ia64-vpc/mach64/2d-solid-fill",
                    test_mach64_2d_solid_fill);
+    qtest_add_func("/ia64-vpc/mach64/ddc-edid", test_mach64_ddc_edid);
 
     return g_test_run();
 }

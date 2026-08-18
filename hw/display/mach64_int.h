@@ -16,6 +16,8 @@
 #include "qemu/units.h"
 #include "qemu/timer.h"
 #include "hw/pci/pci_device.h"
+#include "hw/i2c/i2c.h"
+#include "hw/display/i2c-ddc.h"
 #include "vga_int.h"
 #include "qom/object.h"
 #include "ui/console.h"
@@ -76,10 +78,43 @@ struct Mach64VGAState {
     /* Block-0 register file, indexed by Mach64 block index (see mach64_regs.h). */
     uint32_t regs[MACH64_NREGS];
 
+    /*
+     * Internal PLL / clock generator.  The Mach64 exposes its PLL registers
+     * indirectly through CLOCK_CNTL (0x24): byte 1 selects a PLL register
+     * ((addr << 2) | PLL_WR_EN) and byte 2 is a data window over the selected
+     * register.  Without this, native drivers (ati2mpad's ReadPllRegisterUchar
+     * / GetMCLK path) that read back a PLL register spin forever polling a
+     * value the plain CLOCK_CNTL latch never produces.
+     */
+    uint8_t pll_regs[64];
+
     Mach64HostData host_data;
 
     /* Synthetic 60 Hz vertical-blank interrupt (CRTC_INT_CNTL). */
     QEMUTimer vblank_timer;
+
+    /*
+     * CRT DDC/EDID monitor detection.  The native ATI miniport bit-bangs I2C
+     * over an indexed GPIO byte (LCD register 7, reached through the
+     * LCD_INDEX/LCD_DATA pair): SCL=bit6, SDA=bit5, open-drain.  Without a
+     * valid EDID the miniport spins forever in its DAC load-sense fallback, so
+     * back the bus with an i2c-ddc slave.
+     */
+    I2CBus *ddc_bus;
+    I2CDDCState i2cddc;
+    uint8_t lcd_index;
+    uint8_t ddc_dir;            /* pin directions   (SDA/SCL bit5/bit6; 1=output) */
+    uint8_t ddc_state;          /* output state     (SDA/SCL bit5/bit6) */
+    uint32_t ddc_gpio;          /* assembled LCD_DATA readback */
+    /* Bit-bang -> I2C decoder state (proper open-drain wired-AND, see mach64.c). */
+    uint8_t ddc_scl;            /* last master SCL level (1 high) */
+    uint8_t ddc_sda_m;          /* last master SDA drive (1 released) */
+    uint8_t ddc_slave_sda;      /* slave's SDA contribution (1 released, 0 low) */
+    uint8_t ddc_bus_state;      /* DDC_IDLE / DDC_ADDR / DDC_WRITE / DDC_READ */
+    uint8_t ddc_cnt;            /* bit counter within the current byte (0..9) */
+    uint8_t ddc_buf;            /* byte being shifted in/out */
+    uint8_t ddc_read_nacked;    /* master NACKed the last read byte (end) */
+    int16_t ddc_addr;           /* current I2C address, -1 when unaddressed */
 };
 
 /* mach64_2d.c */

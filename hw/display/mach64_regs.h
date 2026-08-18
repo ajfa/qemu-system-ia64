@@ -55,8 +55,61 @@
 #define SCRATCH_REG2            0x22
 #define SCRATCH_REG3            0x23
 #define CLOCK_CNTL              0x24
+/*
+ * CLOCK_CNTL indirect PLL access (dword view of the byte-addressable register):
+ * byte 1 holds (PLL_ADDR << 2) | PLL_WR_EN, byte 2 is the PLL data window.
+ */
+#define CLOCK_CNTL_PLL_WR_EN      0x00000200ul   /* byte 1, bit 1 */
+#define CLOCK_CNTL_PLL_ADDR_MASK  0x0000fc00ul   /* byte 1, bits [7:2] */
+#define CLOCK_CNTL_PLL_ADDR_SHIFT 10
+#define CLOCK_CNTL_PLL_DATA_MASK  0x00ff0000ul   /* byte 2 */
+#define CLOCK_CNTL_PLL_DATA_SHIFT 16
 #define BUS_CNTL                0x28
+#define LCD_INDEX               0x29
+#define LCD_DATA                0x2a
 #define MEM_CNTL                0x2c
+
+/*
+ * The DDC (monitor EDID) I2C bus is exposed as LCD register 7, reached through
+ * the LCD_INDEX/LCD_DATA indirection.  Each of the two lines follows the
+ * Mach64 "monitor-ID pin" direction+state open-drain model, split across two
+ * bytes of the 32-bit LCD_DATA register (the miniport accesses each byte on
+ * its own, read-modify-write, via ReadLcdRegisterUchar/WriteLcdRegisterUchar):
+ *
+ *   byte 3 (bits 24-31) = DIRECTION: SDA=bit29, SCL=bit30 (1 = output/drive-enable)
+ *   byte 1 (bits 8-15)  = STATE:     SDA=bit13, SCL=bit14 (driven value while an
+ *       output; the live wired-AND bus level while an input, so a released SDA
+ *       reads 0 when a slave pulls it low to ACK).
+ * A line is pulled low only when it is an output with state 0; otherwise it is
+ * released.  Within a byte the two lines sit at bit5 (SDA) and bit6 (SCL).
+ */
+#define MACH64_LCD_DDC_INDEX    0x07
+#define MACH64_DDC_SDA          (1u << 5)      /* SDA within a LCD_DATA byte */
+#define MACH64_DDC_SCL          (1u << 6)      /* SCL within a LCD_DATA byte */
+#define MACH64_DDC_STATE_BYTE   1
+#define MACH64_DDC_DIR_BYTE     3
+#define MACH64_DDC_SDA_ST       (1u << 13)     /* dword: SDA state (byte1 bit5) */
+#define MACH64_DDC_SCL_ST       (1u << 14)     /* dword: SCL state (byte1 bit6) */
+#define MACH64_DDC_SDA_DIR      (1u << 29)     /* dword: SDA dir   (byte3 bit5) */
+#define MACH64_DDC_SCL_DIR      (1u << 30)     /* dword: SCL dir   (byte3 bit6) */
+
+/*
+ * Rage XL hardware I2C engine control (Block-0 reg 0x0F, "I2C_CNTL_0" in the
+ * Rage Pro register set; the Rage XL/XC guide leaves 0_0F undocumented but the
+ * silicon inherits it).  The native ATI miniport (ati2mpad) uses this engine for
+ * CRT-monitor DDC: it loads the transfer into I2C_CNTL_1 and I2C_CNTL_0
+ * (START/GO/clock-divider), then polls the low-byte status field until
+ * I2C_CNTL_DONE goes high.  Our engine has no latency, so a transfer is complete
+ * the instant it is issued and the status always reads DONE with no error;
+ * without this the miniport spins forever in its CRT-DDC probe.  (This is a
+ * distinct path from the LCD-register-7 DDC above, which the miniport bit-bangs
+ * for the LCD/DFP.)
+ */
+#define I2C_CNTL_0              0x0f
+#define I2C_CNTL_STAT           0x0000000ful   /* byte 0: status field */
+#define I2C_CNTL_DONE           0x00000001ul   /* transfer complete */
+#define I2C_CNTL_NACK           0x00000002ul   /* slave did not acknowledge */
+#define I2C_CNTL_GO             0x00000400ul   /* byte 1: issue the transfer */
 #define MEM_VGA_WP_SEL          0x2d
 #define MEM_VGA_RP_SEL          0x2e
 #define DAC_REGS                0x30
