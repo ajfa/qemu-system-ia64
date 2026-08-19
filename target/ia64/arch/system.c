@@ -866,16 +866,25 @@ void ia64_system_mov_grrr_write(CPUIA64State *env, uint64_t rr_addr,
     }
 
     env->rr[rr_num] = value;
-    ia64_tlb_bump_generation(env, false);
-    ia64_tlb_bump_generation(env, true);
     /*
-     * The softmmu TLB and jump cache contain virtual-address state, so both
-     * must be discarded when the RID changes.  tlb_flush() does both.  The
-     * global TB hash is keyed by the translated physical page as well as the
-     * virtual PC, so its TBs remain valid and can be reused when this address
-     * space becomes current again.
+     * The virtual softmmu indices and the jump cache are VA-keyed, so both
+     * must be discarded when the RID changes: tlb_flush_by_mmuidx() of the
+     * translated indices does both (its async worker flushes the jump cache).
+     * Two things need not happen, though, and Windows/Linux run this on every
+     * process/mm switch:
+     *   - The PHYS index is physical-address-keyed and independent of the
+     *     region registers, so it is left intact (MMU_IDX_TRANSLATED_MASK
+     *     excludes it).
+     *   - The fork's micro-TLB entries are RID-tagged and validated on lookup
+     *     (cpu.h ia64_tlb_find_cached: cached->rid == rid), and the modeled TLB
+     *     that backs them is not purged by a region-register write, so a stale
+     *     entry simply never matches the new RID and a reused RID's entries are
+     *     still architecturally valid.  Bumping the micro-TLB generation to
+     *     wholesale-invalidate it is therefore unnecessary.
+     * The global TB hash is keyed by physical page as well as virtual PC, so
+     * its TBs remain valid and are reused when this address space is current.
      */
-    tlb_flush(env_cpu(env));
+    tlb_flush_by_mmuidx(env_cpu(env), MMU_IDX_TRANSLATED_MASK);
 }
 
 /* ---- mov from PKR helper ---- */

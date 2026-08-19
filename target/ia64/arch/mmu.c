@@ -658,7 +658,6 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     uint32_t rid;
     uint32_t slot = slot_reg & 0xff;
     uint16_t *next_replace;
-    CPUState *cs = env_cpu(env);
     bool cached_old_tr;
 
     /* itr.d (is_data=1) targets the DTR file, itr.i (is_data=0) the ITR file. */
@@ -747,7 +746,16 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
                   " rid=0x%06" PRIx32 " pa=0x%016" PRIx64
                   " ps=0x%016" PRIx64 " pte=0x%016" PRIx64 "\n",
                   is_data ? 'd' : 'i', slot, va, rid, pa, ps, pte);
-    tlb_flush(cs);
+    /*
+     * Only the new TR's VA range can have stale softmmu entries: any
+     * overlapping TC was already purged (ia64_purge_tc_entries) and the
+     * replaced slot's range flushed above, and inserting a TR changes no
+     * mapping outside its own range.  Flush just that range instead of the
+     * whole TLB -- and, for a data TR (which cannot stale a code block), keep
+     * the jump cache.  ia64_qemu_tlb_flush_entry() leaves the PHYS index (not
+     * region-mapped) intact in every case.
+     */
+    ia64_qemu_tlb_flush_entry(env, &tlb[slot], is_data);
 }
 
 void ia64_mmu_ptr_purge(CPUIA64State *env, uint64_t ifa, uint64_t size_reg,
