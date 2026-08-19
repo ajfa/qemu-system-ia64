@@ -366,9 +366,9 @@ static void flush_all_helper(CPUState *src, run_on_cpu_func fn,
     }
 }
 
-static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
+static void tlb_flush_by_mmuidx_locked_flush(CPUState *cpu, MMUIdxMap asked,
+                                             bool flush_jmp_cache)
 {
-    MMUIdxMap asked = data.host_int;
     MMUIdxMap all_dirty, work, to_clean;
     int64_t now = get_clock_realtime();
 
@@ -390,7 +390,16 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
 
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 
-    tcg_flush_jmp_cache(cpu);
+    /*
+     * A data-only invalidation (flush_jmp_cache == false) cannot make an
+     * already translated TB stale, so keep the jump-cache hints -- otherwise
+     * discard the whole jump cache, since some of the flushed indices may
+     * cover instruction fetches.  Note the original code wiped the jump cache
+     * unconditionally, even when nothing was dirty (to_clean == 0).
+     */
+    if (flush_jmp_cache) {
+        tcg_flush_jmp_cache(cpu);
+    }
 
     if (to_clean == ALL_MMUIDX_BITS) {
         qatomic_set(&cpu->neg.tlb.c.full_flush_count,
@@ -406,6 +415,11 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
     }
 }
 
+static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
+{
+    tlb_flush_by_mmuidx_locked_flush(cpu, data.host_int, true);
+}
+
 void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
 {
     tlb_debug("mmu_idx: 0x%" PRIx16 "\n", idxmap);
@@ -413,6 +427,15 @@ void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
     assert_cpu_is_self(cpu);
 
     tlb_flush_by_mmuidx_async_work(cpu, RUN_ON_CPU_HOST_INT(idxmap));
+}
+
+void tlb_flush_by_mmuidx_no_jmp_cache(CPUState *cpu, MMUIdxMap idxmap)
+{
+    tlb_debug("mmu_idx: 0x%" PRIx16 "\n", idxmap);
+
+    assert_cpu_is_self(cpu);
+
+    tlb_flush_by_mmuidx_locked_flush(cpu, idxmap, false);
 }
 
 void tlb_flush(CPUState *cpu)

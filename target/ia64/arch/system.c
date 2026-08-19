@@ -244,7 +244,18 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
         env->ar_rsc = (value & ~IA64_RSC_PL) |
                       ((uint64_t)pl << IA64_RSC_PL_SHIFT);
         if ((old_rsc ^ env->ar_rsc) & IA64_RSC_PL) {
-            tlb_flush_by_mmuidx(env_cpu(env), 1u << MMU_IDX_RSE);
+            /*
+             * The RSC privilege level feeds the permission check for RSE
+             * backing-store accesses, which are cached in the MMU_IDX_RSE
+             * softmmu entries, so those must be discarded when it changes.
+             * Windows writes ar.rsc=0 at every trap entry and restores the
+             * user RSC on exit, so this runs on every user<->kernel
+             * transition.  MMU_IDX_RSE is a data-only index (instruction
+             * fetch never uses it), so the invalidation cannot stale a
+             * translated block: keep the jump cache instead of wiping all
+             * 4096 hints on each transition.
+             */
+            tlb_flush_by_mmuidx_no_jmp_cache(env_cpu(env), 1u << MMU_IDX_RSE);
         }
         return;
     }
