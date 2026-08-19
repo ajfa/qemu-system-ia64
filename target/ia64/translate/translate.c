@@ -3048,8 +3048,26 @@ void ia64_translate_code(CPUState *cs, TranslationBlock *tb,
     };
 
     if (tb->flags & IA64_TB_FLAG_PSR_IS) {
+        /*
+         * The IA-32 execution engine reuses the i386 translator and must obey
+         * the x86 memory model (x86-TSO: every ordering except store->load).
+         * Match target/i386's guest_default_memory_order so WOW64 code keeps
+         * the store-buffer ordering it relies on.
+         */
+        tcg_ctx->guest_mo = TCG_MO_ALL & ~TCG_MO_ST_LD;
         ia64_ia32_translate_code(cs, tb, max_insns, pc, host_pc);
     } else {
+        /*
+         * IA-64 is weakly ordered (SDM Vol.2 §2.5): ordinary loads and stores
+         * carry no ordering guarantee; software must use ld.acq/st.rel/mf/sync
+         * where it needs one, and the translator already emits the matching
+         * TCG barriers for those (IA64_TCG_MO_ACQUIRE/RELEASE and mf).  The
+         * inherited TCG_MO_ALL default instead declared the guest sequentially
+         * consistent, so tcg_gen_req_mo() emitted a barrier -- a locked host
+         * instruction on x86, a dmb on ARM -- before *every* guest access.
+         * Set the weak order so only the architected barriers cost anything.
+         */
+        tcg_ctx->guest_mo = 0;
         translator_loop(cs, tb, max_insns, pc, host_pc, &ia64_tr_ops,
                         &ctx.base, TCG_TYPE_VA);
     }

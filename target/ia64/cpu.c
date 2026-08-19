@@ -895,7 +895,12 @@ static bool ia64_precise_smc_enabled(CPUState *cs)
 }
 
 static const TCGCPUOps ia64_tcg_ops = {
-    .guest_default_memory_order = TCG_MO_ALL,
+    /*
+     * IA-64 is weakly ordered; ia64_translate_code() sets the effective
+     * per-TB order (0 for native IA-64 code, x86-TSO for the IA-32 engine).
+     * This default applies before the first translated instruction of a TB.
+     */
+    .guest_default_memory_order = 0,
     .mttcg_supported = true,
     .precise_smc = true,
     .precise_smc_enabled = ia64_precise_smc_enabled,
