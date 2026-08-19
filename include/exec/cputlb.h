@@ -154,6 +154,20 @@ void tlb_flush_page_by_mmuidx(CPUState *cpu, vaddr addr,
                               MMUIdxMap idxmap);
 
 /**
+ * tlb_flush_page_by_mmuidx_no_jmp_cache:
+ * @cpu: CPU whose TLB should be flushed
+ * @addr: virtual address of page to be flushed
+ * @idxmap: bitmap of MMU indexes to flush
+ *
+ * Flush one page like tlb_flush_page_by_mmuidx(), but retain translated-block
+ * jump-cache hints.  The single-page counterpart of
+ * tlb_flush_range_by_mmuidx_no_jmp_cache(); a target may use this only when the
+ * architectural invalidation cannot change instruction translation.
+ */
+void tlb_flush_page_by_mmuidx_no_jmp_cache(CPUState *cpu, vaddr addr,
+                                           MMUIdxMap idxmap);
+
+/**
  * tlb_flush_page_by_mmuidx_all_cpus_synced:
  * @cpu: Originating CPU of the flush
  * @addr: virtual address of page to be flushed
@@ -258,8 +272,17 @@ static inline void tlb_flush_page_by_mmuidx(CPUState *cpu,
                                             vaddr addr, MMUIdxMap idxmap)
 {
 }
+static inline void tlb_flush_page_by_mmuidx_no_jmp_cache(CPUState *cpu,
+                                                         vaddr addr,
+                                                         MMUIdxMap idxmap)
+{
+}
 
 static inline void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
+{
+}
+static inline void tlb_flush_by_mmuidx_no_jmp_cache(CPUState *cpu,
+                                                    MMUIdxMap idxmap)
 {
 }
 static inline void tlb_flush_page_by_mmuidx_all_cpus_synced(CPUState *cpu,

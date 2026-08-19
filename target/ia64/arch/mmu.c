@@ -127,6 +127,16 @@ static int ia64_tlb_circular_tc_victim(const IA64TlbEntry *tlb,
     return -1;
 }
 
+/*
+ * Largest IA-64 page for which ia64_qemu_tlb_flush_entry() walks the softmmu
+ * TLB one 4 KiB page at a time instead of issuing a range flush.  Covers the
+ * 4/8/16/64/256 KiB pages the guest OSes actually map their working sets with
+ * (Windows 8 KiB, Linux 16 KiB); 1 MiB+ TR granules fall through to the range
+ * flush.  256 KiB is 64 single-page flushes worst case -- far cheaper than the
+ * full-index flush and refill storm the range path degrades to.
+ */
+#define IA64_TLB_PAGEWISE_FLUSH_MAX (64ULL * TARGET_PAGE_SIZE)
+
 static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
                                       const IA64TlbEntry *entry,
                                       bool is_data)
@@ -146,7 +156,31 @@ static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
 
         uint64_t va = ((uint64_t)region << IA64_REGION_SHIFT) | base;
 
-        if (is_data) {
+        /*
+         * A range flush degrades to a full flush of every dirty translated
+         * MMU index whenever the range is longer than the softmmu table's
+         * byte span (upstream tlb_flush_range_locked: len > f->mask).  The
+         * tables sit at a few hundred entries, so even an 8 KiB Windows page
+         * or a 16 KiB Linux page always tripped that path -- discarding the
+         * whole softmmu TLB (and, for the instruction case, the jump cache)
+         * on every itc/purge/VHPT-walk completion and provoking a refill
+         * storm.  For pages small enough that a per-4 KiB-page walk is
+         * cheaper than rebuilding the table, flush each 4 KiB page
+         * individually; single-page flushes never degrade.  Genuinely large
+         * pages (TR-sized granules) keep the range flush, where a full flush
+         * really is the cheaper choice.
+         */
+        if (entry->ps <= IA64_TLB_PAGEWISE_FLUSH_MAX) {
+            for (uint64_t off = 0; off < entry->ps; off += TARGET_PAGE_SIZE) {
+                if (is_data) {
+                    tlb_flush_page_by_mmuidx_no_jmp_cache(
+                        env_cpu(env), va + off, MMU_IDX_TRANSLATED_MASK);
+                } else {
+                    tlb_flush_page_by_mmuidx(env_cpu(env), va + off,
+                                             MMU_IDX_TRANSLATED_MASK);
+                }
+            }
+        } else if (is_data) {
             /*
              * IA-64 has separate data and instruction translation caches.
              * Clearing QEMU's unified softmmu entry is still required, but
