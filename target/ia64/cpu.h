@@ -1397,7 +1397,44 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
                                                   uint64_t va, uint64_t *pa,
                                                   bool is_inst)
 {
-    uint64_t phys;
+    uint64_t phys = va & IA64_REGION7_PHYS_MASK;
+    bool region7_directmap;
+    bool boot_identity;
+
+    /*
+     * Persistent region-7 physical alias (the "KSEG" direct map): the IA-64
+     * OS loaders and the early kernel reach loader-built structures near the
+     * top of RAM through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE
+     * before the kernel's self-mapped page tables are active (e.g.
+     * KdInitSystem walks a loader debug-block list this way).  Model it as a
+     * last-resort translation that survives the loader -> kernel handoff,
+     * bounded to the fixed KSEG0 window (region7_directmap_limit = base +
+     * min(RAM, IA64_FW_REGION7_DIRECTMAP_SIZE)) so that kernel system space,
+     * KI_USER_SHARED_DATA/PCR, and the recursive page-table self-map window
+     * -- all region-7 VAs at or above KSEG2_BASE -- still take ordinary
+     * TLB-miss faults instead of being shadowed by a RAM-sized alias.
+     */
+    region7_directmap = ia64_rr_index(va) == 7 &&
+        phys >= IA64_FW_REGION7_DIRECTMAP_BASE &&
+        phys < env->mmu.region7_directmap_limit &&
+        !ia64_region7_is_identity_os(env);
+
+    /*
+     * The remaining identity behaviour models SAL's boot-time TLB miss handler
+     * and only applies while SAL still owns the IVT (until ExitBootServices()
+     * completes).  It is a miss fallback only.
+     */
+    boot_identity = ia64_sal_boot_environment_active(env) &&
+        phys < IA64_FW_BOOT_IDENTITY_LIMIT;
+
+    /*
+     * Neither identity path applies: reject cheaply.  This is the common case
+     * for ordinary kernel VAs and is reached on every fill and miss, so it is
+     * checked before the linear scan of the TR/TC table below.
+     */
+    if (!region7_directmap && !boot_identity) {
+        return false;
+    }
 
     /*
      * An explicit TR/TC for the same virtual range always wins: a RID
@@ -1425,40 +1462,10 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
         }
     }
 
-    phys = va & IA64_REGION7_PHYS_MASK;
-
-    /*
-     * Persistent region-7 physical alias (the "KSEG" direct map): the IA-64
-     * OS loaders and the early kernel reach loader-built structures near the
-     * top of RAM through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE
-     * before the kernel's self-mapped page tables are active (e.g.
-     * KdInitSystem walks a loader debug-block list this way).  Model it as a
-     * last-resort translation that survives the loader -> kernel handoff,
-     * bounded to the fixed KSEG0 window (region7_directmap_limit = base +
-     * min(RAM, IA64_FW_REGION7_DIRECTMAP_SIZE)) so that kernel system space,
-     * KI_USER_SHARED_DATA/PCR, and the recursive page-table self-map window
-     * -- all region-7 VAs at or above KSEG2_BASE -- still take ordinary
-     * TLB-miss faults instead of being shadowed by a RAM-sized alias.
-     */
-    if (ia64_rr_index(va) == 7 &&
-        phys >= IA64_FW_REGION7_DIRECTMAP_BASE &&
-        phys < env->mmu.region7_directmap_limit &&
-        !ia64_region7_is_identity_os(env)) {
+    /* region7_directmap wins over boot_identity when both apply. */
+    if (region7_directmap) {
         *pa = phys - IA64_FW_REGION7_DIRECTMAP_BASE;
         return true;
-    }
-
-    /*
-     * The remaining identity behaviour models SAL's boot-time TLB miss handler
-     * and only applies while SAL still owns the IVT (until ExitBootServices()
-     * completes).  It is a miss fallback only.
-     */
-    if (!ia64_sal_boot_environment_active(env)) {
-        return false;
-    }
-
-    if (phys >= IA64_FW_BOOT_IDENTITY_LIMIT) {
-        return false;
     }
 
     if (phys >= IA64_FW_REGION7_DIRECTMAP_BASE) {
