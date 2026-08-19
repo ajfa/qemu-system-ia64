@@ -1757,6 +1757,35 @@ test_exception_unaligned_slot1_uses_psr_ri = require_registers(
     },
 )
 
+# A misaligned access with PSR.ac clear that stays within a 4 KiB page must
+# NOT fault (SDM Vol.2 5.5.4): r3 = 0x301 (misaligned for ld8, 0x301+8 = 0x309
+# does not cross the page), so the ld8 completes and reads the 8 bytes at
+# 0x301.  Reset PSR is 0 (physical mode, PSR.ac clear), so this exercises the
+# translation-time PSR.ac-clear alignment path directly.
+test_unaligned_ac_clear_no_page_cross_loads = require_registers(
+    "unaligned_ac_clear_no_page_cross_loads",
+    [
+        (0x10, 0x00, addl(3, 0x301, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld8(9, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+        raw_bundle(0x300, 0x0807060504030201, 0x1817161514131211),
+    ],
+    {"ip": 0x30, "r9": 0x1108070605040302},
+)
+
+# The same misaligned, non-page-crossing access DOES fault when PSR.ac is set.
+test_unaligned_ac_set_no_page_cross_faults = require_exception(
+    "unaligned_ac_set_no_page_cross_faults",
+    [
+        (0x10, 0x00, ssm(IA64_PSR_AC), nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, 0x00, addl(3, 0x301, 0), nop_i(), nop_i()),
+        (0x40, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        raw_bundle(0x300, 0x00, 0x00),
+    ],
+    IA64_EXCP_UNALIGNED, fault_ip=0x40,
+)
+
 test_counted_self_loop_fault_has_slot1_ri = require_registers(
     "counted_self_loop_fault_has_slot1_ri", [
         *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
@@ -4642,6 +4671,8 @@ CASE_NAMES = (
     'exception_unaligned',
     'exception_unaligned_sets_ifa_isr',
     'exception_unaligned_slot1_uses_psr_ri',
+    'unaligned_ac_clear_no_page_cross_loads',
+    'unaligned_ac_set_no_page_cross_faults',
     'future_itm_rearm_preserves_pended_timer_irr',
     'iipa_preserved_for_rfi_to_fault',
     'iipa_reports_current_bundle_after_prior_slot_success',

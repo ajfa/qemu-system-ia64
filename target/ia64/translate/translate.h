@@ -23,6 +23,7 @@
 #define IA64_TB_FLAG_PSR_IC       (1u << 5)
 #define IA64_TB_FLAG_BE           (1u << 6)
 #define IA64_TB_FLAG_GROUP_START  (1u << 7)
+#define IA64_TB_FLAG_PSR_AC       (1u << 8)
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
 #define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
 #define IA64_TB_FLAG_PSR_IS       (1u << 31)
@@ -32,6 +33,8 @@
 typedef struct IA64TranslationMemoryState {
     int mmu_idx;
     bool be_data;
+    /* PSR.ac at TB entry: valid for alignment checks until psr_ac_modified. */
+    bool psr_ac;
     bool full_alat;
     uint64_t nat_known_clear[2];
 } IA64TranslationMemoryState;
@@ -41,6 +44,18 @@ typedef struct IA64TranslationRestartState {
     uint8_t current_ri;
     bool current_ri_known;
     bool track_iipa;
+    /*
+     * Set once an ssm/rsm/mov-psr in the current bundle may have changed
+     * PSR.ic, so the IIPA note for a later slot cannot trust the TB flag and
+     * must test PSR.ic at run time.  While false, PSR.ic equals the TB flag.
+     */
+    bool psr_ic_modified;
+    /*
+     * Set once an ssm/rsm/sum/rum/mov-psr in the current bundle may have
+     * changed PSR.ac, so a later ld/st in the same bundle cannot trust the TB
+     * flag and must test PSR.ac at run time.  While false, PSR.ac == psr_ac.
+     */
+    bool psr_ac_modified;
     bool track_psr_suppression;
     bool exit_after_bundle;
     bool instruction_group_start;

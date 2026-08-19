@@ -82,7 +82,8 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
         ((psr >> (IA64_PSR_RI_SHIFT - IA64_TB_FLAG_RI_SHIFT)) &
          IA64_TB_FLAG_RI_MASK) |
         ((psr >> 8) & IA64_TB_FLAG_PSR_IC) |
-        ((psr << 5) & IA64_TB_FLAG_BE) |
+        /* PSR.be (bit 1) -> flag bit 6, PSR.ac (bit 3) -> flag bit 8: both <<5. */
+        ((psr << 5) & (IA64_TB_FLAG_BE | IA64_TB_FLAG_PSR_AC)) |
         ((uint32_t)cpu->env.instruction_group_start << 7) |
         ((psr >> (IA64_PSR_CPL_SHIFT - IA64_TB_FLAG_CPL_SHIFT)) &
          IA64_TB_FLAG_CPL_MASK);
