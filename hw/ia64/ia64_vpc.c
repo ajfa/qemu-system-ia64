@@ -80,7 +80,6 @@
 #define IA64_NVRAM_COMMIT_MAGIC 0x54494d4d4f43564eULL /* "NVCOMMIT" */
 #define IA64_HIGH_RAM_AFTER_FIRMWARE_BASE \
     (IA64_FIRMWARE_ADDRESS_SPACE_BASE + IA64_FIRMWARE_ADDRESS_SPACE_SIZE)
-#define IA64_FW_LOW_RAM_MIN IA64_FW_BOOTSTRAP_STACK_TOP
 #define IA64_IVT_BASE   0x10000ULL
 #define IA64_IVT_SIZE   0x8000ULL
 #define IA64_AHCI_IDP_IO_BASE   0x0000c100U
@@ -2956,20 +2955,29 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
 }
 #endif
 
-static IA64BootInfo ia64_vpc_boot_info(unsigned int cpu_index,
+static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
+                                       unsigned int cpu_index,
                                        uint64_t entry,
                                        uint64_t global_pointer)
 {
+    /*
+     * The firmware's CPU-assist region (SAL re-entry slots, debug
+     * contexts/stacks, early RSE backing stores, boot memory stacks) sits at
+     * the top of installed low RAM, as real IA-64 firmware places its SAL
+     * scratch; entry.S re-derives the same base from the handoff block.
+     */
+    uint64_t assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(machine->ram_size);
     IA64BootInfo info = {
         .firmware_base = IA64_FW_BASE,
         .firmware_entry = entry,
         .global_pointer = global_pointer,
         .iva = IA64_IVT_BASE,
-        .bsp = IA64_FW_EARLY_RSE_BASE +
+        .bsp = assist_base + IA64_FW_EARLY_RSE_OFFSET +
             cpu_index * IA64_FW_EARLY_RSE_SIZE,
-        .stack_pointer = IA64_FW_BOOTSTRAP_STACK_TOP - 16 -
+        .stack_pointer = assist_base + IA64_FW_CPU_ASSIST_SIZE - 16 -
             cpu_index * IA64_FW_CPU_STACK_SIZE,
         .rsc = IA64_RSC_MODE,
+        .fw_cpu_assist_base = assist_base,
         .powered_off = cpu_index != 0,
     };
 
@@ -3038,7 +3046,7 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
     }
 
     CPU_FOREACH(cs) {
-        IA64BootInfo info = ia64_vpc_boot_info(cs->cpu_index,
+        IA64BootInfo info = ia64_vpc_boot_info(MACHINE(s), cs->cpu_index,
                                                entrypoint.entry,
                                                entrypoint.global_pointer);
 
@@ -3143,7 +3151,8 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         uint32_t cores = MAX(machine->smp.cores, 1U);
         uint32_t per_socket = threads * cores;
         uint32_t package_base = (i / per_socket) * per_socket;
-        IA64BootInfo boot_info = ia64_vpc_boot_info(i, IA64_FW_BASE,
+        IA64BootInfo boot_info = ia64_vpc_boot_info(machine, i,
+                                                    IA64_FW_BASE,
                                                     IA64_FW_BASE);
 
         cpu = IA64_CPU(object_new(machine->cpu_type));

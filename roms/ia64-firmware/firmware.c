@@ -62,8 +62,9 @@
 #define SAL_PTA_DISABLED_VALUE       (15ULL << 2)
 #define SAL_RR_VALUE(Rid) \
     (((UINT64)(Rid) << 8) | ((UINT64)SAL_RR_PREFERRED_PAGE_SHIFT << 2))
-#define SAL_BACKING_STORE_BASE       IA64_FW_EARLY_RSE_BASE
-#define SAL_BACKING_STORE_END        IA64_FW_EARLY_RSE_END
+/* Per-CPU initial RSE backing stores live in the RAM-top CPU-assist region. */
+#define SAL_BACKING_STORE_BASE       (mCpuAssistBase + IA64_FW_EARLY_RSE_OFFSET)
+#define SAL_BACKING_STORE_END        (mCpuAssistBase + IA64_FW_EARLY_RSE_END_OFFSET)
 
 #define PCI_OHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define PCI_AHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00020000ULL)
@@ -122,12 +123,13 @@
 #define FW_LOW_IMAGE_ALIGNED_END (FW_LOW_IMAGE_BASE + FW_LOW_IMAGE_ALIGN)
 #define FW_LOW_IMAGE_END  0x0000000005000000ULL
 /*
- * SAL-style reserved guard page(s) placed exactly at the loader's 80 MB
- * TR-staging line (FW_LOW_IMAGE_END).  This bounds the Windows IA-64 setup
- * loader's [16MB,48MB)-confined heap free-block at 80 MB so its carve-from-end
- * heap stays inside the 16-64 MB loader-TR window (else NTOSKRNL 0x1A).  Real
- * SAL similarly reserves boot structures above the first 64 MB.  Conventional
- * RAM handed to the OS begins just above the guard.
+ * FW_LOW_IMAGE_END (80 MB) is the Windows setup loader's TR-staging line.  It
+ * is a conventional-memory DESCRIPTOR boundary (XP-era sumain.c:760 must not
+ * see a descriptor straddling it), but no longer a reserved guard page: the
+ * heap-carve bound that page provided is the job of the 32 MB split page, and
+ * all RAM from 32 MB up to the RAM-top CPU-assist region is free so loaders
+ * that map with large TRs (Server 2003 SP1 setupldr: one 64 MB page at
+ * [64 MB, 128 MB)) find their region.  See efi_init_memory_map().
  */
 /*
  * Firmware-owned physical stack + RSE backing store used while a virtual-
@@ -141,9 +143,9 @@
  * memory stack.  The dispatch block publishes CPU 0's values; the
  * emulator-side bridge adds cpu_index * IA64_FW_SAL_RUNTIME_SLOT_SIZE.
  */
-#define FW_SAL_PHYS_BSTORE_BASE IA64_FW_SAL_RUNTIME_BASE
+#define FW_SAL_PHYS_BSTORE_BASE (mCpuAssistBase + IA64_FW_SAL_RUNTIME_OFFSET)
 #define FW_SAL_PHYS_STACK_TOP \
-    (IA64_FW_SAL_RUNTIME_BASE + IA64_FW_SAL_RUNTIME_SLOT_SIZE - 0x10ULL)
+    (FW_SAL_PHYS_BSTORE_BASE + IA64_FW_SAL_RUNTIME_SLOT_SIZE - 0x10ULL)
 #define FW_LOADER_STAGING_GUARD_SIZE 0x0000000000002000ULL
 #define FW_LOW_RAM_STAGING_BASE (FW_LOW_IMAGE_END + FW_LOADER_STAGING_GUARD_SIZE)
 /*
@@ -169,12 +171,41 @@
  */
 #define FW_LOADER_HEAP_SPLIT_BASE \
     (FW_LOW_IMAGE_BASE - FW_LOADER_HEAP_SPLIT_SIZE)
-#define FW_BOOTSTRAP_STACK_TOP IA64_FW_BOOTSTRAP_STACK_TOP
 #define FW_BOOT_STACK_SIZE     IA64_FW_BOOT_STACK_SIZE
-#define IA64_EFI_MEMORY_ALIGN 0x0000000000002000ULL
+#define IA64_EFI_MEMORY_ALIGN IA64_FW_LOW_RAM_ALIGN
 #define IA64_EFI_MIN_STACK_BYTES   0x0000000000020000ULL
 #define IA64_EFI_MIN_BACKING_BYTES 0x0000000000004000ULL
-#define FW_LOW_RUNTIME_IMAGE_BASE 0x0000000008000000ULL
+/*
+ * 8 KiB reserved "SAL boot-structure" anchor at 128 MB (FW_LOW_ANCHOR_BASE).
+ * XP-era kernels (2002/2462/2600) place their Phase-0 allocations and the
+ * PFN database in the largest free descriptor below 256 MB; with low RAM one
+ * unbroken run from the kernel image to the RAM top that descriptor starts
+ * right behind the kernel, inside the loader's 16-80 MB TR window, and
+ * MiInitMachineDependent then VHPT-faults writing the KSEG0 PTEs for it
+ * (bugcheck 0x50, measured on installed XP 2600 UP/SMP and the XP 2002
+ * installer).  A non-free page at 128 MB makes the descriptor above it the
+ * largest low one again, exactly as the old [126 MB, 128 MB) CPU-assist
+ * region did, while leaving [64 MB, 128 MB) free for Server 2003 SP1's 64 MB
+ * kernel large page.  Below a 130 MB machine it falls back to the historical
+ * 80 MB line.  Runtime images load above the anchor.
+ *
+ * The anchor and the Server 2003 loaders are mutually exclusive: the SP1
+ * loader (setupldr/ia64ldr 5.2.3790.1830+) maps the kernel with a 64 MB large
+ * page at [64 MB, 128 MB) and its heap with another at [128 MB, 192 MB), and
+ * it derives the heap base from the first free descriptor at or above 128 MB
+ * - with the anchor there it silently takes 0x8002000, maps it with a 64 MB
+ * identity TR and every KSEG0 address is then off by one page (bugcheck 0xD1
+ * on SharedUserData, measured).  The XP-era kernels need the anchor (see
+ * efi_init_memory_map); the 2003 kernels (RTM measured both ways) do not.  So
+ * the firmware's PE loader drops the anchor when the EFI application it is
+ * about to start carries a VS_FIXEDFILEINFO file version 5.2.3790.0 (Server
+ * 2003 RTM, whose rewritten Mm has no such descriptor-reset path and which
+ * was measured fine without the anchor) or later
+ * (pe_image_wants_contiguous_low_ram); 5.1.x loaders (XP, 2462) keep it.
+ */
+#define FW_LOW_ANCHOR_BASE       0x0000000008000000ULL
+#define FW_LOW_ANCHOR_SIZE       0x0000000000002000ULL
+#define FW_LOW_RUNTIME_IMAGE_BASE 0x0000000008010000ULL
 /*
  * Low (sub-aperture) DRAM ends at the PCI/MMIO aperture: it runs contiguously
  * from 0 to here, matching real 460GX, and any RAM beyond it is remapped above
@@ -1721,35 +1752,36 @@ FW_STATIC_ASSERT(FW_BOOT_STACK_SIZE >=
 FW_STATIC_ASSERT(FW_AP_STACK_SIZE >=
                  IA64_EFI_MIN_STACK_BYTES,
                  efi_ap_stack_capacity);
-FW_STATIC_ASSERT(IA64_FW_CPU_ASSIST_BASE ==
-                 IA64_FW_SAL_RUNTIME_BASE,
-                 cpu_assist_sal_base);
-FW_STATIC_ASSERT(IA64_FW_SAL_RUNTIME_END <=
-                 IA64_FW_DEBUG_CONTEXT_BASE,
+FW_STATIC_ASSERT(IA64_FW_SAL_RUNTIME_END_OFFSET <=
+                 IA64_FW_DEBUG_CONTEXT_OFFSET,
                  sal_debug_context_disjoint);
 FW_STATIC_ASSERT(IA64_FW_DEBUG_CONTEXT_SIZE <=
                  IA64_FW_DEBUG_CONTEXT_STRIDE,
                  debug_context_stride_capacity);
-FW_STATIC_ASSERT(IA64_FW_DEBUG_CONTEXT_END <=
-                 IA64_FW_DEBUG_STACK_BASE,
+FW_STATIC_ASSERT(IA64_FW_DEBUG_CONTEXT_END_OFFSET <=
+                 IA64_FW_DEBUG_STACK_OFFSET,
                  debug_context_stack_disjoint);
-FW_STATIC_ASSERT(IA64_FW_DEBUG_STACK_END <= IA64_FW_EARLY_RSE_BASE,
+FW_STATIC_ASSERT(IA64_FW_DEBUG_STACK_END_OFFSET <= IA64_FW_EARLY_RSE_OFFSET,
                  debug_stack_rse_disjoint);
-FW_STATIC_ASSERT(IA64_FW_EARLY_RSE_END <= IA64_FW_FIXED_STACK_BASE,
+FW_STATIC_ASSERT(IA64_FW_EARLY_RSE_END_OFFSET <= IA64_FW_BOOT_STACK_OFFSET,
                  early_rse_boot_stack_disjoint);
-FW_STATIC_ASSERT(IA64_FW_FIXED_STACK_BASE >= IA64_FW_CPU_ASSIST_BASE &&
-                 IA64_FW_BOOTSTRAP_STACK_TOP <= IA64_FW_CPU_ASSIST_END,
-                 fixed_stack_inside_cpu_assist);
+FW_STATIC_ASSERT(IA64_FW_BOOT_STACK_OFFSET + IA64_FW_BOOT_STACK_SIZE ==
+                 IA64_FW_CPU_ASSIST_SIZE,
+                 boot_stack_tops_cpu_assist);
+FW_STATIC_ASSERT((IA64_FW_CPU_ASSIST_SIZE & (IA64_FW_LOW_RAM_ALIGN - 1U)) == 0,
+                 cpu_assist_alignment);
+FW_STATIC_ASSERT(IA64_FW_LOW_RAM_MIN >= IA64_FW_CPU_ASSIST_SIZE,
+                 cpu_assist_fits_minimum_ram);
 FW_STATIC_ASSERT(IA64_FW_SAL_RUNTIME_SLOT_SIZE / 2U >=
                  IA64_EFI_MIN_BACKING_BYTES,
                  sal_runtime_slot_capacity);
-FW_STATIC_ASSERT((SAL_BACKING_STORE_BASE & 7U) == 0,
+FW_STATIC_ASSERT((IA64_FW_EARLY_RSE_OFFSET & 7U) == 0,
                  sal_backing_store_alignment);
-FW_STATIC_ASSERT(SAL_BACKING_STORE_END > SAL_BACKING_STORE_BASE,
+FW_STATIC_ASSERT(IA64_FW_EARLY_RSE_END_OFFSET > IA64_FW_EARLY_RSE_OFFSET,
                  sal_backing_store_order);
-FW_STATIC_ASSERT((SAL_BACKING_STORE_END - SAL_BACKING_STORE_BASE) /
+FW_STATIC_ASSERT((IA64_FW_EARLY_RSE_END_OFFSET - IA64_FW_EARLY_RSE_OFFSET) /
                  FW_MAX_CPUS >= IA64_EFI_MIN_BACKING_BYTES,
-                 sal_ap_backing_store_capacity);
+                 sal_backing_store_capacity);
 FW_STATIC_ASSERT(sizeof(ACPI_FADT) == 244, acpi_fadt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 100, acpi_xsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 68, acpi_rsdt_size);
@@ -1858,6 +1890,12 @@ static EFI_SYSTEM_TABLE_POINTER *mSystemTablePointer;
 static UINT64                   mSystemTablePointerBase;
 static UINT64                   mBootStackBase;
 static UINT64                   mBootStackTop;
+/* Base of the 2 MiB RAM-top CPU-assist region (IA64_FW_CPU_ASSIST_BASE_FOR). */
+static UINT64                   mCpuAssistBase;
+
+static UINT64 fw_low_anchor_base(void);
+/* The anchor is a soft reservation: see efi_release_low_anchor_if_claimed(). */
+static BOOLEAN                  mLowAnchorArmed;
 static EFI_DEBUG_IMAGE_INFO_TABLE_HEADER mDebugImageInfoHeader;
 static EFI_DEBUG_IMAGE_INFO mDebugImageInfoTable[LOADED_IMAGE_MAX + 1U];
 static EFI_DEBUG_IMAGE_INFO_NORMAL mDebugImageInfoNormal[LOADED_IMAGE_MAX + 1U];
@@ -2284,8 +2322,8 @@ UINT64 fw_boot_stack_top(void)
      * itself called on that bootstrap stack.
      */
     if (!fw_handoff_low_ram_end(&low_ram_end) ||
-        low_ram_end < FW_BOOTSTRAP_STACK_TOP) {
-        return FW_BOOTSTRAP_STACK_TOP;
+        low_ram_end < IA64_FW_LOW_RAM_MIN) {
+        return IA64_FW_LOW_RAM_MIN;
     }
     return low_ram_end & ~(IA64_EFI_MEMORY_ALIGN - 1U);
 }
@@ -2449,7 +2487,7 @@ BOOLEAN fw_handoff_nvram_persistent(void)
 UINT64 fw_ap_stack_top(UINT64 ProcessorId)
 {
     if (ProcessorId == 0 || ProcessorId >= FW_MAX_CPUS) {
-        return FW_BOOTSTRAP_STACK_TOP;
+        return fw_boot_stack_top();
     }
     return fw_boot_stack_top() - ProcessorId * FW_AP_STACK_SIZE;
 }
@@ -2470,10 +2508,9 @@ static UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
         base = (BootStackBase - FW_SYSTEM_TABLE_POINTER_SIZE) &
                ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
     }
-    if (base < IA64_FW_CPU_ASSIST_END &&
-        base + FW_SYSTEM_TABLE_POINTER_SIZE > IA64_FW_CPU_ASSIST_BASE) {
-        base = (IA64_FW_CPU_ASSIST_BASE -
-                FW_SYSTEM_TABLE_POINTER_SIZE) &
+    if (base < mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE &&
+        base + FW_SYSTEM_TABLE_POINTER_SIZE > mCpuAssistBase) {
+        base = (mCpuAssistBase - FW_SYSTEM_TABLE_POINTER_SIZE) &
                ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
     }
     if (base <= FW_LOW_IMAGE_END ||
@@ -7819,6 +7856,23 @@ static BOOLEAN efi_find_max_pages(UINT64 MaxAddress, UINT64 Size,
     return 0;
 }
 
+static void efi_coalesce_memory_map(void);
+
+/* See FW_LOW_ANCHOR_BASE: give the anchor page back to conventional memory. */
+static void efi_release_low_anchor(void)
+{
+    UINT64 anchor = fw_low_anchor_base();
+
+    if (!mLowAnchorArmed) {
+        return;
+    }
+    if (efi_mark_memory_range(EfiConventionalMemory, anchor,
+                              anchor + FW_LOW_ANCHOR_SIZE, EFI_MEMORY_WB)) {
+        mLowAnchorArmed = 0;
+        efi_coalesce_memory_map();
+    }
+}
+
 EFI_STATUS bs_allocate_pages(EFI_ALLOCATE_TYPE Type, EFI_MEMORY_TYPE MemoryType,
                                      UINTN Pages, EFI_PHYSICAL_ADDRESS *Memory)
 {
@@ -12667,9 +12721,9 @@ static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
     UINT64 pointer_start = mSystemTablePointerBase;
     UINT64 pointer_end = pointer_start + FW_SYSTEM_TABLE_POINTER_SIZE;
 
-    if (!efi_memory_map_covers_range(
+    if (!efi_memory_map_has_descriptor(
             EfiRuntimeServicesData,
-            IA64_FW_CPU_ASSIST_BASE, IA64_FW_CPU_ASSIST_END,
+            mCpuAssistBase, mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE,
             EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
         !efi_memory_map_covers_range(
             EfiRuntimeServicesData, mBootStackBase, mBootStackTop,
@@ -12838,16 +12892,23 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                        FW_LOADER_HEAP_SPLIT_BASE,
                                        FW_LOW_IMAGE_BASE,
                                        EFI_MEMORY_WB) ||
-        /* [32MB,80MB) is deliberately left as a SINGLE free run (d30791f). */
+        /* [32MB,80MB) is a single free descriptor ending exactly at the 80 MB
+         * line (XP-era sumain straddle rule), and conventional RAM continues
+         * right above it with no reserved guard page (Server 2003 SP1's 64 MB
+         * kernel large page at [64MB,128MB)). */
         !efi_memory_map_has_descriptor(EfiConventionalMemory,
                                        FW_LOW_IMAGE_BASE,
                                        FW_LOW_IMAGE_END, EFI_MEMORY_WB) ||
-        /* The SAL-style loader-staging guard sits at the 80 MB line; usable
-         * conventional RAM begins just above it. */
         !efi_memory_map_has_descriptor(EfiReservedMemoryType,
-                                       FW_LOW_IMAGE_END,
-                                       FW_LOW_RAM_STAGING_BASE,
+                                       fw_low_anchor_base(),
+                                       fw_low_anchor_base() +
+                                           FW_LOW_ANCHOR_SIZE,
                                        EFI_MEMORY_WB) ||
+        (fw_low_anchor_base() == FW_LOW_ANCHOR_BASE &&
+         !efi_memory_map_covers_range(EfiConventionalMemory,
+                                      FW_LOW_IMAGE_END,
+                                      FW_LOW_ANCHOR_BASE,
+                                      EFI_MEMORY_WB)) ||
         !efi_memory_map_has_boot_stack_layout() ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIO, IOSAPIC_BASE,
                                        IOSAPIC_BASE + IOSAPIC_SIZE,
@@ -13347,36 +13408,33 @@ static void efi_add_conventional_with_system_pointer(UINTN *Index,
     }
 }
 
+/* See FW_LOW_ANCHOR_BASE: 128 MB when it lies below the CPU-assist region. */
+static UINT64 fw_low_anchor_base(void)
+{
+    return mCpuAssistBase >= FW_LOW_ANCHOR_BASE + FW_LOW_ANCHOR_SIZE ?
+           FW_LOW_ANCHOR_BASE : FW_LOW_IMAGE_END;
+}
+
 static void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 StartRam,
                                        UINT64 LowRamEnd)
 {
+    /*
+     * Real IA-64 firmware carves its SAL/boot scratch from the top of
+     * installed RAM and leaves the DRAM below it contiguous (460GX SDV and
+     * E8870 SR870BH2 alike).  The CPU-assist region - SAL re-entry slots,
+     * debug contexts/stacks, initial RSE backing stores and the boot memory
+     * stacks that SAL reuses after ExitBootServices() - is published as one
+     * runtime-data descriptor ending exactly at the low-RAM end.
+     */
+    efi_add_conventional_with_system_pointer(Index, StartRam,
+                                             mCpuAssistBase);
+    efi_add_memory_range(
+        Index, EfiRuntimeServicesData,
+        mCpuAssistBase, mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE,
+        efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
+    /* Any sub-alignment tail of installed RAM stays ordinary memory. */
     efi_add_conventional_with_system_pointer(
-        Index, StartRam, IA64_FW_CPU_ASSIST_BASE);
-
-    if (mBootStackBase <= IA64_FW_CPU_ASSIST_END) {
-        /*
-         * Minimum and near-minimum RAM configurations place the dynamic
-         * stack pool partially inside the fixed CPU-assist reservation.
-         * Publish the union as one runtime-data range.
-         */
-        efi_add_memory_range(
-            Index, EfiRuntimeServicesData,
-            IA64_FW_CPU_ASSIST_BASE, mBootStackTop,
-            efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
-    } else {
-        efi_add_memory_range(
-            Index, EfiRuntimeServicesData,
-            IA64_FW_CPU_ASSIST_BASE, IA64_FW_CPU_ASSIST_END,
-            efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
-        efi_add_conventional_with_system_pointer(
-            Index, IA64_FW_CPU_ASSIST_END, mBootStackBase);
-        efi_add_memory_range(
-            Index, EfiRuntimeServicesData,
-            mBootStackBase, mBootStackTop,
-            efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
-    }
-    efi_add_conventional_with_system_pointer(
-        Index, mBootStackTop, LowRamEnd);
+        Index, mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE, LowRamEnd);
 }
 
 static void efi_init_memory_map(void)
@@ -13513,33 +13571,35 @@ static void efi_init_memory_map(void)
     efi_add_memory_range(&index, EfiReservedMemoryType,
                          FW_LOADER_HEAP_SPLIT_BASE,
                          FW_LOW_IMAGE_BASE, EFI_MEMORY_WB);
+    /*
+     * [32 MB, CPU-assist base) is all conventional RAM, as on real 460GX /
+     * E8870 platforms where low DRAM is contiguous up to the firmware's
+     * RAM-top scratch.  The historical reserved guard PAGE at the 80 MB
+     * staging line is gone (the setup loader's heap carve is bounded by the
+     * 32 MB split page), but the 80 MB DESCRIPTOR boundary stays: the XP-era
+     * sumain.c:760 (WXPSP1 base/boot/efi/sumain.c) turns the sub-80 MB part
+     * of any conventional descriptor that straddles 80 MB into
+     * MemoryFirmwareTemporary, after which the kernel carve finds no free
+     * block ("ntoskrnl.exe is missing or corrupt" on an installed XP 2002 -
+     * measured).  Two adjacent free descriptors cost the Server 2003 SP1
+     * loader nothing: its ARC list merges adjacent MemoryFree runs, so the
+     * 64 MB-aligned 64 MB large page it maps the kernel with at
+     * [64 MB, 128 MB) still fits (previously ENOMEM, load error 16).
+     * efi_preserve_memory_map_boundary() keeps the two from coalescing.
+     */
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_BASE,
                          FW_LOW_IMAGE_END, EFI_MEMORY_WB);
-    /*
-     * SAL-style reserved guard at the 80 MB TR-staging line.  The Windows
-     * IA-64 setup loader (XP build 2002) allocates its heap by selecting a
-     * MemoryFree descriptor with BasePage in [16MB,48MB) and carving the new
-     * heap from that descriptor's END; because the loader also merges adjacent
-     * free descriptors, without a non-free boundary the [16MB..] free block
-     * extends to the top of RAM and the carve escapes the 16-64MB loader-TR
-     * window, tripping NTOSKRNL bugcheck 0x1A (MiConvertToLoaderVirtual).  A
-     * reserved page just above the loader's 80 MB staging line (matching how
-     * real SAL reserves boot structures above the first 64 MB) bounds that
-     * free block at 80 MB so the heap stays TR-mapped.  It sits ABOVE the
-     * loader's [48MB,80MB) systemblock split range, so the split still finds
-     * its container; bulk RAM above the guard stays conventional for OSes
-     * (e.g. Server 2003) whose loaders use the full range.
-     */
-    efi_add_memory_range(&index, EfiReservedMemoryType, FW_LOW_IMAGE_END,
-                         FW_LOW_RAM_STAGING_BASE, EFI_MEMORY_WB);
+    {
+        UINT64 anchor = fw_low_anchor_base();
 
-    /*
-     * SAL reuses each processor's RAM-top stack after ExitBootServices(), so
-     * keep the entire stack pool as runtime data.  AllocatePool() uses only
-     * the surrounding conventional-memory ranges.
-     */
-    efi_add_boot_stack_low_ram(&index, FW_LOW_RAM_STAGING_BASE,
-                               low_ram_end);
+        efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_END,
+                             anchor, EFI_MEMORY_WB);
+        efi_add_memory_range(&index, EfiReservedMemoryType, anchor,
+                             anchor + FW_LOW_ANCHOR_SIZE, EFI_MEMORY_WB);
+        mLowAnchorArmed = 1;
+        efi_add_boot_stack_low_ram(&index, anchor + FW_LOW_ANCHOR_SIZE,
+                                   low_ram_end);
+    }
 
     /*
      * XP RTM (build 2600) SMP bring-up requires the 2 GiB firmware scratch
@@ -16968,6 +17028,40 @@ static BOOLEAN pe_mark_loaded_image_memory(UINT64 ImageBase,
     return 1;
 }
 
+/*
+ * Windows loaders 5.2.3790.1000+ (Server 2003 SP1/SP2/R2) map the kernel and
+ * their heap with 64 MB large pages at [64 MB, 192 MB) and need that span to
+ * be one free run, and no 5.2 kernel needs the anchor (see FW_LOW_ANCHOR_BASE),
+ * so everything from 5.2.3790.0 up runs without it.  Recognised from the image's
+ * VS_FIXEDFILEINFO (signature 0xFEEF04BD, then dwStrucVersion,
+ * dwFileVersionMS, dwFileVersionLS) - the retail loaders carry no other
+ * version marker in their PE headers.
+ */
+static BOOLEAN pe_image_wants_contiguous_low_ram(const UINT8 *Image,
+                                                 UINTN ImageSize)
+{
+    UINTN i;
+
+    if (Image == NULL || ImageSize < 20U) {
+        return 0;
+    }
+    for (i = 0; i + 20U <= ImageSize; i += 4U) {
+        UINT32 ms;
+        UINT32 ls;
+
+        if (Image[i] != 0xBDU || Image[i + 1] != 0x04U ||
+            Image[i + 2] != 0xEFU || Image[i + 3] != 0xFEU) {
+            continue;
+        }
+        fw_copy_mem(&ms, Image + i + 8U, sizeof(ms));
+        fw_copy_mem(&ls, Image + i + 12U, sizeof(ls));
+        /* 5.2.3790.0 (Server 2003 RTM) and later; 5.1.x (XP, 2462) keep it. */
+        return ms > 0x00050002U ||
+               (ms == 0x00050002U && (ls >> 16) >= 3790U);
+    }
+    return 0;
+}
+
 static BOOLEAN pe_rva_range_valid(UINT32 Rva, UINT32 Size, UINT32 ImageSize)
 {
     return Rva <= ImageSize && Size <= ImageSize - Rva;
@@ -17638,6 +17732,10 @@ static void *load_pe_image(uint8_t *image_base, UINTN image_size,
         (file_hdr->Characteristics & IMAGE_FILE_RELOCS_STRIPPED) != 0 ||
         number_of_rva_and_sizes < 6 || data_dir == NULL ||
         data_dir[11] == 0;
+    if (subsystem == IMAGE_SUBSYSTEM_EFI_APPLICATION &&
+        pe_image_wants_contiguous_low_ram(image_base, image_size)) {
+        efi_release_low_anchor();
+    }
     image_base_addr = pe_choose_image_base(
         linked_image_base_addr, size_of_image,
         subsystem == IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER,
@@ -34557,6 +34655,7 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
      */
     mBootStackTop = stack_top;
     mBootStackBase = stack_top - FW_BOOT_STACK_SIZE;
+    mCpuAssistBase = stack_top - IA64_FW_CPU_ASSIST_SIZE;
     mProcessorCount = fw_handoff_processor_count();
     fw_handoff_processor_topology(mProcessorCount);
     mResetFloatingPointDisableBits =

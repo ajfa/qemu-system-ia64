@@ -1608,6 +1608,12 @@ typedef struct IA64BootInfo {
     uint64_t bsp;
     uint64_t stack_pointer;
     uint64_t rsc;
+    /*
+     * Base of the firmware's RAM-top CPU-assist region (per-CPU SAL re-entry
+     * slots, debug contexts/stacks, early RSE; IA64_FW_CPU_ASSIST_BASE_FOR).
+     * The machine derives it from installed RAM exactly as the firmware does.
+     */
+    uint64_t fw_cpu_assist_base;
     bool powered_off;
 } IA64BootInfo;
 
@@ -1772,6 +1778,12 @@ ia64_firmware_debug_state_const(const CPUIA64State *env)
 {
     return &ia64_cpu_from_cpu_state(env_cpu((CPUIA64State *)env))
             ->firmware_debug;
+}
+
+/* Base of the firmware's RAM-top CPU-assist region for this machine. */
+static inline uint64_t ia64_fw_cpu_assist_base(CPUIA64State *env)
+{
+    return ia64_cpu_from_cpu_state(env_cpu(env))->boot_info.fw_cpu_assist_base;
 }
 
 static inline IA64CPUClass *ia64_env_cpu_class(CPUIA64State *env)

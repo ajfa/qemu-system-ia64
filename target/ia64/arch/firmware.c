@@ -200,7 +200,7 @@ static hwaddr ia64_fw_debug_context_pa(CPUIA64State *env)
 {
     unsigned index = ia64_fw_debug_cpu_index(env);
 
-    return IA64_FW_DEBUG_CONTEXT_BASE +
+    return ia64_fw_cpu_assist_base(env) + IA64_FW_DEBUG_CONTEXT_OFFSET +
            (hwaddr)index * IA64_FW_DEBUG_CONTEXT_STRIDE;
 }
 
@@ -229,7 +229,8 @@ uint32_t ia64_firmware_debug_enter(CPUIA64State *env, uint64_t address)
     env->gr[IA64_FW_DEBUG_GR_EXCEPTION] = exception_type;
     env->gr[IA64_FW_DEBUG_GR_CONTEXT] = ia64_fw_debug_context_pa(env);
     env->gr[IA64_FW_DEBUG_GR_CPU] = ia64_fw_debug_cpu_index(env);
-    env->gr[IA64_GR_STACK_POINTER] = IA64_FW_DEBUG_STACK_BASE +
+    env->gr[IA64_GR_STACK_POINTER] = ia64_fw_cpu_assist_base(env) +
+                  IA64_FW_DEBUG_STACK_OFFSET +
                   (ia64_fw_debug_cpu_index(env) + 1) *
                   IA64_FW_DEBUG_STACK_SIZE - 16;
     env->nat[0] &= ~((1ULL << IA64_GR_STACK_POINTER) |
@@ -885,6 +886,7 @@ uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
     IA64SalBridgeState *bridge = &env->sal_bridge;
     uint64_t block[4];
     uint64_t entry, gp, stack, bstore;
+    uint64_t sal_runtime_base;
 
     if (bridge->active) {
         return 0;
@@ -907,10 +909,12 @@ uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
      * store; every processor owns a private slot at a fixed stride so
      * concurrent SAL calls cannot share re-entry memory.
      */
-    if (stack >= IA64_FW_SAL_RUNTIME_BASE &&
-        stack < IA64_FW_SAL_RUNTIME_BASE + IA64_FW_SAL_RUNTIME_SLOT_SIZE &&
-        bstore >= IA64_FW_SAL_RUNTIME_BASE &&
-        bstore < IA64_FW_SAL_RUNTIME_BASE + IA64_FW_SAL_RUNTIME_SLOT_SIZE) {
+    sal_runtime_base = ia64_fw_cpu_assist_base(env) +
+                       IA64_FW_SAL_RUNTIME_OFFSET;
+    if (stack >= sal_runtime_base &&
+        stack < sal_runtime_base + IA64_FW_SAL_RUNTIME_SLOT_SIZE &&
+        bstore >= sal_runtime_base &&
+        bstore < sal_runtime_base + IA64_FW_SAL_RUNTIME_SLOT_SIZE) {
         unsigned index = ia64_fw_debug_cpu_index(env);
 
         stack += (uint64_t)index * IA64_FW_SAL_RUNTIME_SLOT_SIZE;

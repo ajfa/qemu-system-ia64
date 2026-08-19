@@ -23,52 +23,72 @@
 /*
  * CPU-private physical memory used before and after ExitBootServices().
  *
- * The minimum machine has 128 MiB of low RAM.  Keep the upper 2 MiB of that
- * minimum configuration reserved so every supported CPU has independent SAL,
- * debug, initial RSE, and bootstrap memory-stack storage.  The ordinary EFI
- * stack pool remains relative to the installed low-RAM end; at the minimum
- * RAM size it coincides with the fixed bootstrap-stack subrange below.
+ * Real IA-64 firmware keeps low DRAM contiguous from 1 MiB up to the PCI/MMIO
+ * aperture and carves its own SAL/boot scratch from the TOP of installed RAM
+ * (460GX SDV: "allocate PAL/SAL memory near top of RAM"; E8870 SR870BH2: a
+ * SAL data block at negative offsets from a RAM-top base holding the BSP
+ * backing store and MP buffers - plans/sdv-i2000-firmware-reference.md 6.1,
+ * plans/sr870bh2-firmware-reference.md 6.2).  The fork does the same: the
+ * 2 MiB CPU-assist region (per-CPU SAL re-entry slots, debug contexts and
+ * stacks, initial RSE backing stores, and the boot memory stacks) sits at
+ * [low_ram_end - 2 MiB, low_ram_end), where low_ram_end is installed RAM
+ * clamped to the PCI aperture and rounded down to IA64_FW_LOW_RAM_ALIGN.
+ * Low DRAM below it stays conventional (the firmware's efi_init_memory_map
+ * keeps only the loader-contract boundaries described there), so OS loaders
+ * that map their working set with large translation registers (Server 2003
+ * SP1 setupldr: 64 MiB pages at [64 MiB, 192 MiB)) are satisfied.
+ *
+ * The minimum machine has 128 MiB of low RAM, where this layout coincides
+ * exactly with the historical fixed [126 MiB, 128 MiB) region.
  *
  * entry.S cannot include this header (it is assembled without the C
- * preprocessor); its SAL_RUNTIME_AREA_TOP and FW_AP_BOOTSTRAP_STACK_TOP
- * .equ literals must match IA64_FW_SAL_RUNTIME_END and
- * IA64_FW_BOOTSTRAP_STACK_TOP, and its AP stack stride shift must match
- * IA64_FW_CPU_STACK_SIZE.
+ * preprocessor); it re-derives the region from the handoff block with the
+ * same constants (see the .equ literals there), and its AP stack stride
+ * shift must match IA64_FW_CPU_STACK_SIZE.
  */
-#define IA64_FW_CPU_ASSIST_BASE        0x0000000007e00000ULL
-#define IA64_FW_CPU_ASSIST_END         0x0000000008000000ULL
+#define IA64_FW_LOW_RAM_MIN            0x0000000008000000ULL
+#define IA64_FW_LOW_RAM_ALIGN          0x0000000000002000ULL
+#define IA64_FW_CPU_ASSIST_SIZE        0x0000000000200000ULL
 
-#define IA64_FW_SAL_RUNTIME_BASE       0x0000000007e00000ULL
+/* Offsets inside the CPU-assist region. */
+#define IA64_FW_SAL_RUNTIME_OFFSET     0x0000000000000000ULL
 #define IA64_FW_SAL_RUNTIME_SLOT_SIZE  0x0000000000008000ULL
-#define IA64_FW_SAL_RUNTIME_END \
-    (IA64_FW_SAL_RUNTIME_BASE + \
+#define IA64_FW_SAL_RUNTIME_END_OFFSET \
+    (IA64_FW_SAL_RUNTIME_OFFSET + \
      IA64_VPC_MAX_CPUS * IA64_FW_SAL_RUNTIME_SLOT_SIZE)
 
-#define IA64_FW_DEBUG_CONTEXT_BASE     0x0000000007e40000ULL
+#define IA64_FW_DEBUG_CONTEXT_OFFSET   0x0000000000040000ULL
 #define IA64_FW_DEBUG_CONTEXT_STRIDE   0x0000000000000800ULL
 #define IA64_FW_DEBUG_CONTEXT_SIZE     1192U
-#define IA64_FW_DEBUG_CONTEXT_END \
-    (IA64_FW_DEBUG_CONTEXT_BASE + \
+#define IA64_FW_DEBUG_CONTEXT_END_OFFSET \
+    (IA64_FW_DEBUG_CONTEXT_OFFSET + \
      IA64_VPC_MAX_CPUS * IA64_FW_DEBUG_CONTEXT_STRIDE)
 
-#define IA64_FW_DEBUG_STACK_BASE       0x0000000007e80000ULL
+#define IA64_FW_DEBUG_STACK_OFFSET     0x0000000000080000ULL
 #define IA64_FW_DEBUG_STACK_SIZE       0x0000000000008000ULL
-#define IA64_FW_DEBUG_STACK_END \
-    (IA64_FW_DEBUG_STACK_BASE + \
+#define IA64_FW_DEBUG_STACK_END_OFFSET \
+    (IA64_FW_DEBUG_STACK_OFFSET + \
      IA64_VPC_MAX_CPUS * IA64_FW_DEBUG_STACK_SIZE)
 
-#define IA64_FW_EARLY_RSE_BASE         0x0000000007ec0000ULL
+#define IA64_FW_EARLY_RSE_OFFSET       0x00000000000c0000ULL
 #define IA64_FW_EARLY_RSE_SIZE         0x0000000000008000ULL
-#define IA64_FW_EARLY_RSE_END \
-    (IA64_FW_EARLY_RSE_BASE + \
+#define IA64_FW_EARLY_RSE_END_OFFSET \
+    (IA64_FW_EARLY_RSE_OFFSET + \
      IA64_VPC_MAX_CPUS * IA64_FW_EARLY_RSE_SIZE)
 
-#define IA64_FW_BOOTSTRAP_STACK_TOP    0x0000000008000000ULL
 #define IA64_FW_CPU_STACK_SIZE         0x0000000000020000ULL
 #define IA64_FW_BOOT_STACK_SIZE \
     (IA64_VPC_MAX_CPUS * IA64_FW_CPU_STACK_SIZE)
-#define IA64_FW_FIXED_STACK_BASE \
-    (IA64_FW_BOOTSTRAP_STACK_TOP - IA64_FW_BOOT_STACK_SIZE)
+/* The boot memory stacks occupy the top of the region, ending at low_ram_end. */
+#define IA64_FW_BOOT_STACK_OFFSET \
+    (IA64_FW_CPU_ASSIST_SIZE - IA64_FW_BOOT_STACK_SIZE)
+
+/* low_ram_end for an installed RAM size, as both QEMU and the firmware see it. */
+#define IA64_FW_LOW_RAM_END(ram_size) \
+    ((((ram_size) < IA64_PCI_MMIO_BASE ? (ram_size) : IA64_PCI_MMIO_BASE)) & \
+     ~(IA64_FW_LOW_RAM_ALIGN - 1ULL))
+#define IA64_FW_CPU_ASSIST_BASE_FOR(ram_size) \
+    (IA64_FW_LOW_RAM_END(ram_size) - IA64_FW_CPU_ASSIST_SIZE)
 
 #define IA64_UART_BASE                0x00000047f0000000ULL
 #define IA64_DEBUG_UART_BASE          0x00000047f0001000ULL
