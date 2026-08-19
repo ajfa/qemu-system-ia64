@@ -118,7 +118,18 @@ typedef struct TCGPool {
 
 #define TCG_POOL_CHUNK_SIZE 32768
 
-#define TCG_MAX_TEMPS 512
+/*
+ * IA-64 registers ~378 TCG globals (128 GR + 64 PR + 8 BR + 128 FR + ip/psr +
+ * bitmap words + the IA-32 engine's), leaving only ~130 of the original 512
+ * temp slots for per-TB temporaries and constants.  A dense MSVC/gcc TB then
+ * exhausted them after ~7-15 bundles, longjmp'd through tcg_raise_tb_overflow,
+ * and was retranslated with max_insns halved -- 13% of XP TBs were translated
+ * twice and cut short.  Raise the ceiling so those TBs translate once, at their
+ * full length.  Cost is a larger TCGContext.temps[] and TCGTempSet bitmap
+ * (both scale off this macro); the arg encoding stores temp pointers, not a
+ * width-limited index, so there is no packing limit to hit.
+ */
+#define TCG_MAX_TEMPS 2048
 #define TCG_MAX_INSNS 512
 
 /* when the size of the arguments of a called function is smaller than
