@@ -786,11 +786,12 @@ uint64_t ia64_system_mov_psrgr_read(CPUIA64State *env, uint32_t unused)
 /* ---- mov to PSR helper ---- */
 
 void ia64_system_mov_psr_write(CPUIA64State *env, uint64_t value,
-                               uint32_t unused)
+                               uint32_t psr_l)
 {
+    uint64_t old_psr = env->psr;
     uint64_t new_psr;
 
-    if (unused) {
+    if (psr_l) {
         new_psr = (env->psr & ~0xffffffffULL) | (value & 0xffffffffULL);
     } else {
         new_psr = value;
@@ -799,9 +800,19 @@ void ia64_system_mov_psr_write(CPUIA64State *env, uint64_t value,
         return;
     }
     ia64_set_psr(env, new_psr);
-    ia64_tlb_bump_generation(env, false);
-    ia64_tlb_bump_generation(env, true);
-    tlb_flush(env_cpu(env));
+    /*
+     * mov psr.l = r writes only PSR{31:0}.  The bits it can change that
+     * matter to address translation are DT/IT (which select the MMU index,
+     * recomputed per access), RT (consulted per RSE access) and PK.  Only PK
+     * is reflected in the cached softmmu TLB permissions, so discarding the
+     * whole softmmu TLB and jump cache on every write is wasteful -- Windows
+     * executes mov psr.l on every user->kernel system call.  Flush only when
+     * PK actually changes.  DA/IA live above bit 31 and cannot be reached by
+     * the psr.l form; the full-PSR path (psr_l == 0) is not produced by the
+     * decoder today, and would still be covered by the PK check for its
+     * translation-relevant bits.
+     */
+    ia64_flush_on_pk_change(env, old_psr);
 }
 
 /* ---- mov from Region Register helper ---- */
