@@ -152,6 +152,8 @@ void ia64_gen_gr_nat_set(uint8_t reg);
 void ia64_gen_gr_nat_assign(uint8_t reg, TCGv_i64 bit);
 void ia64_gen_gr_nat_from_1(uint8_t dst, uint8_t src);
 void ia64_gen_gr_nat_from_2(uint8_t dst, uint8_t src1, uint8_t src2);
+bool ia64_nat_result_is_known_clear(const DisasContext *ctx,
+                                    const Ia64Instruction *insn);
 void ia64_gen_fr_nat_from_gr(uint8_t dst, uint8_t src);
 void ia64_gen_fr_mov(uint8_t reg, TCGv_i64 value);
 void ia64_gen_fr_mov_sig(uint8_t reg, TCGv_i64 value);

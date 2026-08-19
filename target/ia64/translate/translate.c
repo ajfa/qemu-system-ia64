@@ -488,8 +488,8 @@ static IA64NatResultPolicy ia64_nat_result_policy(
     }
 }
 
-static bool ia64_nat_result_is_known_clear(const DisasContext *ctx,
-                                           const Ia64Instruction *insn)
+bool ia64_nat_result_is_known_clear(const DisasContext *ctx,
+                                    const Ia64Instruction *insn)
 {
     switch (ia64_nat_result_policy(insn)) {
     case IA64_NAT_RESULT_CLEAR:
