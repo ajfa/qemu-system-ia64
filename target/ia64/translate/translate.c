@@ -1607,10 +1607,13 @@ void ia64_prepare_self_counted_loop(
     ctx->memory.nat_known_clear[0] = 1;
     ctx->memory.nat_known_clear[1] = 0;
 
+    /*
+     * The budget temp is created and initialized once per TB in
+     * ia64_tr_tb_start (see there for why it cannot be initialized here);
+     * multiple self-loops in one TB share it, which only tightens the cap.
+     */
     ctx->branch.counted_self_label = gen_new_label();
-    ctx->branch.counted_self_budget = tcg_temp_new_i64();
     ctx->branch.counted_self_ip = bundle_ip;
-    tcg_gen_movi_i64(ctx->branch.counted_self_budget, IA64_COUNTED_SELF_BUDGET);
     gen_set_label(ctx->branch.counted_self_label);
 }
 
@@ -2743,6 +2746,26 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
 
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cs)
 {
+    DisasContext *ctx = container_of(db, DisasContext, base);
+
+    /*
+     * Shared iteration budget for the counted self-loop back edges
+     * (ia64_prepare_self_counted_loop).  It MUST be created and initialized
+     * here, in the TB's entry EBB, not next to the loop label: the init
+     * would otherwise sit between a preceding unconditional exit and the
+     * loop label, and when the optimizer proves that exit always taken
+     * (e.g. a predicate constant-folds), reachable_code_pass deletes the
+     * init while the label survives through its back-edge reference.
+     * liveness then reduces the now single-EBB temp to TEMP_EBB, discards
+     * its remaining writes, and the loop's budget test reads a dead temp -
+     * a temp_load() abort at code-generation time (measured: Server 2003
+     * SP1 GUI setup, -cpu montecito -smp 4).  In the entry EBB the init is
+     * reachable by construction whenever any use survives.  TBs without a
+     * self-loop lose nothing: the unused temp's init is dead-code removed.
+     */
+    ctx->branch.counted_self_budget = tcg_temp_new_i64();
+    tcg_gen_movi_i64(ctx->branch.counted_self_budget,
+                     IA64_COUNTED_SELF_BUDGET);
 }
 
 static void ia64_tr_insn_start(DisasContextBase *db, CPUState *cs)
