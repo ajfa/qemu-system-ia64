@@ -2976,6 +2976,14 @@ static void ia64_vpc_reset(void *opaque)
     IA64VpcMachineState *s = opaque;
     CPUState *cs;
 
+    /*
+     * The handoff block lives in ordinary guest RAM; rom_reset() restores
+     * the firmware image but nothing restores the block, and entry.S reads
+     * it on every entry, so re-emit it or a guest that scribbled over it
+     * would warm-reset with a corrupt handoff.
+     */
+    ia64_vpc_write_firmware_handoff(s);
+
     CPU_FOREACH(cs) {
         /* The CPUs are not children of the platform system bus. */
         ia64_cpu_reset_to_boot_info(IA64_CPU(cs));
