@@ -158,21 +158,25 @@ static const ExpectedPCIDevice expected_e1000 = {
 };
 
 /*
- * The default adapter is the 82543GC, the device XP IA-64's inbox e1000
- * INF matches (DEV_1004 rev 02, e1000w64.sys).  Same e1000 core as the
- * 82540EM: a 128 KiB CSR memory BAR and a 64-byte I/O BAR, placed by the
- * machine's generic per-BAR NIC allocator inside the NIC windows.
+ * The default adapter is the 100 Mbit PRO/100 (i82557b, DEV_1229), the
+ * device Windows IA-64 actually ships an inbox driver for (NET557.IN_).
+ * Unlike the e1000 it exposes three BARs: a 4 KiB prefetchable CSR memory
+ * BAR, a 64-byte I/O BAR, and a 128 KiB flash memory BAR.  The machine's
+ * generic per-BAR NIC allocator hands each one a naturally aligned slice of
+ * the per-index memory / I/O window, so the flash BAR lands at the next
+ * 128 KiB boundary above the CSR BAR.
  */
-static const ExpectedPCIDevice expected_e1000_82543gc = {
+static const ExpectedPCIDevice expected_i82557b = {
     .slot = IA64_E1000_SLOT,
     .vendor = PCI_VENDOR_ID_INTEL,
-    .device = E1000_DEV_ID_82543GC_COPPER,
+    .device = 0x1229,
     .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
     .irq_line = IA64_E1000_GSI,
     .irq_pin = 1,
     .bars = {
-        [0] = IA64_E1000_MMIO_BASE,
+        [0] = IA64_E1000_MMIO_BASE | PCI_BASE_ADDRESS_MEM_PREFETCH,
         [1] = IA64_E1000_IO_BASE | PCI_BASE_ADDRESS_SPACE_IO,
+        [2] = IA64_E1000_MMIO_BASE + 0x20000,
     },
 };
 
@@ -1088,7 +1092,7 @@ static void test_pci_default_layout(void)
                         PCI_VENDOR_ID_LSI_LOGIC);
         g_free(lsi);
     }
-    assert_pci_device(&gbus.bus, &expected_e1000_82543gc);
+    assert_pci_device(&gbus.bus, &expected_i82557b);
     qtest_quit(qts);
 }
 
