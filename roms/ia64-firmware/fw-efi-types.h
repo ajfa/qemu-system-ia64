@@ -373,4 +373,38 @@ typedef struct {
     EFI_STATUS          (*Unload)(EFI_HANDLE ImageHandle);
 } EFI_LOADED_IMAGE_PROTOCOL;
 
+typedef struct _EFI_BLOCK_IO_PROTOCOL EFI_BLOCK_IO_PROTOCOL;
+typedef struct _EFI_DISK_IO_PROTOCOL EFI_DISK_IO_PROTOCOL;
+
+typedef EFI_STATUS (*EFI_BLOCK_RESET)(EFI_BLOCK_IO_PROTOCOL *This,
+                                       BOOLEAN ExtendedVerification);
+typedef EFI_STATUS (*EFI_BLOCK_READ)(EFI_BLOCK_IO_PROTOCOL *This,
+                                      UINT32 MediaId, UINT64 Lba,
+                                      UINTN BufferSize, VOID *Buffer);
+typedef EFI_STATUS (*EFI_BLOCK_WRITE)(EFI_BLOCK_IO_PROTOCOL *This,
+                                       UINT32 MediaId, UINT64 Lba,
+                                       UINTN BufferSize, VOID *Buffer);
+typedef EFI_STATUS (*EFI_BLOCK_FLUSH)(EFI_BLOCK_IO_PROTOCOL *This);
+
+typedef struct {
+    UINT32  MediaId;
+    BOOLEAN RemovableMedia;
+    BOOLEAN MediaPresent;
+    BOOLEAN LogicalPartition;
+    BOOLEAN ReadOnly;
+    BOOLEAN WriteCaching;
+    UINT32  BlockSize;
+    UINT32  IoAlign;
+    UINT64  LastBlock;
+} EFI_BLOCK_IO_MEDIA;
+
+struct _EFI_BLOCK_IO_PROTOCOL {
+    UINT64              Revision;
+    EFI_BLOCK_IO_MEDIA *Media;
+    EFI_BLOCK_RESET     Reset;
+    EFI_BLOCK_READ      ReadBlocks;
+    EFI_BLOCK_WRITE     WriteBlocks;
+    EFI_BLOCK_FLUSH     FlushBlocks;
+};
+
 #endif /* IA64_FIRMWARE_FW_EFI_TYPES_H */
