@@ -21,6 +21,8 @@
 #include "fw-legacy-io.h"
 #include "fw-pointer.h"
 #include "fw-services.h"
+#include "fw-memmap.h"
+#include "fw-platform-layout.h"
 #include "fw-storage.h"
 #include "fw-uart.h"
 #include "fw-uga-io.h"
@@ -69,182 +71,7 @@
 #define SAL_BACKING_STORE_BASE       (mCpuAssistBase + IA64_FW_EARLY_RSE_OFFSET)
 #define SAL_BACKING_STORE_END        (mCpuAssistBase + IA64_FW_EARLY_RSE_END_OFFSET)
 
-#define PCI_OHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00010000ULL)
-#define PCI_AHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00020000ULL)
-#define PCI_LSI_MMIO_BAR              (IA64_PCI_MMIO_BASE + 0x00030000ULL)
-#define PCI_VGA_FB_BAR                (IA64_PCI_MMIO_BASE + 0x02000000ULL)
-#define PCI_VGA_MMIO_BAR              (IA64_PCI_MMIO_BASE + 0x07000000ULL)
-#define PCI_VGA_ATI_ID                0x50461002U
-#define PCI_VGA_STD_ID                0x11111234U
-#define PCI_VGA_ATI_FB_SIZE           0x04000000ULL
-#define PCI_VGA_STD_FB_SIZE           0x01000000ULL
-#define VGA_FB_BASE                   ((UINT64)PCI_VGA_FB_BAR)
-#define VGA_MMIO_BASE                 ((UINT64)PCI_VGA_MMIO_BAR)
-#define ACPI_RECLAIM_BASE 0x0000000000800000ULL
-#define ACPI_RECLAIM_TABLE_BASE \
-    (ACPI_RECLAIM_BASE + IA64_EFI_MEMORY_ALIGN)
-#define ACPI_RECLAIM_END 0x0000000000820000ULL
-/* 460GX/i2000 SDV SAPIC message block, just below the local SAPIC. */
-#define IOSAPIC_BASE     IA64_IOSAPIC_BASE
-#define IOSAPIC_SIZE     IA64_IOSAPIC_MMIO_SIZE
-#define ACPI_PM_IO_BASE  IA64_ACPI_PM_IO_BASE
-#define ACPI_PM1_EVT_OFFSET 0x0U
-#define ACPI_PM1_CNT_OFFSET 0x4U
-#define ACPI_PM_TMR_OFFSET 0x8U
-#define ACPI_PM_RESET_OFFSET IA64_ACPI_PM_RESET_OFFSET
-#define ACPI_PM_RESET_VALUE  IA64_ACPI_PM_RESET_VALUE
-#define ACPI_PM1_CNT_SLEEP_ENABLE 0x2000U
-#define ACPI_SCI_IRQ     ((UINT32)IA64_ACPI_SCI_IRQ)
-/* MADT Flags: the platform carries a PC/AT-compatible legacy interrupt space. */
-#define ACPI_MADT_FLAG_PCAT_COMPAT 0x1U
-#define ACPI_GAS_SYSTEM_MEMORY 0U
-#define ACPI_GAS_SYSTEM_IO     1U
-#define ACPI_DBGP_INTERFACE_16550_FULL 0U
-#define ACPI_FADT_FLAG_WBINVD        (1U << 0)
-#define ACPI_FADT_FLAG_PWR_BUTTON    (1U << 4)
-#define ACPI_FADT_FLAG_SLP_BUTTON    (1U << 5)
-#define ACPI_FADT_FLAG_RESET_REG_SUP (1U << 10)
-#define ACPI_FADT_FLAG_SW_CPU_SLP    (1U << 13)
-#define VGA_MODE_TEXT_WIDTH  640U
-#define VGA_MODE_TEXT_HEIGHT 400U
-#define VGA_MODE_640_WIDTH   640U
-#define VGA_MODE_640_HEIGHT  480U
-#define VGA_MODE_800_WIDTH   800U
-#define VGA_MODE_800_HEIGHT  600U
-#define VGA_MODE_1024_WIDTH  1024U
-#define VGA_MODE_1024_HEIGHT 768U
-#define VGA_MODE_1280_WIDTH  1280U
-#define VGA_MODE_1280_HEIGHT 1024U
-#define VGA_BPP          32U
-#define VGA_BAR_SIZE     (16U * 1024U * 1024U)
-#define FW_POOL_ZERO_LIMIT (1U * 1024U * 1024U)
-#define FW_LOW_RECLAIM_BASE 0x0000000000800000ULL
-#define FW_LOW_FREE_BASE  0x0000000001100000ULL
-#define FW_LOW_IMAGE_ALIGN 0x0000000002000000ULL
-#define FW_LOW_IMAGE_BASE 0x0000000002000000ULL
-#define FW_LOW_LEGACY_IMAGE_BASE 0x0000000003000000ULL
-#define FW_LOW_IMAGE_ALIGNED_END (FW_LOW_IMAGE_BASE + FW_LOW_IMAGE_ALIGN)
-#define FW_LOW_IMAGE_END  0x0000000005000000ULL
-/*
- * FW_LOW_IMAGE_END (80 MB) is the Windows setup loader's TR-staging line.  It
- * is a conventional-memory DESCRIPTOR boundary (XP-era sumain.c:760 must not
- * see a descriptor straddling it), but no longer a reserved guard page: the
- * heap-carve bound that page provided is the job of the 32 MB split page, and
- * all RAM from 32 MB up to the RAM-top CPU-assist region is free so loaders
- * that map with large TRs (Server 2003 SP1 setupldr: one 64 MB page at
- * [64 MB, 128 MB)) find their region.  See efi_init_memory_map().
- */
-/*
- * Firmware-owned physical stack + RSE backing store used while a virtual-
- * mode SAL_PROC call is re-entered physically (see sal_runtime_entry in
- * entry.S).  Lives in the firmware-permanent low RAM below the image base;
- * SAL calls are not re-entrant (SAL spec 3.1, the OS serializes them).
- */
-/*
- * Per-CPU SAL_PROC physical re-entry slots in the CPU-assist area: the
- * lower half of each slot is the RSE backing store, the upper half the
- * memory stack.  The dispatch block publishes CPU 0's values; the
- * emulator-side bridge adds cpu_index * IA64_FW_SAL_RUNTIME_SLOT_SIZE.
- */
-#define FW_SAL_PHYS_BSTORE_BASE (mCpuAssistBase + IA64_FW_SAL_RUNTIME_OFFSET)
-#define FW_SAL_PHYS_STACK_TOP \
-    (FW_SAL_PHYS_BSTORE_BASE + IA64_FW_SAL_RUNTIME_SLOT_SIZE - 0x10ULL)
-#define FW_LOADER_STAGING_GUARD_SIZE 0x0000000000002000ULL
-#define FW_LOW_RAM_STAGING_BASE (FW_LOW_IMAGE_END + FW_LOADER_STAGING_GUARD_SIZE)
-/*
- * SAL-style reserved split page ending exactly at the loader's 48 MB image
- * base.  The Windows IA-64 setup loader requires that "any descriptor which
- * starts less than 48MB [must] not extend beyond 48MB" (efi/ia64/memory.c);
- * its own MempAllocDescriptor(_48MB,_80MB) split is erased when
- * BlInsertDescriptor re-merges adjacent MemoryFree runs, after which the
- * heap-extension (confined to selecting [16MB,48MB)-based free blocks but
- * carving from the block's END) escapes to just below 80MB - outside the
- * [16-64MB] the kernel's three loader-TRs cover -> NTOSKRNL bugcheck 0x1A.
- * EfiReservedMemoryType maps to MemoryFirmwarePermanent (EfiToArcType
- * default), which neither merges nor is reclaimed, so the [16-48MB) free run
- * stays bounded below 48MB while [48MB,80MB) remains a single free
- * descriptor for the loader's systemblock split.
- */
-#define FW_LOADER_HEAP_SPLIT_SIZE 0x0000000000002000ULL
-/*
- * The split page sits immediately below FW_LOW_IMAGE_BASE (32 MB) since
- * d30791f; this macro (and uefi_memory_map_selftest, written in terms of it)
- * tracks the map builder.
- */
-#define FW_LOADER_HEAP_SPLIT_BASE \
-    (FW_LOW_IMAGE_BASE - FW_LOADER_HEAP_SPLIT_SIZE)
-#define FW_BOOT_STACK_SIZE     IA64_FW_BOOT_STACK_SIZE
-#define IA64_EFI_MEMORY_ALIGN IA64_FW_LOW_RAM_ALIGN
-#define IA64_EFI_MIN_STACK_BYTES   0x0000000000020000ULL
-#define IA64_EFI_MIN_BACKING_BYTES 0x0000000000004000ULL
-/*
- * 8 KiB reserved "SAL boot-structure" anchor at 128 MB (FW_LOW_ANCHOR_BASE).
- * XP-era kernels (2002/2462/2600) place their Phase-0 allocations and the
- * PFN database in the largest free descriptor below 256 MB; with low RAM one
- * unbroken run from the kernel image to the RAM top that descriptor starts
- * right behind the kernel, inside the loader's 16-80 MB TR window, and
- * MiInitMachineDependent then VHPT-faults writing the KSEG0 PTEs for it
- * (bugcheck 0x50, measured on installed XP 2600 UP/SMP and the XP 2002
- * installer).  A non-free page at 128 MB makes the descriptor above it the
- * largest low one again, exactly as the old [126 MB, 128 MB) CPU-assist
- * region did, while leaving [64 MB, 128 MB) free for Server 2003 SP1's 64 MB
- * kernel large page.  Below a 130 MB machine it falls back to the historical
- * 80 MB line.  Runtime images load above the anchor.
- *
- * The anchor and the Server 2003 loaders are mutually exclusive: the SP1
- * loader (setupldr/ia64ldr 5.2.3790.1830+) maps the kernel with a 64 MB large
- * page at [64 MB, 128 MB) and its heap with another at [128 MB, 192 MB), and
- * it derives the heap base from the first free descriptor at or above 128 MB
- * - with the anchor there it silently takes 0x8002000, maps it with a 64 MB
- * identity TR and every KSEG0 address is then off by one page (bugcheck 0xD1
- * on SharedUserData, measured).  The XP-era kernels need the anchor (see
- * efi_init_memory_map); the 2003 kernels (RTM measured both ways) do not.  So
- * the firmware's PE loader drops the anchor when the EFI application it is
- * about to start carries a VS_FIXEDFILEINFO file version 5.2.3790.0 (Server
- * 2003 RTM, whose rewritten Mm has no such descriptor-reset path and which
- * was measured fine without the anchor) or later
- * (pe_image_wants_contiguous_low_ram); 5.1.x loaders (XP, 2462) keep it.
- */
-#define FW_LOW_ANCHOR_BASE       0x0000000008000000ULL
-#define FW_LOW_ANCHOR_SIZE       0x0000000000002000ULL
-#define FW_LOW_RUNTIME_IMAGE_BASE 0x0000000008010000ULL
-/*
- * Low (sub-aperture) DRAM ends at the PCI/MMIO aperture: it runs contiguously
- * from 0 to here, matching real 460GX, and any RAM beyond it is remapped above
- * 4 GiB.  There is no sub-4 GiB DRAM island above the aperture.
- */
-#define FW_LOW_RAM_LIMIT  IA64_PCI_MMIO_BASE
-#define FW_HIGH_RAM_AFTER_PCI_BASE (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE)
-/* Shared with the machine model via hw/ia64/ia64_vpc_abi.h. */
-#define FW_LOCAL_SAPIC_BASE IA64_LOCAL_SAPIC_BASE
-#define FW_LOCAL_SAPIC_SIZE IA64_LOCAL_SAPIC_SIZE
-#define FW_FIRMWARE_ADDRESS_SPACE_BASE IA64_FW_ADDRESS_SPACE_BASE
-#define FW_FIRMWARE_ADDRESS_SPACE_SIZE IA64_FW_ADDRESS_SPACE_SIZE
-#define FW_FIRMWARE_ADDRESS_SPACE_END IA64_FW_ADDRESS_SPACE_END
-#define FW_RTC_BASE IA64_RTC_BASE
-#define FW_RTC_SIZE IA64_RTC_SIZE
-#define FW_WATCHDOG_BASE IA64_WATCHDOG_BASE
-#define FW_WATCHDOG_SIZE IA64_WATCHDOG_SIZE
-#define FW_WATCHDOG_TIMEOUT_OFFSET IA64_WATCHDOG_TIMEOUT_OFFSET
-#define FW_WATCHDOG_CODE_OFFSET    IA64_WATCHDOG_CODE_OFFSET
-#define FW_NVRAM_BASE IA64_NVRAM_BASE
-#define FW_NVRAM_SIZE IA64_NVRAM_SIZE
-#define FW_NVRAM_RTC_OFFSET 0x000000000000f000ULL
-#define FW_NVRAM_COMMIT_OFFSET IA64_NVRAM_COMMIT_OFFSET
-#define FW_NVRAM_COMMIT_MAGIC IA64_NVRAM_COMMIT_MAGIC
-#define FW_HIGH_RAM_RANGE_MAX 3U
-#define FW_MEMORY_AFFINITY_MAX (1U + FW_HIGH_RAM_RANGE_MAX)
-#define FW_AP_STACK_SIZE  IA64_FW_CPU_STACK_SIZE
-#define FW_SYSTEM_TABLE_POINTER_ALIGN 0x0000000000400000ULL
-#define FW_SYSTEM_TABLE_POINTER_SIZE  0x0000000000001000ULL
-#define EFI_MEMORY_UC     0x0000000000000001ULL
-#define EFI_MEMORY_WB     0x0000000000000008ULL
-#define EFI_MEMORY_RUNTIME 0x8000000000000000ULL
-#define EFI_MEMORY_DESCRIPTOR_VERSION 1U
-#define EFI_OPTIONAL_PTR  0x0000000000000001ULL
-#define FW_NANOSECONDS_PER_SECOND 1000000000ULL
-#define FW_RTC_RESOLUTION_HZ 1U
-#define FW_TIME_ACCURACY_1E6_PPM 50000000U
+/* Platform memory-map/layout constants live in fw-platform-layout.h. */
 
 #define EFI_VARIABLE_ACCESS_ATTRIBUTES \
     (EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS)
@@ -279,8 +106,7 @@
 #define VGA_IS1_RC                    0x3daU
 #define VGA_MIS_COLOR                 0x01U
 #define VGA_AR_ENABLE_DISPLAY         0x20U
-#define VGA_LEGACY_FB_BASE            0x00000000000a0000ULL
-#define VGA_LEGACY_FB_SIZE            0x00020000ULL
+/* VGA_LEGACY_FB_* live in fw-platform-layout.h. */
 #define VGA_TEXT_FB_BASE              (VGA_LEGACY_FB_BASE + 0x18000ULL)
 #define VBE_DISPI_INDEX_ID            0x0U
 #define VBE_DISPI_INDEX_XRES          0x1U
@@ -296,23 +122,7 @@
 #define VBE_DISPI_LFB_ENABLED         0x40U
 
 /* Shared with the machine model via hw/ia64/ia64_vpc_abi.h. */
-#define PCI_IO_SIZE                   IA64_PCI_IO_SIZE
-#define PCI_IO_SPARSE_SIZE            IA64_PCI_IO_SPARSE_SIZE
-#define LEGACY_IO_BASE                IA64_PCI_IO_BASE
-#define LEGACY_IO_LIMIT               (LEGACY_IO_BASE + PCI_IO_SIZE)
-#define LEGACY_IO_SPARSE_LIMIT        (LEGACY_IO_BASE + PCI_IO_SPARSE_SIZE)
-#define LEGACY_IO_SPARSE_END          (LEGACY_IO_SPARSE_LIMIT - 1)
-/*
- * A zero ACPI translation offset selects IA-64 legacy I/O space zero.  The
- * EFI memory map supplies LEGACY_IO_BASE for that space; publishing the
- * two's-complement negative base creates a separate, invalid Linux I/O space.
- */
-#define PCI_IO_TRANSLATION_OFFSET     0ULL
-#define PCI_MMIO_END \
-    (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE - 1U)
-#define PCI_MMIO_TRANSLATION_OFFSET   0ULL
-#define PCI_CONFIG_ECAM_BASE          IA64_PCI_CONFIG_BASE
-#define PCI_CONFIG_ECAM_SIZE          IA64_PCI_CONFIG_SIZE
+/* PCI I/O / ECAM aliases live in fw-platform-layout.h. */
 #define PCI_IDE_CMD646_ID             0x06461095U
 #define IA64_REGION6_BASE             0xC000000000000000ULL
 #define PS2_CMD_READ_MODE             0x20U
@@ -586,7 +396,7 @@ static BOOLEAN efi_memory_type_is_valid(EFI_MEMORY_TYPE Type)
            type >= EFI_MEMORY_TYPE_OS_RESERVED_MIN;
 }
 
-static UINT64 efi_memory_attribute(EFI_MEMORY_TYPE Type, UINT64 Attribute)
+UINT64 efi_memory_attribute(EFI_MEMORY_TYPE Type, UINT64 Attribute)
 {
     if (Type == EfiRuntimeServicesCode ||
         Type == EfiRuntimeServicesData) {
@@ -865,12 +675,7 @@ struct _EFI_TCG_PROTOCOL {
 
 /* --- EFI Debug Support Table --------------------------------------------- */
 
-typedef struct {
-    UINT64                  Signature;
-    EFI_PHYSICAL_ADDRESS    EfiSystemTableBase;
-    UINT32                  Crc32;
-    UINT32                  Reserved;
-} EFI_SYSTEM_TABLE_POINTER;
+/* EFI_SYSTEM_TABLE_POINTER lives in fw-efi-types.h. */
 
 #define EFI_DEBUG_IMAGE_INFO_UPDATE_IN_PROGRESS 0x01U
 #define EFI_DEBUG_IMAGE_INFO_TABLE_MODIFIED     0x02U
@@ -1684,16 +1489,14 @@ FW_STATIC_ASSERT(__builtin_offsetof(HCDP_UART_DESCRIPTOR, Reserved) == 44,
 #define PLATFORM_TABLE_MAX           16
 #define LOADED_IMAGE_MAX             8
 static EFI_CONFIGURATION_TABLE mConfigTables[PLATFORM_TABLE_MAX];
-static EFI_SYSTEM_TABLE_POINTER *mSystemTablePointer;
-static UINT64                   mSystemTablePointerBase;
-static UINT64                   mBootStackBase;
-static UINT64                   mBootStackTop;
+EFI_SYSTEM_TABLE_POINTER       *mSystemTablePointer;
+UINT64                          mSystemTablePointerBase;
+UINT64                          mBootStackBase;
+UINT64                          mBootStackTop;
 /* Base of the 2 MiB RAM-top CPU-assist region (IA64_FW_CPU_ASSIST_BASE_FOR). */
-static UINT64                   mCpuAssistBase;
+UINT64                          mCpuAssistBase;
 
-static UINT64 fw_low_anchor_base(void);
 /* The anchor is a soft reservation: see efi_release_low_anchor_if_claimed(). */
-static BOOLEAN                  mLowAnchorArmed;
 static EFI_DEBUG_IMAGE_INFO_TABLE_HEADER mDebugImageInfoHeader;
 static EFI_DEBUG_IMAGE_INFO mDebugImageInfoTable[LOADED_IMAGE_MAX + 1U];
 static EFI_DEBUG_IMAGE_INFO_NORMAL mDebugImageInfoNormal[LOADED_IMAGE_MAX + 1U];
@@ -1845,16 +1648,13 @@ static const UINT8 gEfiEventGroupVirtualAddressChangeGuid[16] = {
 };
 
 /* --- Memory map (built at firmware init) ---------------------------------- */
-#define MEMORY_MAP_MAX   128
 
-static EFI_MEMORY_DESCRIPTOR  mMemoryMap[MEMORY_MAP_MAX];
-static UINTN                  mMemoryMapEntries;
 static EFI_MEMORY_DESCRIPTOR  mVirtualAddressMap[MEMORY_MAP_MAX];
 static UINTN                  mVirtualAddressMapEntries;
 static BOOLEAN                mVirtualAddressMapInProgress;
 static BOOLEAN                mVirtualAddressMapApplied;
-static UINT64                 mGuestRamSize = FW_LOW_RAM_LIMIT;
-static UINT64                 mGuestLowRamEnd = FW_LOW_RAM_LIMIT;
+UINT64                        mGuestRamSize = FW_LOW_RAM_LIMIT;
+UINT64                        mGuestLowRamEnd = FW_LOW_RAM_LIMIT;
 static UINTN                  mProcessorCount = 1;
 static UINTN                  mSocketCount = 1;
 static UINTN                  mCoresPerSocket = 1;
@@ -1977,7 +1777,7 @@ static void fw_add_guest_high_ram_range(UINT64 Base, UINT64 Limit,
     *Remaining -= size;
 }
 
-static void fw_init_guest_high_ram_ranges(UINT64 RamSize)
+void fw_init_guest_high_ram_ranges(UINT64 RamSize)
 {
     UINT64 remaining;
     UINTN i;
@@ -2226,7 +2026,7 @@ UINT64 fw_ap_stack_top(UINT64 ProcessorId)
     return fw_boot_stack_top() - ProcessorId * FW_AP_STACK_SIZE;
 }
 
-static UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
+UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
                                            UINT64 BootStackBase,
                                            UINT64 BootStackTop)
 {
@@ -2304,8 +2104,7 @@ UINT8                         mUsbKeyboardPreviousReport[OHCI_USB_KEYBOARD_REPOR
 static CHAR16                 mTextChars[VGA_TEXT_ROWS][VGA_TEXT_COLUMNS];
 static UINT8                  mTextAttrs[VGA_TEXT_ROWS][VGA_TEXT_COLUMNS];
 static BOOLEAN                mTextWrapPending;
-static UINTN                  mMapKey = 1;
-static EFI_PHYSICAL_ADDRESS   mNextPageAddr = 0x01000000ULL;
+EFI_PHYSICAL_ADDRESS          mNextPageAddr = 0x01000000ULL;
 static BOOLEAN                mBootServicesExited;
 static BOOLEAN                mBeforeExitBootServicesSignaled;
 static BOOLEAN                mExitBootServicesEventsSignaled;
@@ -2648,7 +2447,6 @@ static UINT64 pe_loaded_image_allocation_size(UINTN ImageSize,
 static void pe_release_loaded_image_memory(VOID *ImageBase, UINTN ImageSize,
                                            EFI_MEMORY_TYPE CodeType);
 static void pe_discard_loaded_image_result(PE_LOADED_IMAGE_RESULT *Result);
-static BOOLEAN efi_memory_map_has_ia64_descriptor_alignment(void);
 EFI_STATUS bs_handle_protocol(EFI_HANDLE Handle, void *Protocol,
                                VOID **Interface);
 EFI_STATUS bs_locate_handle(UINTN SearchType, void *Protocol,
@@ -2727,8 +2525,6 @@ static BOOLEAN fw_boot_optical_fs_available(void);
 static EFI_STATUS fw_load_image_source_from_device_path(
     BOOLEAN BootPolicy, void *DevicePath, VOID **SourceBuffer,
     UINTN *SourceSize);
-static BOOLEAN efi_mark_memory_range(EFI_MEMORY_TYPE Type, UINT64 Start,
-                                     UINT64 End, UINT64 Attribute);
 static void efi_refresh_table_crc32s(void);
 
 UINT8 table_checksum8(const void *buf, UINTN len)
@@ -6830,7 +6626,7 @@ static BOOLEAN efi_pages_to_size(UINTN Pages, UINT64 *Size)
     return 1;
 }
 
-static BOOLEAN efi_memory_descriptor_requires_ia64_alignment(
+BOOLEAN efi_memory_descriptor_requires_ia64_alignment(
     EFI_MEMORY_TYPE Type, UINT64 Attribute)
 {
     return Type == EfiACPIReclaimMemory ||
@@ -6847,7 +6643,7 @@ static UINT64 efi_memory_type_allocation_granularity(EFI_MEMORY_TYPE Type)
     return EFI_PAGE_SIZE;
 }
 
-static BOOLEAN efi_align_up_u64(UINT64 Value, UINT64 Alignment,
+BOOLEAN efi_align_up_u64(UINT64 Value, UINT64 Alignment,
                                 UINT64 *Aligned)
 {
     UINT64 mask;
@@ -7292,22 +7088,7 @@ static BOOLEAN efi_find_max_pages(UINT64 MaxAddress, UINT64 Size,
     return 0;
 }
 
-static void efi_coalesce_memory_map(void);
 
-/* See FW_LOW_ANCHOR_BASE: give the anchor page back to conventional memory. */
-static void efi_release_low_anchor(void)
-{
-    UINT64 anchor = fw_low_anchor_base();
-
-    if (!mLowAnchorArmed) {
-        return;
-    }
-    if (efi_mark_memory_range(EfiConventionalMemory, anchor,
-                              anchor + FW_LOW_ANCHOR_SIZE, EFI_MEMORY_WB)) {
-        mLowAnchorArmed = 0;
-        efi_coalesce_memory_map();
-    }
-}
 
 EFI_STATUS bs_allocate_pages(EFI_ALLOCATE_TYPE Type, EFI_MEMORY_TYPE MemoryType,
                                      UINTN Pages, EFI_PHYSICAL_ADDRESS *Memory)
@@ -10936,9 +10717,6 @@ static BOOLEAN __attribute__((noinline)) tcg_protocol_selftest(void)
                                          (void *)mTcgProtocolGuid, NULL);
 }
 
-static BOOLEAN efi_memory_map_has_descriptor(EFI_MEMORY_TYPE Type,
-                                             UINT64 Start, UINT64 End,
-                                             UINT64 Attribute);
 
 static void efi_init_system_table_pointer(void)
 {
@@ -11868,314 +11646,9 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
 
 /* --- Initialize EFI tables ------------------------------------------------ */
 
-static void efi_add_memory_range(UINTN *Index, EFI_MEMORY_TYPE Type,
-                                 UINT64 Start, UINT64 End, UINT64 Attribute)
-{
-    EFI_MEMORY_DESCRIPTOR desc;
-    UINTN pos;
-    UINTN i;
+/* Memory-map construction lives in efi_memmap.c. */
 
-    if (End <= Start || *Index >= MEMORY_MAP_MAX) {
-        return;
-    }
-
-    desc.Type = Type;
-    desc.Pad = 0;
-    desc.PhysicalStart = Start;
-    desc.VirtualStart = 0;
-    desc.NumberOfPages = (End - Start) / 4096U;
-    desc.Attribute = Attribute;
-
-    pos = *Index;
-    for (i = 0; i < *Index; i++) {
-        if (Start < mMemoryMap[i].PhysicalStart) {
-            pos = i;
-            break;
-        }
-    }
-    for (i = *Index; i > pos; i--) {
-        mMemoryMap[i] = mMemoryMap[i - 1U];
-    }
-    mMemoryMap[pos] = desc;
-    (*Index)++;
-}
-
-static void efi_insert_memory_descriptor(UINTN Index,
-                                         EFI_MEMORY_DESCRIPTOR Descriptor)
-{
-    UINTN i;
-
-    if (mMemoryMapEntries >= MEMORY_MAP_MAX || Index > mMemoryMapEntries) {
-        return;
-    }
-
-    for (i = mMemoryMapEntries; i > Index; i--) {
-        mMemoryMap[i] = mMemoryMap[i - 1U];
-    }
-    mMemoryMap[Index] = Descriptor;
-    mMemoryMapEntries++;
-}
-
-static BOOLEAN efi_preserve_memory_map_boundary(UINT64 Boundary)
-{
-    return Boundary == FW_LOW_IMAGE_BASE ||
-           Boundary == FW_LOW_LEGACY_IMAGE_BASE ||
-           Boundary == FW_LOW_IMAGE_ALIGNED_END ||
-           Boundary == FW_LOW_IMAGE_END;
-}
-
-static BOOLEAN efi_memory_descriptors_can_merge(EFI_MEMORY_DESCRIPTOR *A,
-                                                EFI_MEMORY_DESCRIPTOR *B)
-{
-    UINT64 a_size;
-
-    if (A->Type != B->Type || A->Attribute != B->Attribute) {
-        return 0;
-    }
-
-    a_size = A->NumberOfPages << 12;
-    if (A->PhysicalStart + a_size != B->PhysicalStart) {
-        return 0;
-    }
-    if (efi_preserve_memory_map_boundary(B->PhysicalStart)) {
-        return 0;
-    }
-
-    if (A->VirtualStart == 0 && B->VirtualStart == 0) {
-        return 1;
-    }
-    return A->VirtualStart + a_size == B->VirtualStart;
-}
-
-static void efi_coalesce_memory_map(void)
-{
-    UINTN i = 0;
-
-    while (i + 1U < mMemoryMapEntries) {
-        EFI_MEMORY_DESCRIPTOR *desc = &mMemoryMap[i];
-        EFI_MEMORY_DESCRIPTOR *next = &mMemoryMap[i + 1U];
-
-        if (efi_memory_descriptors_can_merge(desc, next)) {
-            UINTN j;
-
-            desc->NumberOfPages += next->NumberOfPages;
-            for (j = i + 1U; j + 1U < mMemoryMapEntries; j++) {
-                mMemoryMap[j] = mMemoryMap[j + 1U];
-            }
-            mMemoryMapEntries--;
-            continue;
-        }
-
-        i++;
-    }
-}
-
-static BOOLEAN efi_mark_memory_range(EFI_MEMORY_TYPE Type, UINT64 Start,
-                                     UINT64 End, UINT64 Attribute)
-{
-    EFI_MEMORY_DESCRIPTOR saved_map[MEMORY_MAP_MAX];
-    UINTN saved_entries;
-    UINTN saved_key;
-    UINT64 current = Start & ~0xfffULL;
-    UINT64 aligned_end;
-    BOOLEAN changed = 0;
-
-    if (efi_memory_descriptor_requires_ia64_alignment(Type, Attribute) &&
-        ((Start % IA64_EFI_MEMORY_ALIGN) != 0 ||
-         (End % IA64_EFI_MEMORY_ALIGN) != 0)) {
-        return 0;
-    }
-    if (!efi_align_up_u64(End, EFI_PAGE_SIZE, &aligned_end) ||
-        aligned_end <= current) {
-        return 0;
-    }
-
-    saved_entries = mMemoryMapEntries;
-    saved_key = mMapKey;
-    fw_copy_mem(saved_map, mMemoryMap,
-                saved_entries * sizeof(mMemoryMap[0]));
-
-    while (current < aligned_end) {
-        BOOLEAN advanced = 0;
-        UINTN i;
-
-        for (i = 0; i < mMemoryMapEntries; i++) {
-            EFI_MEMORY_DESCRIPTOR *desc = &mMemoryMap[i];
-            EFI_MEMORY_TYPE type = Type;
-            UINT64 desc_start = desc->PhysicalStart;
-            UINT64 desc_end = desc_start + (desc->NumberOfPages << 12);
-            UINT64 mark_end = aligned_end < desc_end ? aligned_end : desc_end;
-            EFI_MEMORY_DESCRIPTOR marked = *desc;
-            EFI_MEMORY_DESCRIPTOR after = *desc;
-            BOOLEAN has_before;
-            BOOLEAN has_after;
-
-            /* Every byte in the requested range must already be described. */
-            if (current < desc_start || current >= desc_end) {
-                continue;
-            }
-
-            if (desc->Type == type && desc->Attribute == Attribute) {
-                current = mark_end;
-                advanced = 1;
-                break;
-            }
-
-            has_before = current > desc_start;
-            has_after = mark_end < desc_end;
-
-            marked.Type = type;
-            marked.PhysicalStart = current;
-            marked.VirtualStart = 0;
-            marked.NumberOfPages = (mark_end - current) >> 12;
-            marked.Attribute = Attribute;
-
-            after.PhysicalStart = mark_end;
-            after.VirtualStart = 0;
-            after.NumberOfPages = (desc_end - mark_end) >> 12;
-
-            if (has_before) {
-                desc->NumberOfPages = (current - desc_start) >> 12;
-                if (has_after) {
-                    if (mMemoryMapEntries + 2U > MEMORY_MAP_MAX) {
-                        goto rollback;
-                    }
-                    efi_insert_memory_descriptor(i + 1U, marked);
-                    efi_insert_memory_descriptor(i + 2U, after);
-                } else {
-                    if (mMemoryMapEntries + 1U > MEMORY_MAP_MAX) {
-                        goto rollback;
-                    }
-                    efi_insert_memory_descriptor(i + 1U, marked);
-                }
-            } else {
-                *desc = marked;
-                if (has_after) {
-                    if (mMemoryMapEntries + 1U > MEMORY_MAP_MAX) {
-                        goto rollback;
-                    }
-                    efi_insert_memory_descriptor(i + 1U, after);
-                }
-            }
-            changed = 1;
-            current = mark_end;
-            advanced = 1;
-            break;
-        }
-
-        if (!advanced) {
-            goto rollback;
-        }
-    }
-
-    if (changed) {
-        efi_coalesce_memory_map();
-        mMapKey++;
-    }
-    return 1;
-
-rollback:
-    fw_copy_mem(mMemoryMap, saved_map,
-                saved_entries * sizeof(mMemoryMap[0]));
-    mMemoryMapEntries = saved_entries;
-    mMapKey = saved_key;
-    return 0;
-}
-
-static BOOLEAN efi_memory_map_has_descriptor(EFI_MEMORY_TYPE Type,
-                                             UINT64 Start, UINT64 End,
-                                             UINT64 Attribute)
-{
-    UINTN i;
-
-    for (i = 0; i < mMemoryMapEntries; i++) {
-        EFI_MEMORY_DESCRIPTOR *desc = &mMemoryMap[i];
-        UINT64 desc_end = desc->PhysicalStart + (desc->NumberOfPages << 12);
-
-        if (desc->Type == Type &&
-            desc->PhysicalStart == Start &&
-            desc_end == End &&
-            desc->Attribute == Attribute) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static BOOLEAN efi_memory_map_is_sorted(void)
-{
-    UINTN i;
-
-    for (i = 1; i < mMemoryMapEntries; i++) {
-        if (mMemoryMap[i - 1U].PhysicalStart > mMemoryMap[i].PhysicalStart) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static BOOLEAN efi_memory_map_has_ia64_descriptor_alignment(void)
-{
-    UINTN i;
-
-    for (i = 0; i < mMemoryMapEntries; i++) {
-        EFI_MEMORY_DESCRIPTOR *desc = &mMemoryMap[i];
-        UINT64 size = desc->NumberOfPages << 12;
-
-        if (!efi_memory_descriptor_requires_ia64_alignment(
-                desc->Type, desc->Attribute)) {
-            continue;
-        }
-        if ((desc->PhysicalStart & (IA64_EFI_MEMORY_ALIGN - 1U)) != 0 ||
-            (size & (IA64_EFI_MEMORY_ALIGN - 1U)) != 0) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static BOOLEAN efi_memory_map_covers_range(EFI_MEMORY_TYPE Type,
-                                           UINT64 Start, UINT64 End,
-                                           UINT64 Attribute)
-{
-    UINTN i;
-
-    for (i = 0; i < mMemoryMapEntries; i++) {
-        EFI_MEMORY_DESCRIPTOR *desc = &mMemoryMap[i];
-        UINT64 desc_end = desc->PhysicalStart + (desc->NumberOfPages << 12);
-
-        if (desc->Type == Type &&
-            desc->PhysicalStart <= Start &&
-            desc_end >= End &&
-            desc->Attribute == Attribute) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
-{
-    UINT64 pointer_start = mSystemTablePointerBase;
-    UINT64 pointer_end = pointer_start + FW_SYSTEM_TABLE_POINTER_SIZE;
-
-    if (!efi_memory_map_has_descriptor(
-            EfiRuntimeServicesData,
-            mCpuAssistBase, mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE,
-            EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
-        !efi_memory_map_covers_range(
-            EfiRuntimeServicesData, mBootStackBase, mBootStackTop,
-            EFI_MEMORY_WB | EFI_MEMORY_RUNTIME)) {
-        return 0;
-    }
-
-    return pointer_start == 0 ||
-           efi_memory_map_has_descriptor(EfiReservedMemoryType,
-                                         pointer_start, pointer_end,
-                                         EFI_MEMORY_WB);
-}
-
-static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
+BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
 {
     static EFI_MEMORY_DESCRIPTOR saved_map[MEMORY_MAP_MAX];
     static EFI_MEMORY_DESCRIPTOR probe_map[MEMORY_MAP_MAX];
@@ -12391,10 +11864,10 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         ok = 0;
         goto out;
     }
-    for (i = 0; i < mGuestHighRamCount; i++) {
+    for (i = 0; i < fw_guest_high_ram_count(); i++) {
         if (!efi_memory_map_has_descriptor(EfiConventionalMemory,
-                                           mGuestHighRam[i].Base,
-                                           mGuestHighRam[i].End,
+                                           fw_guest_high_ram_base(i),
+                                           fw_guest_high_ram_end(i),
                                            EFI_MEMORY_WB)) {
             ok = 0;
             goto out;
@@ -12822,303 +12295,6 @@ out:
     return ok;
 }
 
-static void efi_add_conventional_with_system_pointer(UINTN *Index,
-                                                     UINT64 Start,
-                                                     UINT64 End)
-{
-    UINT64 pointer_start = mSystemTablePointerBase;
-    UINT64 pointer_end = pointer_start + FW_SYSTEM_TABLE_POINTER_SIZE;
-
-    if (Start >= End) {
-        return;
-    }
-    if (pointer_start != 0 && pointer_start >= Start &&
-        pointer_end <= End) {
-        efi_add_memory_range(Index, EfiConventionalMemory,
-                             Start, pointer_start, EFI_MEMORY_WB);
-        efi_add_memory_range(Index, EfiReservedMemoryType,
-                             pointer_start, pointer_end, EFI_MEMORY_WB);
-        efi_add_memory_range(Index, EfiConventionalMemory,
-                             pointer_end, End, EFI_MEMORY_WB);
-    } else {
-        efi_add_memory_range(Index, EfiConventionalMemory,
-                             Start, End, EFI_MEMORY_WB);
-    }
-}
-
-/* See FW_LOW_ANCHOR_BASE: 128 MB when it lies below the CPU-assist region. */
-static UINT64 fw_low_anchor_base(void)
-{
-    return mCpuAssistBase >= FW_LOW_ANCHOR_BASE + FW_LOW_ANCHOR_SIZE ?
-           FW_LOW_ANCHOR_BASE : FW_LOW_IMAGE_END;
-}
-
-static void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 StartRam,
-                                       UINT64 LowRamEnd)
-{
-    /*
-     * Real IA-64 firmware carves its SAL/boot scratch from the top of
-     * installed RAM and leaves the DRAM below it contiguous (460GX SDV and
-     * E8870 SR870BH2 alike).  The CPU-assist region - SAL re-entry slots,
-     * debug contexts/stacks, initial RSE backing stores and the boot memory
-     * stacks that SAL reuses after ExitBootServices() - is published as one
-     * runtime-data descriptor ending exactly at the low-RAM end.
-     */
-    efi_add_conventional_with_system_pointer(Index, StartRam,
-                                             mCpuAssistBase);
-    efi_add_memory_range(
-        Index, EfiRuntimeServicesData,
-        mCpuAssistBase, mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE,
-        efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
-    /* Any sub-alignment tail of installed RAM stays ordinary memory. */
-    efi_add_conventional_with_system_pointer(
-        Index, mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE, LowRamEnd);
-}
-
-static void efi_init_memory_map(void)
-{
-    UINTN firmware_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
-    UINTN runtime_code_start = (UINTN)&__runtime_code_start;
-    /*
-     * Describe PAL code as a whole 8 KB OS page.  The Windows IA-64 loader
-     * stores its descriptors in 4 KB units and, in InsertDescriptor
-     * (WXPSP1 base/boot/efi/sumain.c), sets MustCoellesce whenever an entry's
-     * 4 KB base is odd or the PREVIOUS entry's 4 KB page count is odd -- and
-     * for MemoryFirmwarePermanent it then resolves that by "stealing" a page
-     * from the prior (free) entry.  A 4 KB PAL descriptor makes the run odd and
-     * perturbs every boundary after it.
-     */
-    UINTN pal_start = (UINTN)pal_proc_entry & ~0x1FFFULL;
-    UINTN pal_end = pal_start + 0x2000U;
-    UINT64 ram_size = fw_guest_ram_size();
-    UINT64 low_ram_end = fw_guest_low_ram_end();
-    UINTN index = 0;
-    UINTN i;
-
-    mGuestRamSize = ram_size;
-    mGuestLowRamEnd = low_ram_end;
-    fw_init_guest_high_ram_ranges(ram_size);
-    mSystemTablePointerBase =
-        fw_system_table_pointer_base(low_ram_end, mBootStackBase,
-                                     mBootStackTop);
-    mSystemTablePointer =
-        (EFI_SYSTEM_TABLE_POINTER *)(UINTN)mSystemTablePointerBase;
-
-    if (mNextPageAddr < firmware_end) {
-        mNextPageAddr = firmware_end;
-    }
-
-    /*
-     * Legacy low memory, with the VGA aperture decoded as UC MMIO.
-     *
-     * The C0000h-FFFFFFh option-ROM/BIOS segment must be UC as well: Windows'
-     * videoprt maps the video BIOS shadow at C0000h uncached
-     * (VideoPortGetDeviceBase), and the IA-64 kernel refuses to create a UC
-     * mapping over memory the EFI map declares WB (attribute aliasing is
-     * architecturally forbidden, SDM vol 2).  With this range declared WB,
-     * that mapping returns NULL and the inbox ATI miniport fails its
-     * HwFindAdapter with event 0xC1010002 UniqueId 25 -> Code 10.
-     *
-     * NOTE: this range and the 0xA0000 VGA aperture now share a type and
-     * attribute, so efi_add_memory_range() coalesces them into a single
-     * descriptor covering 0xA0000-0xFFFFF (verified by dumping the map from
-     * the firmware).  That changes the sub-1MB descriptor count, which the
-     * Whistler 2462 regression showed the Windows loader is sensitive to -
-     * revalidate build 2462 when touching this.
-     *
-     * This alone does NOT make VideoPortGetDeviceBase(0xC0000) succeed:
-     * measured, the descriptor is correct and MmMapIoSpace still returns
-     * NULL, so a further cause remains open.
-     */
-    efi_add_memory_range(&index, EfiReservedMemoryType, 0x00000000,
-                         VGA_LEGACY_FB_BASE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiMemoryMappedIO, VGA_LEGACY_FB_BASE,
-                         VGA_LEGACY_FB_BASE + VGA_LEGACY_FB_SIZE,
-                         EFI_MEMORY_UC);
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         VGA_LEGACY_FB_BASE + VGA_LEGACY_FB_SIZE,
-                         0x00100000, EFI_MEMORY_UC);
-
-    /*
-     * Keep the resident firmware image out of loader allocations.  Linux
-     * discovers the PAL entry through an EfiPalCode memory descriptor and
-     * calls it through a region 7 alias, so expose the actual PAL trampoline
-     * page separately.  Keep the one-time entry path as boot-services code,
-     * then expose the aligned runtime text and data ranges so OSes do not
-     * reclaim callable firmware services after ExitBootServices().
-     */
-    if (pal_start >= 0x00100000 && pal_end <= firmware_end) {
-        efi_add_memory_range(&index, EfiBootServicesCode, 0x00100000,
-                             pal_start, EFI_MEMORY_WB);
-        efi_add_memory_range(&index, EfiPalCode, pal_start, pal_end,
-                             EFI_MEMORY_WB);
-        efi_add_memory_range(&index, EfiBootServicesCode, pal_end,
-                             runtime_code_start, EFI_MEMORY_WB);
-        /*
-         * Keep the linked runtime image in one EFI descriptor.  IA-64 SAL
-         * enters with a GP supplied by the SAL system table, and the linked
-         * code uses GP-relative references into rodata/data.  A loader may
-         * assign unrelated virtual bases to separate runtime descriptors,
-         * which would break those references.
-         */
-        efi_add_memory_range(&index, EfiRuntimeServicesCode,
-                             runtime_code_start, firmware_end,
-                             efi_memory_attribute(EfiRuntimeServicesCode,
-                                                  EFI_MEMORY_WB));
-    } else {
-        efi_add_memory_range(&index, EfiRuntimeServicesCode, 0x00100000,
-                             firmware_end,
-                             efi_memory_attribute(EfiRuntimeServicesCode,
-                                                  EFI_MEMORY_WB));
-    }
-
-    /*
-     * IA-64 loaders commonly build page lists from EFI descriptors before
-     * reserving image pages.  Expose the natural 32 MiB/64 MiB low-image
-     * boundaries while also keeping the legacy 48 MiB/80 MiB staging bounds
-     * visible as descriptor boundaries.
-     */
-    efi_add_memory_range(&index, EfiConventionalMemory, firmware_end,
-                         FW_LOW_RECLAIM_BASE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiACPIMemoryNVS, ACPI_RECLAIM_BASE,
-                         ACPI_RECLAIM_TABLE_BASE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiACPIReclaimMemory,
-                         ACPI_RECLAIM_TABLE_BASE, ACPI_RECLAIM_END,
-                         EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiConventionalMemory, ACPI_RECLAIM_END,
-                         FW_LOW_FREE_BASE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_FREE_BASE,
-                         FW_LOADER_HEAP_SPLIT_BASE,
-                         EFI_MEMORY_WB);
-    /*
-     * The non-free split page sits just below 32 MB, and [32MB,80MB) is left
-     * as a single free run.
-     *
-     * blmemory.c:BlMemoryInitialize (WXPSP1 base/boot/lib/blmemory.c:341-370)
-     * takes the FIRST free descriptor whose BasePage lies in [16MB,48MB) and
-     * carves heap+stack from that descriptor's END, and only 16-80 MB is
-     * TR-mapped.  Bounding the [17MB,..) run at 32 MB keeps that carve in
-     * range, which is the job the 48 MB page was doing.
-     *
-     * Leaving [32MB,80MB) unsplit then gives the loader the "existing (much
-     * larger) descriptor" its MempAllocDescriptor(_48MB,_80MB) systemblock
-     * split expects (efi/ia64/memory.c:236-247); pre-splitting it at 48 MB
-     * defeats that split, and the Whistler 2462 loader then loses the kernel
-     * image so the kernel allocates page tables over itself.
-     */
-    efi_add_memory_range(&index, EfiReservedMemoryType,
-                         FW_LOADER_HEAP_SPLIT_BASE,
-                         FW_LOW_IMAGE_BASE, EFI_MEMORY_WB);
-    /*
-     * [32 MB, CPU-assist base) is all conventional RAM, as on real 460GX /
-     * E8870 platforms where low DRAM is contiguous up to the firmware's
-     * RAM-top scratch.  The historical reserved guard PAGE at the 80 MB
-     * staging line is gone (the setup loader's heap carve is bounded by the
-     * 32 MB split page), but the 80 MB DESCRIPTOR boundary stays: the XP-era
-     * sumain.c:760 (WXPSP1 base/boot/efi/sumain.c) turns the sub-80 MB part
-     * of any conventional descriptor that straddles 80 MB into
-     * MemoryFirmwareTemporary, after which the kernel carve finds no free
-     * block ("ntoskrnl.exe is missing or corrupt" on an installed XP 2002 -
-     * measured).  Two adjacent free descriptors cost the Server 2003 SP1
-     * loader nothing: its ARC list merges adjacent MemoryFree runs, so the
-     * 64 MB-aligned 64 MB large page it maps the kernel with at
-     * [64 MB, 128 MB) still fits (previously ENOMEM, load error 16).
-     * efi_preserve_memory_map_boundary() keeps the two from coalescing.
-     */
-    efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_BASE,
-                         FW_LOW_IMAGE_END, EFI_MEMORY_WB);
-    {
-        UINT64 anchor = fw_low_anchor_base();
-
-        efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_END,
-                             anchor, EFI_MEMORY_WB);
-        efi_add_memory_range(&index, EfiReservedMemoryType, anchor,
-                             anchor + FW_LOW_ANCHOR_SIZE, EFI_MEMORY_WB);
-        mLowAnchorArmed = 1;
-        efi_add_boot_stack_low_ram(&index, anchor + FW_LOW_ANCHOR_SIZE,
-                                   low_ram_end);
-    }
-
-    /*
-     * XP RTM (build 2600) SMP bring-up requires the 2 GiB firmware scratch
-     * page to appear as a reserved descriptor: without it the two processors
-     * deadlock spinning during kernel init (measured -- the IOSAPIC relocation
-     * is harmless, this descriptor is what XP needs).  The page only fits as a
-     * reserved hole while it lies above installed low RAM; once low DRAM runs
-     * past 2 GiB (contiguous to the aperture, as real 460GX provides) the page
-     * is ordinary WB DRAM and must not be carved out, so gate on the low-RAM
-     * end.  Guests that run past 2 GiB here are the ones that specifically
-     * need the unbroken contiguous DRAM (Linux), so this costs them nothing.
-     */
-    if (low_ram_end <= 0x80000000ULL) {
-        efi_add_memory_range(&index, EfiReservedMemoryType, 0x80000000,
-                             0x80100000, EFI_MEMORY_WB);
-    }
-
-    efi_add_memory_range(&index, EfiMemoryMappedIO, IOSAPIC_BASE,
-                         IOSAPIC_BASE + IOSAPIC_SIZE, EFI_MEMORY_UC);
-
-    for (i = 0; i < mGuestHighRamCount; i++) {
-        efi_add_memory_range(&index, EfiConventionalMemory,
-                             mGuestHighRam[i].Base, mGuestHighRam[i].End,
-                             EFI_MEMORY_WB);
-    }
-
-    efi_add_memory_range(&index, EfiMemoryMappedIO, FW_LOCAL_SAPIC_BASE,
-                         FW_LOCAL_SAPIC_BASE + FW_LOCAL_SAPIC_SIZE,
-                         EFI_MEMORY_UC);
-
-    /* IA-64 defines a single memory-mapped I/O port translation window. */
-    efi_add_memory_range(&index, EfiMemoryMappedIOPortSpace, LEGACY_IO_BASE,
-                         LEGACY_IO_SPARSE_LIMIT,
-                         EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
-
-    /* Firmware SAL uses this ECAM aperture for runtime PCI config services. */
-    efi_add_memory_range(&index, EfiMemoryMappedIO, PCI_CONFIG_ECAM_BASE,
-                         PCI_CONFIG_ECAM_BASE + PCI_CONFIG_ECAM_SIZE,
-                         EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
-
-    /* PCI host-bridge memory window, including VGA/AHCI/OHCI BAR space. */
-    efi_add_memory_range(&index, EfiMemoryMappedIO, IA64_PCI_MMIO_BASE,
-                         IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE,
-                         EFI_MEMORY_UC);
-
-    /*
-     * The 460GX chipset-specific area [4G-32M, 4G-20M) carries the GART SRAM
-     * programming window at 0xFE200000, which the SSDM (248704-001 sec 7.1.2)
-     * requires the processor to map UC.  We deliberately do NOT add an EFI
-     * memory-map descriptor for it: Linux's i460-agp reaches the GATT through
-     * ioremap(), which maps the physical window UC via the region-6 identity
-     * area on its own, independent of the EFI map -- and adding a descriptor
-     * here perturbs the descriptor layout the XP build-2600 SMP loader is
-     * exquisitely sensitive to (see plans/status.md 2.2 and the
-     * platform-map-460gx-realign notes), deadlocking that guest at kernel
-     * bring-up.  The GART window is left an undescribed chipset gap, exactly
-     * as it was before AGP support.
-     */
-
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         FW_FIRMWARE_ADDRESS_SPACE_BASE,
-                         FW_RTC_BASE, EFI_MEMORY_UC);
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         FW_RTC_BASE, FW_RTC_BASE + FW_RTC_SIZE,
-                         EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         FW_RTC_BASE + FW_RTC_SIZE,
-                         FW_NVRAM_BASE, EFI_MEMORY_UC);
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         FW_NVRAM_BASE, FW_NVRAM_BASE + FW_NVRAM_SIZE,
-                         EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         FW_NVRAM_BASE + FW_NVRAM_SIZE,
-                         FW_FIRMWARE_ADDRESS_SPACE_END, EFI_MEMORY_UC);
-
-    /* Reserve both platform UART pages described by HCDP and DBGP. */
-    efi_add_memory_range(&index, EfiMemoryMappedIO, IA64_UART_BASE,
-                         IA64_UART_BASE + IA64_UART_MMIO_SIZE, EFI_MEMORY_UC);
-
-    mMemoryMapEntries = index;
-}
 
 static void efi_init_boot_services(void)
 {

@@ -29,4 +29,11 @@ struct _EFI_UNICODE_COLLATION_PROTOCOL {
     CHAR8 *SupportedLanguages;
 };
 
+typedef struct {
+    UINT64                  Signature;
+    EFI_PHYSICAL_ADDRESS    EfiSystemTableBase;
+    UINT32                  Crc32;
+    UINT32                  Reserved;
+} EFI_SYSTEM_TABLE_POINTER;
+
 #endif /* IA64_FIRMWARE_FW_EFI_TYPES_H */
