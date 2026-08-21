@@ -3,228 +3,93 @@
 Experimental QEMU full-system emulation target for IA-64/Itanium guests. Forked from [syunnPC/qemu-system-ia64](https://github.com/syunnPC/qemu-system-ia64
 )
 
-**DISCLAMER: This codebase is written using AI LLMs.**
+**DISCLAIMER: This fork's ia64 implementation is mostly written using AI LLMs.** Testing and validation is done both automated and by hand. If you encounter any issues or bugs, feel free to report them: https://github.com/makuhlmann/qemu-system-ia64/issues
 
-## Emulated Platform
+## Quick-Start
 
-The default machine is `ia64-vpc`.
-It models an IA-64 virtual PC profile intended for firmware, boot loader, and operating-system bring-up:
+Ready-to-run builds of this emulator are available under Releases: https://github.com/makuhlmann/qemu-system-ia64/releases
 
-- Madison (Itanium 2) CPU model by default, with Merced and Montecito selection available.
-  All models use TCG translation and provide PAL/SAL helpers, the register stack engine, TLB/VHPT paths, and architectural floating-point state.
-- 1 vCPU by default, configurable from 1 to 8 vCPUs; MTTCG is supported with `-accel tcg,thread=multi`
-- 2 GiB default RAM
-- project-owned IA-64 EFI firmware built from source under `roms/ia64-firmware/`
-- EFI boot/runtime services, an interactive pre-boot shell, PE/COFF and EBC image loading, decompression, filesystems, graphics, storage, USB/input, and debug-support protocols
-- local SAPIC, I/O SAPIC, ACPI platform tables, RTC, watchdog, persistent NVRAM, and serial/debug ports
-- PCI root bus with LSI53C895A SCSI boot storage, ICH9 AHCI, Intel gigabit Ethernet, OHCI/UHCI USB, and optional CMD646 IDE/ATAPI
-- ATI-compatible PCI graphics by default, with standard VGA available as an alternative
-- PS/2 input by default, or an automatically attached USB keyboard and absolute USB tablet when `i8042=off` is selected
+Automatic experimental builds of the [develop branch](https://github.com/makuhlmann/qemu-system-ia64/tree/develop) are available under Actions: https://github.com/makuhlmann/qemu-system-ia64/actions
 
-### Machine options
+To launch qemu, run:
 
-Beyond the standard QEMU machine properties, `-machine ia64-vpc,<option>=<value>` accepts:
+`qemu-system-ia64 -machine ia64-vpc`
 
-- `ahci=on|off` enables or disables the AHCI SATA controller.
-  Use `ahci=off` for guests that have no driver for it, such as Windows XP.
-- `i8042=on|off` enables or disables the PS/2 controller.
-  With `i8042=off` the machine attaches a USB keyboard and an absolute USB tablet instead.
-- `nvram=<path>|auto|none` selects the EFI variable store.
-- `firmware-console=serial|vga` selects the HCDP primary console the firmware advertises.
-- `firmware-ide-dma=on|off` enables or disables firmware IDE bus-master DMA.
-- `alat=zero|full` selects the ALAT model.
+Notice that not much will happen when you run it this way. You will need to attach some disks to boot from.
 
-## Guest support
+### Disks and ISOs
 
-These guest operating systems have been tested and are confirmed working:
+To create a new empty hard drive image, use the qemu-img command (on Linux available via the qemu-utils package):
 
-| Guest | CPU model | State |
-|---|---|---|
-| Windows XP 64-bit Edition, RTM and SP1 | `merced` | Installs and runs, single- and multi-processor |
-| Windows XP 64-bit Edition, Version 2003 | `merced` or `madison` | Installs and runs, single- and multi-processor |
-| Windows Server 2003, RTM (build 3790) | `merced` or `madison` | Installs and runs, single- and multi-processor |
-| Windows Whistler Server beta 2 (build 2462) | `merced` | Installs and runs, single- and multi-processor |
+`qemu-img create -f qcow2 hdd.img 16G`
 
-Multiprocessor guests need `-smp N` together with `-accel tcg,thread=multi`.
+To attach the drive, append: `-drive file=hdd.img,format=qcow2`
 
-More operating systems (including Linux and more) will be tested and supported in the future.
+To attach an ISO image, append: `-drive file=disc.iso,media=cdrom,format=raw,readonly=on`
 
+#### Disk controllers
 
-## Known issues
+Most operating systems work well with the default LSI53C895A SCSI controller. However some need alternatives such as an CMD646 IDE or ICH9 AHCI (SATA) controller. They can be enabled via a modified machine flag:
 
-- The ATI Rage 128 Pro may report Code 10 or 12 in Device Manager on XP-family guests, although the display itself works.
-- `Communications Port (COM1)` in Windows may be flagged for a memory claim that the PnP arbiter cannot satisfy.
-- When using USB for HID, the keyboard may sometimes stop working in Windows. Removing it and searching for new devices in device manager fixes this.
-- Windows XP does not use more than 2 CPUs or Cores - this is a hard limitation in Windows with no simple workaround.
+IDE: `-machine ia64-vpc,ide=on`
 
-## Run
+AHCI: `-machine ia64-vpc,ahci=on`
 
-Pre-compiled binaries are available via the GitHub Actions of this repository: https://github.com/makuhlmann/qemu-system-ia64/actions/workflows/ci.yml
+Note: Disks still attach to SCSI by default. You need to set the interface accordingly by adding `,if=ide` to the -drive parameter. Example: `-drive file=hdd.img,format=qcow2,if=ide`. And yes: `ide` is the correct value for AHCI as well.
 
-```sh
-./build/qemu-system-ia64 \
-  -machine ia64-vpc \
-  -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
-  -drive file=/path/to/guest-media.iso,media=cdrom,format=raw,readonly=on \
-  -display gtk
-```
+#### NVRAM
 
-If QEMU does not launch due to the error `failed to find romfile "vgabios-ati.bin"`, try setting the path to the folder containing the roms with `-L <path>`, i.e. `-L share` for the Windows artifacts build.
+On Itanium systems, the EFI stores boot parameters in an NVRAM storage, separate from the disk image. Normally this will create one single file in the bios rom directory, however when installing multiple operating systems, this may be problematic when they overwrite each other's boot entries.
 
-### CPU model selection
+To specify a unique NVRAM file, simply add an nvram-setting to the machine flag: `-machine ia64-vpc,nvram=nvram.bin` - the file will be created automatically once an OS or the EFI writes to NVRAM.
 
-The `ia64-vpc` machine uses the `madison` CPU model by default; as an Itanium 2 it has the widest compatibility with operating systems released throughout Itanium's lifespan.
-Select a different model with `-cpu`.
-CPU selection changes guest-visible CPUID and PAL information as well as the available instruction set.
+### Modify the machine type
 
-Both `madison` and `merced` provide the processor's hardware IA-32 execution environment; `montecito` does not.
-Use `-cpu merced` for first-generation guests such as Windows XP 64-bit Edition:
+#### CPU
 
-```sh
-./build/qemu-system-ia64 \
-  -machine ia64-vpc \
-  -cpu merced \
-  -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
-  ...
-```
+The emulator supports three different Itanium CPU type arguments:
 
-#### `madison` (default)
+- `-cpu merced` - The original Itanium CPU, required by early Operating Systems only
+- `-cpu madison` - A later Itanium 2 CPU with near universal compatibility - Default if no CPU is specified
+- `-cpu montecito` - A later Itanium 2 9000 Series CPU, intended for more modern Operating Systems
 
-Madison provides the hardware IA-32 execution environment.
-Eligible `br.ia` and `rfi` transitions execute IA-32 code, and IA-32 `JMPE` returns to IA-64.
-The later 16-byte operations and virtualization instructions are not available and raise an Illegal Operation fault.
+To use multiple CPUs or CPU-Cores for better performance, append `-accel tcg,thread=multi -smp 2` as an argument. Change the 2 to the desired CPU / Core count.
 
-#### `montecito`
+#### Memory
 
-Montecito implements the later 16-byte operations `ld16`, `ld16.acq`, `st16`, `st16.rel`, `cmp8xchg16.acq`, and `cmp8xchg16.rel`.
-It has no hardware IA-32 execution engine, so an eligible `br.ia` or `rfi` request to enter IA-32 mode raises a Disabled ISA Transition fault.
-The `vmsw.0` and `vmsw.1` encodings are recognized as virtualization instructions.
-Because this emulator does not provide an IA-64 virtual-machine environment, these instructions produce the architecturally appropriate Privileged Operation or Virtualization fault instead of executing a mode switch.
+To change the amount of memory from the default of 1 GiB, use the `-m` flag, such as `-m 2G` for 2 GiB or `-m 512M` for 512 MiB. Note: some operating systems may not work properly at certain RAM sizes. See the [Supported Operating Systems](https://github.com/makuhlmann/qemu-system-ia64/wiki/Supported-Operating-Systems) Wiki page for more details.
 
-#### `merced`
+#### Input devices
 
-Merced models the original Itanium and reports the generation-specific CPUID, PAL, cache, translation-cache, page-size, address, protection-key, performance-monitor, and register-stack characteristics.
-It provides the hardware IA-32 execution environment, which identifies itself as x86 family 7.
-`CPUID[4]` reads zero, so `brl` is not implemented and raises an Illegal Operation fault.
-Windows keys its `KF_BRL` check off that bit and emulates the instruction, which is the behavior first-generation guests expect.
-The translation-register file is asymmetric: 8 instruction and 48 data registers.
-Later long-branch, 16-byte atomic, and virtualization facilities are not available.
+By default, a PS/2 controller and peripherals are attached. Some operating systems work better with it, but you may want to disable it for better mouse control via the modified machine flag: `-machine ia64-vpc,i8042=off`
 
-`-cpu help` lists the available names.
-The generic `ia64-cpu` entry is retained for compatibility and currently has Madison-like capabilities.
-Use an explicit generation name for predictable guest-visible behavior.
+#### Networking
 
-For four vCPUs, MTTCG, 8 GiB of RAM, and USB input without the PS/2 controller:
+By default, an Intel® 8255x 10/100 Mbps Ethernet Controller (`model=i82557b`) is attached to the machine in user mode. You can change it to a different type depending on needs (such as for newer operating systems). These are other tested models confirmed to work:
 
-```sh
-./build/qemu-system-ia64 \
-  -machine ia64-vpc,i8042=off,nvram=/path/to/guest.nvram \
-  -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
-  -drive file=/path/to/guest-media.iso,media=cdrom,format=raw,readonly=on \
-  -accel tcg,thread=multi \
-  -smp 4 \
-  -m 8G \
-  -display gtk
-```
+- Intel® 82543GC Gigabit Ethernet Controller: `-nic model=e1000-82543gc`
+- Intel® 82545EM Gigabit Ethernet Controller: `-nic model=e1000-82545em`
 
-The machine automatically attaches a USB keyboard and absolute USB tablet when `i8042=off` is used, so `-usb` is not required.
-Omitting `-vga` selects the default ATI-compatible display. This is recommended for graphical guests; use `-vga std` only when standard VGA compatibility is specifically needed.
+To disable networking, use `-nic none`
 
-### Networking
+#### Graphics
 
-An Intel gigabit Ethernet controller is attached by default.
-It uses the 82543GC device identity that drivers shipped with early IA-64 Windows releases, so the guest has a working network adapter without additional drivers.
-Other models are selectable with `-nic model=`:
+By default, QEMU will show a GTK window when launched, letting you see the graphical output of the guest. Alternatively you can use the more basic SDL output as well (`-display sdl`) or have no output at all (`-display none`), which might be useful for server systems.
 
-- `e1000-82543gc` (default): gigabit
-- `i82557b`: Intel PRO/100, 100 Mbit
-- `e1000`: 82540EM
+The default graphics card attached to guests is an ATI Rage 128 Pro (AGP) with rudimentary 2D acceleration. To attach it via PCI instead (may be needed for some guests), you can add the setting `agp=off` to the machine flag: `-machine ia64-vpc,agp=off`.
 
-When QEMU is built with libslirp, connect the default controller to user-mode networking with:
+Experimental support for mach64 based GPUs is present as well and can be enabled via `-machine ia64-vpc,vga=mach64`.
 
-```sh
--nic user
-```
+To fall back to a standard VGA capable graphics card, use the flag `-vga std` flag.
 
-For a host TAP interface, use:
+## Compatibility and Performance
 
-```sh
--nic tap,ifname=tap0,script=no,downscript=no
-```
+To run machines at a "reasonable" speed, you will need a performant x86-64 based CPU.
 
-Use `-nic none` to omit the controller.
-EFI network boot is not currently provided; the controller is available to the guest operating system.
+In tests using an AMD Ryzen 7 3700X, the 7-Zip 9.20 (IA-64) benchmark scores about 75 MIPS per core - roughly equivalent to the performance of a 1997 Intel Pentium MMX @ 133 MHz. Using a modern desktop or server CPU with `-smp` enabled is strongly advised for decent performance.
 
-### Console and debugging
+To see which guest operating systems are supported, check out the [Supported Operating Systems](https://github.com/makuhlmann/qemu-system-ia64/wiki/Supported-Operating-Systems) Wiki page. Known issues are documented there as well.
 
-Use `-serial stdio` to view serial output.
-The `-debug-port` option publishes the guest debug transport described by the ACPI DBGP table; for example, `-debug-port tcp::4444,server=on,wait=on,nodelay=on`.
-
-It is this project's own option and is unrelated to QEMU's `-debugcon`.
-
-Three logging categories are useful when bringing up a guest:
-
-- `-d guest_errors` prints decoded guest debug output, including the assertion and `DbgPrint` text produced by Windows checked builds
-- `-d ia64_fault` logs rare or fatal IA-64 fault classes (illegal operation, NaT consumption, unaligned reference, privileged operation, break) and excludes routine TLB, paging, and external-interrupt activity
-- `-d ia32_fault` logs IA-32 execution-layer faults and instruction intercepts with EIP, opcode bytes, and registers
-
-### EFI variables
-
-EFI variables are persistent.
-By default, `ia64-vpc` loads and saves a 64 KiB file named `nvram` in the directory containing the firmware selected by `-bios`.
-Use a separate file for each virtual machine with `-machine ia64-vpc,nvram=<path>`, or specify `nvram=none` for volatile EFI variables.
-Relative paths are resolved from QEMU's current working directory.
-
-
-At each startup, the firmware waits three seconds for F2, F12, or Delete before continuing normal boot. Any of these keys opens the embedded EFI shell on the graphical and serial consoles. The shell can inspect the machine and its filesystems, launch an EFI application, select a boot target, update the boot order, and set the real-time clock. For example:
-
-```text
-info
-map
-ls fs0:\EFI\BOOT
-run fs0:\EFI\BOOT\TOOL.EFI argument
-boot
-boot Boot0001
-boot fs0:
-bootorder Boot0001 Boot0000
-bootnext Boot0001
-date 2026-07-17
-time 12:34:56
-exit
-```
-
-`boot fsN:` launches `\EFI\BOOT\BOOTIA64.EFI` from that filesystem. `bootnext` is consumed by the next automatic boot attempt. Boot order, next-boot selection, and clock changes survive a reset when the machine has NVRAM backing; with `nvram=none`, they remain valid only for the current process.
-
-An installed EFI system can be attached with an ordinary disk drive:
-
-```sh
--drive file=/path/to/guest-disk.qcow2,format=qcow2
-```
-
-The firmware supports persistent EFI boot entries, including short-form hard drive device paths, and can boot supported loaders from FAT partitions.
-
-## Tests
-
-Run the behavior-oriented IA-64 unit, TCG, and machine tests after building:
-
-```sh
-build/pyvenv/bin/meson test -C build --suite ia64 --print-errorlogs
-build/pyvenv/bin/meson test -C build --suite qtest-ia64 --print-errorlogs
-build/pyvenv/bin/meson test -C build --suite func-ia64 --print-errorlogs
-build/pyvenv/bin/meson test -C build --suite func-ia64-thorough --print-errorlogs
-```
-
-Use the build-local Meson shown above.
-
-It is the same version selected by QEMU's configure process; a host `meson` of another version may be unable to read `build/meson-private/build.dat`.
-
-Plain `meson test` from the source directory is not valid because the Meson build data lives under `build`.
-
-The TCG registry currently contains 1238 architectural microprograms divided between core, memory/NaT, floating-point, RSE, MMU, interruption, and PAL groups.
-Each group run reports its own case count, so that total can be re-derived after adding cases.
-Machine tests cover platform wiring and display behavior.
-
-The functional suite builds project-owned EFI applications and boots them from deterministic FAT, GPT, MBR, El Torito, and UDF media. It also exercises the firmware shell through PS/2, USB, and serial input, including direct application execution and NVRAM persistence across restarts.
 
 ## Build
 
@@ -293,8 +158,6 @@ This changes the minimum host ISA for QEMU and its C helpers; TCG-generated gues
 
 ### Windows x86_64 cross build
 
-This is the release path for producing a Windows binary from a checkout on any Linux host.
-
 Install a MinGW-w64 cross compiler and the usual build tools (Debian/Ubuntu: `gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 build-essential meson ninja-build pkg-config python3 python3-venv curl zstd flex bison`), plus the IA-64 cross toolchain for the firmware.
 
 `scripts/fetch-win64-deps.sh` downloads the pinned MSYS2 MinGW64 libraries (SDL2, glib, pixman, libslirp, and their dependencies) from `repo.msys2.org`, verifies each SHA-256, assembles a sysroot, and prints its path.
@@ -330,7 +193,44 @@ ninja -C build-win64 qemu-system-ia64.exe qemu-system-ia64w.exe \
   roms/ia64-firmware/ia64-firmware.bin
 ```
 
-To make the result relocatable, copy beside the executables: the runtime DLLs from `$WIN_SYSROOT/mingw64/bin` (`SDL2.dll libglib-2.0-0.dll libiconv-2.dll libintl-8.dll libpcre2-8-0.dll libpixman-1-0.dll libslirp-0.dll zlib1.dll`), `libwinpthread-1.dll` from `x86_64-w64-mingw32-gcc -print-file-name=libwinpthread-1.dll`, the built `ia64-firmware.bin`, and the `pc-bios` ROMs and keymaps the machine loads (`efi-e1000.rom`, `vgabios-ati.bin`, `vgabios-stdvga.bin`).
+To make the result relocatable, copy beside the executables: the runtime DLLs from `$WIN_SYSROOT/mingw64/bin` (`SDL2.dll libglib-2.0-0.dll libiconv-2.dll libintl-8.dll libpcre2-8-0.dll libpixman-1-0.dll libslirp-0.dll zlib1.dll`), `libwinpthread-1.dll` from `x86_64-w64-mingw32-gcc -print-file-name=libwinpthread-1.dll`, the built `ia64-firmware.bin`, and the `pc-bios` ROMs and keymaps the machine loads. Each run loads one graphics ROM and one network ROM depending on the selected devices, so bundle all of them to keep every parameter combination working: `vgabios-ati.bin` (default ATI graphics), `vgabios-stdvga.bin` (`-vga std`), `vgabios-mach64.bin` (`vga=mach64`), `pxe-eepro100.rom` (default `i82557b` NIC), `efi-e1000.rom` (`e1000`-family NICs such as `e1000-82543gc`/`e1000-82545em`), and `efi-e1000e.rom` (`e1000e` NIC).
+
+
+### Console and debugging
+
+Use `-serial stdio` to view serial output.
+The `-debug-port` option publishes the guest debug transport described by the ACPI DBGP table; for example, `-debug-port tcp::4444,server=on,wait=on,nodelay=on`.
+
+It is this project's own option and is unrelated to QEMU's `-debugcon`.
+
+Three logging categories are useful when bringing up a guest:
+
+- `-d guest_errors` prints decoded guest debug output, including the assertion and `DbgPrint` text produced by Windows checked builds
+- `-d ia64_fault` logs rare or fatal IA-64 fault classes (illegal operation, NaT consumption, unaligned reference, privileged operation, break) and excludes routine TLB, paging, and external-interrupt activity
+- `-d ia32_fault` logs IA-32 execution-layer faults and instruction intercepts with EIP, opcode bytes, and registers
+
+## Tests
+
+Run the behavior-oriented IA-64 unit, TCG, and machine tests after building:
+
+```sh
+build/pyvenv/bin/meson test -C build --suite ia64 --print-errorlogs
+build/pyvenv/bin/meson test -C build --suite qtest-ia64 --print-errorlogs
+build/pyvenv/bin/meson test -C build --suite func-ia64 --print-errorlogs
+build/pyvenv/bin/meson test -C build --suite func-ia64-thorough --print-errorlogs
+```
+
+Use the build-local Meson shown above.
+
+It is the same version selected by QEMU's configure process; a host `meson` of another version may be unable to read `build/meson-private/build.dat`.
+
+Plain `meson test` from the source directory is not valid because the Meson build data lives under `build`.
+
+The TCG registry currently contains more than 1000 architectural microprograms divided between core, memory/NaT, floating-point, RSE, MMU, interruption, and PAL groups.
+Each group run reports its own case count, so that total can be re-derived after adding cases.
+Machine tests cover platform wiring and display behavior.
+
+The functional suite builds project-owned EFI applications and boots them from deterministic FAT, GPT, MBR, El Torito, and UDF media. It also exercises the firmware shell through PS/2, USB, and serial input, including direct application execution and NVRAM persistence across restarts.
 
 ## Legal disclaimer
 
