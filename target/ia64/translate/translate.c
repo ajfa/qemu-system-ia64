@@ -2709,10 +2709,74 @@ bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     return false;
 }
 
+/*
+ * One-shot guest-physical dump when a guest virtual page is first translated:
+ *   IA64_DUMP_ON_TRANSLATE=<trigger-va>:<phys-base>:<length>:<file>
+ * fires the first time a TB whose entry pc lands in <trigger-va>'s 4 KiB page
+ * is translated, writing guest-physical [<phys-base>, +<length>) to <file>.
+ * Debug rig for capturing an OS loader's phase-0 memory-descriptor lists at a
+ * precise code point without a debugger (plans/firmware-rework-plan.md
+ * experiment E1; generalizes the scratch IA64_DUMP_TRIM hook from the RC 3663
+ * investigation).  Zero cost unless the environment variable is set.
+ */
+static void ia64_dump_on_translate(uint64_t pc)
+{
+    static int state; /* 0 unparsed, -1 off, 1 armed, 2 fired */
+    static uint64_t trigger_va;
+    static uint64_t dump_pa;
+    static uint64_t dump_len;
+    static char dump_file[256];
+
+    if (state < 0 || state == 2) {
+        return;
+    }
+    if (state == 0) {
+        const char *spec = getenv("IA64_DUMP_ON_TRANSLATE");
+        char *end;
+
+        state = -1;
+        if (spec == NULL) {
+            return;
+        }
+        trigger_va = strtoull(spec, &end, 0);
+        if (*end != ':') {
+            return;
+        }
+        dump_pa = strtoull(end + 1, &end, 0);
+        if (*end != ':') {
+            return;
+        }
+        dump_len = strtoull(end + 1, &end, 0);
+        if (*end != ':' || dump_len == 0 ||
+            strlen(end + 1) >= sizeof(dump_file)) {
+            return;
+        }
+        g_strlcpy(dump_file, end + 1, sizeof(dump_file));
+        state = 1;
+    }
+    if ((pc >> 12) == (trigger_va >> 12)) {
+        void *buf = g_malloc(dump_len);
+        FILE *f = fopen(dump_file, "wb");
+
+        cpu_physical_memory_read(dump_pa, buf, dump_len);
+        if (f != NULL) {
+            fwrite(buf, 1, dump_len, f);
+            fclose(f);
+        }
+        g_free(buf);
+        fprintf(stderr, "IA64_DUMP_ON_TRANSLATE: pc=0x%" PRIx64
+                " dumped [0x%" PRIx64 ", +0x%" PRIx64 ") to %s\n",
+                pc, dump_pa, dump_len, dump_file);
+        state = 2;
+    }
+}
+
 static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
 {
     DisasContext *ctx = container_of(db, DisasContext, base);
     uint32_t flags = ctx->base.tb->flags;
+
+    ia64_dump_on_translate(ctx->base.pc_first);
 
     ctx->env = cpu_env(cs);
     ctx->memory.mmu_idx = (flags & IA64_TB_FLAG_DT) ?
