@@ -130,6 +130,12 @@ UINT64 fw_guest_high_ram_end(UINTN Index);
 
 void uart_puts(const char *s);
 void uart_put_hex64(UINT64 value);
+BOOLEAN ranges_overlap(UINT64 a_base, UINT64 a_size,
+                       UINT64 b_base, UINT64 b_size);
+EFI_STATUS rs_convert_pointer_value(UINTN *Address);
+BOOLEAN efi_find_allocation_overlap(UINT64 Start, UINT64 End,
+                                    UINT64 *FirstEnd, UINT64 *LastStart);
+UINT64 efi_memory_type_allocation_granularity(EFI_MEMORY_TYPE Type);
 UINT8 table_checksum8(const void *buf, UINTN len);
 
 /* smbios.c */

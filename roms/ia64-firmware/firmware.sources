@@ -6,6 +6,7 @@ storage.c
 efi_memmap.c
 ide.c
 console.c
+pe_loader.c
 ohci.c
 decompress.c
 debug_protocols.c
