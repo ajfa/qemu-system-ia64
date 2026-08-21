@@ -1,5 +1,6 @@
 entry.S
 firmware.c
+unicode_collation.c
 decompress.c
 debug_protocols.c
 pointer_protocol.c

@@ -8,6 +8,7 @@
 #define IA64_FIRMWARE_FW_SERVICES_H
 
 #include "fw-base.h"
+#include "fw-efi-types.h"
 #include "hw/ia64/ia64_vpc_abi.h"
 
 #define IA64_PSR_IC (1ULL << 13)
@@ -103,5 +104,9 @@ BOOLEAN fw_protocol_interface_installed(EFI_HANDLE handle, VOID *protocol,
                                         VOID **interface);
 
 extern const UINT8 mDevicePathProtocolGuid[16];
+
+/* unicode_collation.c */
+extern EFI_UNICODE_COLLATION_PROTOCOL mUnicodeCollationProto;
+BOOLEAN unicode_collation_selftest(void);
 
 #endif /* IA64_FIRMWARE_FW_SERVICES_H */
