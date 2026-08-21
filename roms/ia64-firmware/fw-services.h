@@ -115,6 +115,8 @@ UINTN fw_guest_high_ram_count(void);
 UINT64 fw_guest_high_ram_base(UINTN Index);
 UINT64 fw_guest_high_ram_end(UINTN Index);
 
+void uart_puts(const char *s);
+void uart_put_hex64(UINT64 value);
 UINT8 table_checksum8(const void *buf, UINTN len);
 
 /* smbios.c */

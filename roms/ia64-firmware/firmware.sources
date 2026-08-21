@@ -2,6 +2,7 @@ entry.S
 firmware.c
 unicode_collation.c
 smbios.c
+storage.c
 decompress.c
 debug_protocols.c
 pointer_protocol.c
