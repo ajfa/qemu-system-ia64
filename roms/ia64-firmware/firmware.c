@@ -2989,6 +2989,7 @@ static EFI_STATUS fw_loaded_image_source_paths(
 static BOOLEAN fw_iso_init(void);
 static BOOLEAN fw_udf_init(void);
 static BOOLEAN fw_boot_fat_available(void);
+static BOOLEAN fw_boot_optical_fs_available(void);
 static void ahci_stop_all_ports(void);
 static EFI_STATUS fw_load_image_source_from_device_path(
     BOOLEAN BootPolicy, void *DevicePath, VOID **SourceBuffer,
@@ -10886,13 +10887,14 @@ EFI_STATUS bs_protocols_per_handle(EFI_HANDLE Handle, void ***ProtocolBuffer,
 
     if (Handle == mRawBlockIoHandle) {
         count += 3;
-        if (fw_udf_init() || fw_iso_init()) {
+        if ((fw_udf_init() || fw_iso_init()) &&
+            !fw_boot_optical_fs_available()) {
             count++;
         }
     }
     if (Handle == mBlockIoHandle) {
         count += 3;
-        if (fw_boot_fat_available()) {
+        if (fw_boot_fat_available() || fw_boot_optical_fs_available()) {
             count++;
         }
     }
@@ -10944,7 +10946,8 @@ EFI_STATUS bs_protocols_per_handle(EFI_HANDLE Handle, void ***ProtocolBuffer,
     if (Handle == mRawBlockIoHandle) {
         buffer[count++] = (void *)mBlockIoProtocolGuid;
         buffer[count++] = (void *)mDiskIoProtocolGuid;
-        if (fw_udf_init() || fw_iso_init()) {
+        if ((fw_udf_init() || fw_iso_init()) &&
+            !fw_boot_optical_fs_available()) {
             buffer[count++] = (void *)mSimpleFileSystemProtocolGuid;
         }
         buffer[count++] = (void *)mDevicePathProtocolGuid;
@@ -10952,7 +10955,7 @@ EFI_STATUS bs_protocols_per_handle(EFI_HANDLE Handle, void ***ProtocolBuffer,
     if (Handle == mBlockIoHandle) {
         buffer[count++] = (void *)mBlockIoProtocolGuid;
         buffer[count++] = (void *)mDiskIoProtocolGuid;
-        if (fw_boot_fat_available()) {
+        if (fw_boot_fat_available() || fw_boot_optical_fs_available()) {
             buffer[count++] = (void *)mSimpleFileSystemProtocolGuid;
         }
         buffer[count++] = (void *)mDevicePathProtocolGuid;
@@ -21234,6 +21237,17 @@ static BOOLEAN atapi_configure_el_torito(void)
     use_uefi_sector_count = platform_id == 0xef;
     if (!use_uefi_sector_count && have_bpb) {
         partition_blocks = filesystem_blocks;
+    } else if (!use_uefi_sector_count) {
+        /*
+         * No EFI Platform ID and no FAT BPB at the boot image: this El Torito
+         * entry is not an EFI System Partition.  Combo IA-64 discs (early
+         * Server 2003 / .NET Server betas) carry only a legacy x86 CDBOOT
+         * no-emulation loader here -- real-mode boot code, not a filesystem.
+         * Do not map it as a bogus FAT volume; the disc's IA-64 loader
+         * (\IA64\SETUPLDR.EFI) is reached through the raw ISO-9660 file system
+         * instead, launched by hand from the EFI shell.
+         */
+        return 0;
     } else if (catalog_sector_count <= 1U) {
         if (mCdromBlocks <= boot_lba ||
             (UINT64)(mCdromBlocks - boot_lba) > (0xffffffffULL / 4U)) {
@@ -25179,6 +25193,30 @@ static BOOLEAN fw_fat_init(void)
 static BOOLEAN fw_boot_fat_available(void)
 {
     return fw_fat_init() && mBootFatVolume.valid;
+}
+
+/*
+ * True when the disc's ISO-9660/UDF file system should be presented on the
+ * boot Block I/O handle (mBlockIoHandle) rather than the raw optical handle.
+ *
+ * This holds for optical media with no mappable EFI El Torito boot image -- a
+ * combo IA-64 install disc whose only boot catalog entry is the legacy x86
+ * CDBOOT loader, so there is no EFI System Partition and no FAT volume.  In
+ * that case mBlockIoHandle carries the whole-media MEDIA_CDROM_DP device path
+ * (see fw_update_storage_device_paths / handle_supports_protocol), so a loader
+ * launched from this file system -- e.g. \IA64\SETUPLDR.EFI run by hand from
+ * the EFI shell -- receives a CD-ROM device path.  Microsoft's setupldr needs
+ * that to take its El Torito CD boot path (WSRV03 base/boot/efi/sumain.c), and
+ * it matches the device path the reference firmware exposes from its El Torito
+ * partition child handle (EFI 1.10 EDK/Drivers/Partition/ElTorito.c).
+ *
+ * When an EFI El Torito FAT volume *is* mapped, mBlockIoHandle carries that FAT
+ * file system and the ISO/UDF file system stays on the raw optical handle.
+ */
+static BOOLEAN fw_boot_optical_fs_available(void)
+{
+    return storage_is_cd(&mBootStorageDevice) && !mBootImageMapped &&
+           !fw_boot_fat_available() && (fw_udf_init() || fw_iso_init());
 }
 
 static BOOLEAN fw_fat_read_512(FW_FAT_VOLUME *Volume, UINT8 *buf, UINT32 lba)
@@ -31487,7 +31525,8 @@ static BOOLEAN handle_supports_protocol(EFI_HANDLE Handle, void *Protocol,
 
     if (Handle == mRawBlockIoHandle &&
         guid_matches(Protocol, mSimpleFileSystemProtocolGuid) &&
-        (fw_udf_init() || fw_iso_init())) {
+        (fw_udf_init() || fw_iso_init()) &&
+        !fw_boot_optical_fs_available()) {
         if (Interface != NULL) {
             *Interface = (VOID *)&mOpticalSimpleFsProto;
         }
@@ -31522,9 +31561,10 @@ static BOOLEAN handle_supports_protocol(EFI_HANDLE Handle, void *Protocol,
 
     if (Handle == mBlockIoHandle &&
         guid_matches(Protocol, mSimpleFileSystemProtocolGuid) &&
-        fw_fat_init() && mBootFatVolume.valid) {
+        (fw_boot_fat_available() || fw_boot_optical_fs_available())) {
         if (Interface != NULL) {
-            *Interface = (VOID *)&mSimpleFsProto;
+            *Interface = fw_boot_fat_available() ?
+                (VOID *)&mSimpleFsProto : (VOID *)&mOpticalSimpleFsProto;
         }
         return 1;
     }
@@ -31532,17 +31572,27 @@ static BOOLEAN handle_supports_protocol(EFI_HANDLE Handle, void *Protocol,
     if (Handle == mBlockIoHandle &&
         guid_matches(Protocol, mDevicePathProtocolGuid)) {
         if (Interface != NULL) {
+            /*
+             * Optical media keep the MEDIA_CDROM_DP node even when no El Torito
+             * EFI boot image was mapped (a combo disc whose only boot catalog
+             * entry is the legacy x86 CDBOOT loader): the node then spans the
+             * whole media, so an OS loader started from this handle still sees a
+             * CD-ROM device path.  Microsoft's setupldr requires that to take
+             * its El Torito CD boot path (WSRV03 base/boot/efi/sumain.c).
+             */
+            BOOLEAN keep_cdrom = mBootImageMapped ||
+                                 storage_is_cd(&mBootStorageDevice);
             if (mBootStorageDevice.Kind == FW_STORAGE_AHCI) {
-                *Interface = mBootImageMapped ?
+                *Interface = keep_cdrom ?
                     (VOID *)&mSataBlockDevicePath :
                     (VOID *)&mSataBootDevicePath;
+            } else if (keep_cdrom) {
+                *Interface = (VOID *)&mBlockDevicePath;
             } else {
-                *Interface = mBootImageMapped ?
-                    (VOID *)&mBlockDevicePath :
-                    (storage_same_device(&mBootStorageDevice,
-                                         &mDiskStorageDevice) ?
-                     (VOID *)&mDiskBlockDevicePath :
-                     (VOID *)&mRawBlockDevicePath);
+                *Interface = storage_same_device(&mBootStorageDevice,
+                                                 &mDiskStorageDevice) ?
+                    (VOID *)&mDiskBlockDevicePath :
+                    (VOID *)&mRawBlockDevicePath;
             }
         }
         return 1;
@@ -34824,6 +34874,31 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
         mOpticalSetupLoaderDevicePath.Cdrom.PartitionSize =
             cdrom_partition_blocks;
         uart_puts("Block I/O: El Torito FAT image mapped\r\n");
+    } else if (storage_present(&mBootStorageDevice) &&
+               storage_is_cd(&mBootStorageDevice)) {
+        /*
+         * Optical media with no mappable EFI El Torito boot image (e.g. a combo
+         * disc whose only boot catalog entry is the legacy x86 CDBOOT loader).
+         * Describe the CD-ROM device path node as spanning the whole media, so
+         * the boot Block I/O handle -- which carries the disc's ISO-9660 file
+         * system -- presents a whole-media MEDIA_CDROM_DP path.  A loader
+         * launched from that file system (\IA64\SETUPLDR.EFI from the EFI shell)
+         * then receives a CD-ROM device path, matching what the reference
+         * firmware's El Torito partition child handle provides (EFI 1.10
+         * EDK/Drivers/Partition/ElTorito.c).
+         */
+        mBlockDevicePath.Cdrom.BootEntry = 0;
+        mBlockDevicePath.Cdrom.PartitionStart = 0;
+        mBlockDevicePath.Cdrom.PartitionSize = mCdromBlocks;
+        mSataBlockDevicePath.Cdrom.BootEntry = 0;
+        mSataBlockDevicePath.Cdrom.PartitionStart = 0;
+        mSataBlockDevicePath.Cdrom.PartitionSize = mCdromBlocks;
+        mBootFullDevicePath.Cdrom.BootEntry = 0;
+        mBootFullDevicePath.Cdrom.PartitionStart = 0;
+        mBootFullDevicePath.Cdrom.PartitionSize = mCdromBlocks;
+        mOpticalSetupLoaderDevicePath.Cdrom.BootEntry = 0;
+        mOpticalSetupLoaderDevicePath.Cdrom.PartitionStart = 0;
+        mOpticalSetupLoaderDevicePath.Cdrom.PartitionSize = mCdromBlocks;
     }
     mBlockIoMedia.MediaId = 1;
     mBlockIoMedia.RemovableMedia = storage_removable(&mBootStorageDevice);
@@ -35307,19 +35382,21 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
             uart_puts(efi_status_name(st));
             uart_puts(", status=0x");
             uart_put_hex64(st);
-            uart_puts(").");
-            if (storage_is_cd(&mBootStorageDevice) && st == EFI_NOT_FOUND) {
-                uart_puts(" CD-ROM boot path stopped after disk image failure.\r\n");
-                while (1) {
-                }
-            }
-            uart_puts("\r\n");
+            uart_puts(").\r\n");
         }
     }
 
-    uart_puts("\r\nNo bootable image found.\r\n");
-    uart_puts("System halted.\r\n");
-    efi_conout_ascii("\r\n\r\nNo bootable image found. System halted.");
-    __asm__ volatile ("break 0" ::: "memory");
+    /*
+     * No bootable image was found.  Drop into the EFI shell rather than
+     * halting: a disc may still be startable by hand -- e.g. a combo IA-64
+     * install disc whose only El Torito boot entry is the legacy x86 CDBOOT
+     * loader carries its IA-64 loader at fs0:\IA64\SETUPLDR.EFI, which the
+     * user can launch from the shell.
+     */
+    uart_puts("\r\nNo bootable image found. Entering EFI shell.\r\n");
+    efi_conout_ascii("\r\nNo bootable image found. Entering EFI shell.\r\n");
+    while (!mBootServicesExited) {
+        fw_boot_shell_run();
+    }
     while (1) {}
 }
