@@ -72,8 +72,22 @@ void efi_insert_memory_descriptor(UINTN Index,
     mMemoryMapEntries++;
 }
 
+/*
+ * Guest-specific map workarounds ("quirks"), each keyed to a named guest
+ * bug at its emission site.  All default ON -- the validated map.  Each can
+ * be disabled for A/B experiments with -machine ia64-vpc,fw-quirks=-<name>
+ * (plans/firmware-rework-plan.md Phase 2 retires them one by one).
+ */
+BOOLEAN fw_map_quirk_enabled(UINT64 QuirkBit)
+{
+    return (fw_handoff_map_quirk_disable() & QuirkBit) == 0;
+}
+
 BOOLEAN efi_preserve_memory_map_boundary(UINT64 Boundary)
 {
+    if (!fw_map_quirk_enabled(IA64_FW_QUIRK_LOW_BOUNDARIES)) {
+        return 0;
+    }
     return Boundary == FW_LOW_IMAGE_BASE ||
            Boundary == FW_LOW_LEGACY_IMAGE_BASE ||
            Boundary == FW_LOW_IMAGE_ALIGNED_END ||
@@ -397,8 +411,10 @@ void efi_init_memory_map(void)
      * from the prior (free) entry.  A 4 KB PAL descriptor makes the run odd and
      * perturbs every boundary after it.
      */
-    UINTN pal_start = (UINTN)pal_proc_entry & ~0x1FFFULL;
-    UINTN pal_end = pal_start + 0x2000U;
+    UINTN pal_align = fw_map_quirk_enabled(IA64_FW_QUIRK_PAL_8K_PAGE) ?
+                      0x1FFFULL : 0xFFFULL;
+    UINTN pal_start = (UINTN)pal_proc_entry & ~pal_align;
+    UINTN pal_end = pal_start + pal_align + 1U;
     UINT64 ram_size = fw_guest_ram_size();
     UINT64 low_ram_end = fw_guest_low_ram_end();
     UINTN index = 0;
@@ -515,7 +531,9 @@ void efi_init_memory_map(void)
      * defeats that split, and the Whistler 2462 loader then loses the kernel
      * image so the kernel allocates page tables over itself.
      */
-    efi_add_memory_range(&index, EfiReservedMemoryType,
+    efi_add_memory_range(&index,
+                         fw_map_quirk_enabled(IA64_FW_QUIRK_LOADER_SPLIT_PAGE) ?
+                         EfiReservedMemoryType : EfiConventionalMemory,
                          FW_LOADER_HEAP_SPLIT_BASE,
                          FW_LOW_IMAGE_BASE, EFI_MEMORY_WB);
     /*
@@ -539,11 +557,16 @@ void efi_init_memory_map(void)
     {
         UINT64 anchor = fw_low_anchor_base();
 
+        BOOLEAN anchor_on = fw_map_quirk_enabled(IA64_FW_QUIRK_LOW_ANCHOR);
+
         efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_END,
                              anchor, EFI_MEMORY_WB);
-        efi_add_memory_range(&index, EfiReservedMemoryType, anchor,
-                             anchor + FW_LOW_ANCHOR_SIZE, EFI_MEMORY_WB);
-        mLowAnchorArmed = 1;
+        efi_add_memory_range(&index,
+                             anchor_on ? EfiReservedMemoryType :
+                                         EfiConventionalMemory,
+                             anchor, anchor + FW_LOW_ANCHOR_SIZE,
+                             EFI_MEMORY_WB);
+        mLowAnchorArmed = anchor_on;
         efi_add_boot_stack_low_ram(&index, anchor + FW_LOW_ANCHOR_SIZE,
                                    low_ram_end);
     }
@@ -559,7 +582,8 @@ void efi_init_memory_map(void)
      * end.  Guests that run past 2 GiB here are the ones that specifically
      * need the unbroken contiguous DRAM (Linux), so this costs them nothing.
      */
-    if (low_ram_end <= 0x80000000ULL) {
+    if (low_ram_end <= 0x80000000ULL &&
+        fw_map_quirk_enabled(IA64_FW_QUIRK_SCRATCH_2G)) {
         efi_add_memory_range(&index, EfiReservedMemoryType, 0x80000000,
                              0x80100000, EFI_MEMORY_WB);
     }

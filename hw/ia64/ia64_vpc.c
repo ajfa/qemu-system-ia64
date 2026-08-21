@@ -377,6 +377,7 @@ struct IA64VpcMachineState {
 
     bool i8042_enabled;
     bool ahci_enabled;
+    uint64_t fw_map_quirk_disable;
     bool ide_enabled;
     bool firmware_ide_dma;
     bool agp_enabled;
@@ -1886,6 +1887,87 @@ static void ia64_vpc_set_firmware_ide_dma(Object *obj, bool value,
     s->firmware_ide_dma = value;
 }
 
+static const struct {
+    const char *name;
+    uint64_t bit;
+} ia64_vpc_fw_quirks[] = {
+    { "split-page",          IA64_FW_QUIRK_LOADER_SPLIT_PAGE },
+    { "low-boundaries",      IA64_FW_QUIRK_LOW_BOUNDARIES },
+    { "low-anchor",          IA64_FW_QUIRK_LOW_ANCHOR },
+    { "anchor-version-sniff", IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF },
+    { "2g-scratch",          IA64_FW_QUIRK_SCRATCH_2G },
+    { "pal-8k-page",         IA64_FW_QUIRK_PAL_8K_PAGE },
+};
+
+static char *ia64_vpc_get_fw_quirks(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+    GString *out = g_string_new(NULL);
+    size_t i;
+
+    (void)errp;
+    for (i = 0; i < ARRAY_SIZE(ia64_vpc_fw_quirks); i++) {
+        if (s->fw_map_quirk_disable & ia64_vpc_fw_quirks[i].bit) {
+            if (out->len != 0) {
+                g_string_append_c(out, ',');
+            }
+            g_string_append_c(out, '-');
+            g_string_append(out, ia64_vpc_fw_quirks[i].name);
+        }
+    }
+    if (out->len == 0) {
+        g_string_append(out, "default");
+    }
+    return g_string_free(out, false);
+}
+
+static void ia64_vpc_set_fw_quirks(Object *obj, const char *value,
+                                   Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+    uint64_t disable = s->fw_map_quirk_disable;
+    /*
+     * -machine option parsing consumes commas, so a single fw-quirks value
+     * uses ':' between names; alternatively repeat fw-quirks= per name
+     * (the setter accumulates).
+     */
+    g_auto(GStrv) tokens = g_strsplit_set(value, ",:", 0);
+    size_t i;
+    char **tok;
+
+    for (tok = tokens; *tok != NULL; tok++) {
+        const char *name = *tok;
+        bool off;
+
+        if (name[0] == '\0') {
+            continue;
+        }
+        if (g_strcmp0(name, "default") == 0) {
+            disable = 0;
+            continue;
+        }
+        off = name[0] == '-';
+        if (name[0] == '-' || name[0] == '+') {
+            name++;
+        }
+        for (i = 0; i < ARRAY_SIZE(ia64_vpc_fw_quirks); i++) {
+            if (g_strcmp0(name, ia64_vpc_fw_quirks[i].name) == 0) {
+                if (off) {
+                    disable |= ia64_vpc_fw_quirks[i].bit;
+                } else {
+                    disable &= ~ia64_vpc_fw_quirks[i].bit;
+                }
+                break;
+            }
+        }
+        if (i == ARRAY_SIZE(ia64_vpc_fw_quirks)) {
+            error_setg(errp, "unknown firmware map quirk '%s'", name);
+            return;
+        }
+    }
+    s->fw_map_quirk_disable = disable;
+}
+
 static char *ia64_vpc_get_firmware_console(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -2311,7 +2393,7 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     IA64VpcHandoff handoff = { 0 };
     bool debug_port_present = debug_port_get_chardev() != NULL;
 
-    _Static_assert(sizeof(IA64VpcHandoff) == 104,
+    _Static_assert(sizeof(IA64VpcHandoff) == 112,
                    "IA-64 firmware handoff ABI size changed");
     _Static_assert(offsetof(IA64VpcHandoff, ProcessorCount) == 64,
                    "IA-64 firmware handoff CPU count offset changed");
@@ -2340,6 +2422,7 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     handoff.SocketCount = cpu_to_le64(machine->smp.sockets);
     handoff.CoresPerSocket = cpu_to_le64(machine->smp.cores);
     handoff.ThreadsPerCore = cpu_to_le64(machine->smp.threads);
+    handoff.MapQuirkDisable = cpu_to_le64(s->fw_map_quirk_disable);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, &handoff,
                               sizeof(handoff));
 }
@@ -3532,6 +3615,16 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_set_firmware_ide_dma);
     object_class_property_set_description(oc, "firmware-ide-dma",
         "Set on/off to enable/disable firmware IDE bus-master DMA");
+    object_class_property_add_str(oc, "fw-quirks",
+                                  ia64_vpc_get_fw_quirks,
+                                  ia64_vpc_set_fw_quirks);
+    object_class_property_set_description(oc, "fw-quirks",
+        "Comma list of firmware memory-map quirks to toggle: '-name' "
+        "disables, '+name'/'name' re-enables, 'default' resets.  Names: "
+        "split-page, low-boundaries, low-anchor, anchor-version-sniff, "
+        "2g-scratch, pal-8k-page.  All quirks default on (the validated "
+        "map); disabling changes the guest-visible EFI memory map -- "
+        "A/B rig for plans/firmware-rework-plan.md Phase 2");
     object_class_property_add_str(oc, "firmware-console",
                                   ia64_vpc_get_firmware_console,
                                   ia64_vpc_set_firmware_console);

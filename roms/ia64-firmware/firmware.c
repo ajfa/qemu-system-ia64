@@ -1691,7 +1691,7 @@ typedef struct {
     UINT64 DebugPortBase;
 } FW_HANDOFF_LEGACY;
 
-FW_STATIC_ASSERT(sizeof(IA64VpcHandoff) == 104, fw_handoff_size);
+FW_STATIC_ASSERT(sizeof(IA64VpcHandoff) == 112, fw_handoff_size);
 FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, ProcessorCount) == 64,
                  fw_handoff_processor_count_offset);
 FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, NvramPersistent) == 72,
@@ -1959,6 +1959,19 @@ static UINTN fw_handoff_processor_count(void)
         return 1;
     }
     return (UINTN)count;
+}
+
+UINT64 fw_handoff_map_quirk_disable(void)
+{
+    const FW_HANDOFF_HEADER *header =
+        (const FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    const IA64VpcHandoff *handoff =
+        (const IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+
+    if (!fw_handoff_valid(header) || header->Version < 11) {
+        return 0;
+    }
+    return handoff->MapQuirkDisable & IA64_FW_QUIRK_ALL;
 }
 
 static void fw_handoff_processor_topology(UINTN ProcessorCount)
@@ -11799,10 +11812,12 @@ BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     ordinary_next = ordinary;
     ordinary_next.PhysicalStart = FW_LOW_RAM_STAGING_BASE + 0x1000ULL;
 
-    if (!efi_memory_map_has_descriptor(EfiReservedMemoryType,
-                                       FW_LOADER_HEAP_SPLIT_BASE,
-                                       FW_LOW_IMAGE_BASE,
-                                       EFI_MEMORY_WB) ||
+    /* Quirk-dependent shapes are asserted only when the quirk is on. */
+    if ((fw_map_quirk_enabled(IA64_FW_QUIRK_LOADER_SPLIT_PAGE) &&
+         !efi_memory_map_has_descriptor(EfiReservedMemoryType,
+                                        FW_LOADER_HEAP_SPLIT_BASE,
+                                        FW_LOW_IMAGE_BASE,
+                                        EFI_MEMORY_WB)) ||
         /* [32MB,80MB) is a single free descriptor ending exactly at the 80 MB
          * line (XP-era sumain straddle rule), and conventional RAM continues
          * right above it with no reserved guard page (Server 2003 SP1's 64 MB
@@ -11810,11 +11825,12 @@ BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         !efi_memory_map_has_descriptor(EfiConventionalMemory,
                                        FW_LOW_IMAGE_BASE,
                                        FW_LOW_IMAGE_END, EFI_MEMORY_WB) ||
-        !efi_memory_map_has_descriptor(EfiReservedMemoryType,
-                                       fw_low_anchor_base(),
-                                       fw_low_anchor_base() +
-                                           FW_LOW_ANCHOR_SIZE,
-                                       EFI_MEMORY_WB) ||
+        (fw_map_quirk_enabled(IA64_FW_QUIRK_LOW_ANCHOR) &&
+         !efi_memory_map_has_descriptor(EfiReservedMemoryType,
+                                        fw_low_anchor_base(),
+                                        fw_low_anchor_base() +
+                                            FW_LOW_ANCHOR_SIZE,
+                                        EFI_MEMORY_WB)) ||
         (fw_low_anchor_base() == FW_LOW_ANCHOR_BASE &&
          !efi_memory_map_covers_range(EfiConventionalMemory,
                                       FW_LOW_IMAGE_END,
@@ -15645,6 +15661,7 @@ static void *load_pe_image(uint8_t *image_base, UINTN image_size,
         number_of_rva_and_sizes < 6 || data_dir == NULL ||
         data_dir[11] == 0;
     if (subsystem == IMAGE_SUBSYSTEM_EFI_APPLICATION &&
+        fw_map_quirk_enabled(IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF) &&
         pe_image_wants_contiguous_low_ram(image_base, image_size)) {
         efi_release_low_anchor();
     }

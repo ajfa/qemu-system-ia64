@@ -38,6 +38,9 @@ UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd, UINT64 BootStackBase,
 UINT64 efi_memory_attribute(EFI_MEMORY_TYPE Type, UINT64 Attribute);
 
 void efi_init_memory_map(void);
+/* Quirk toggles: bits are IA64_FW_QUIRK_* (ia64_vpc_abi.h), default all on. */
+BOOLEAN fw_map_quirk_enabled(UINT64 QuirkBit);
+UINT64 fw_handoff_map_quirk_disable(void);
 void efi_add_memory_range(UINTN *Index, EFI_MEMORY_TYPE Type,
                           UINT64 Start, UINT64 End, UINT64 Attribute);
 void efi_insert_memory_descriptor(UINTN Index,

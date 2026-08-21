@@ -22,7 +22,7 @@
 
 #define IA64_FW_HANDOFF_ADDR          IA64_U64(0x00000000000ff000)
 #define IA64_FW_HANDOFF_MAGIC         IA64_U64(0x4d41523436414951) /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION       10ULL
+#define IA64_FW_HANDOFF_VERSION       11ULL
 /* Offset of IA64VpcHandoff.RamSize, re-derived by entry.S. */
 #define IA64_FW_HANDOFF_RAMSIZE_OFFSET 16
 
@@ -31,6 +31,21 @@
 #define IA64_FW_DEBUG_PORT_PRESENT    1ULL
 
 #define IA64_VPC_MAX_CPUS             8U
+
+/*
+ * Memory-map quirk bits (IA64VpcHandoff.MapQuirkDisable, handoff version
+ * 11+).  Each bit DISABLES one guest-specific map workaround the firmware
+ * applies by default; all-zero keeps the validated default map.  The
+ * motivating guest bug for each lives at the emission site in
+ * roms/ia64-firmware/efi_memmap.c and in plans/firmware-rework-plan.md.
+ */
+#define IA64_FW_QUIRK_LOADER_SPLIT_PAGE    (1ULL << 0) /* 8K page below 32 MB */
+#define IA64_FW_QUIRK_LOW_BOUNDARIES       (1ULL << 1) /* 32/48/64/80 MB no-coalesce */
+#define IA64_FW_QUIRK_LOW_ANCHOR           (1ULL << 2) /* 8K reserve at 128 MB */
+#define IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF (1ULL << 3) /* drop anchor for >=5.2.3790 loaders */
+#define IA64_FW_QUIRK_SCRATCH_2G           (1ULL << 4) /* 1 MiB reserve at 2 GiB */
+#define IA64_FW_QUIRK_PAL_8K_PAGE          (1ULL << 5) /* whole-8K EfiPalCode page */
+#define IA64_FW_QUIRK_ALL                  0x3fULL
 
 /*
  * CPU-private physical memory used before and after ExitBootServices().
@@ -199,6 +214,7 @@ typedef struct __attribute__((packed)) IA64VpcHandoff {
     unsigned long long SocketCount;
     unsigned long long CoresPerSocket;
     unsigned long long ThreadsPerCore;
+    unsigned long long MapQuirkDisable;   /* version 11+ */
 } IA64VpcHandoff;
 
 _Static_assert(__builtin_offsetof(IA64VpcHandoff, RamSize) ==

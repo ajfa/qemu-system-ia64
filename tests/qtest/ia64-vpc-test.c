@@ -643,7 +643,7 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
 {
     IA64VpcHandoff handoff;
 
-    g_assert_cmpuint(sizeof(handoff), ==, 104);
+    g_assert_cmpuint(sizeof(handoff), ==, 112);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
     g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
     g_assert_cmphex(le64_to_cpu(handoff.Version), ==,
@@ -660,13 +660,14 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
     g_assert_cmphex(le64_to_cpu(handoff.SocketCount), ==, sockets);
     g_assert_cmphex(le64_to_cpu(handoff.CoresPerSocket), ==, cores);
     g_assert_cmphex(le64_to_cpu(handoff.ThreadsPerCore), ==, threads);
+    g_assert_cmphex(le64_to_cpu(handoff.MapQuirkDisable), ==, 0);
 }
 
 static void test_firmware_handoff_defaults(void)
 {
-    static const uint8_t expected_v10[sizeof(IA64VpcHandoff)] = {
+    static const uint8_t expected_v11[sizeof(IA64VpcHandoff)] = {
         0x51, 0x49, 0x41, 0x36, 0x34, 0x52, 0x41, 0x4d,
-        0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -678,6 +679,7 @@ static void test_firmware_handoff_defaults(void)
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
     uint8_t actual[sizeof(IA64VpcHandoff)];
     QTestState *qts = ia64_vpc_start(NULL);
@@ -685,7 +687,7 @@ static void test_firmware_handoff_defaults(void)
     assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, actual, sizeof(actual));
     g_assert_cmpmem(actual, sizeof(actual),
-                    expected_v10, sizeof(expected_v10));
+                    expected_v11, sizeof(expected_v11));
     qtest_quit(qts);
 }
 
