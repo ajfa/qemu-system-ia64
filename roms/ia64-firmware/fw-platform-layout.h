@@ -216,4 +216,15 @@ extern UINT64 mCpuAssistBase;
 #define PCI_CONFIG_ECAM_BASE          IA64_PCI_CONFIG_BASE
 #define PCI_CONFIG_ECAM_SIZE          IA64_PCI_CONFIG_SIZE
 
+#define VGA_TEXT_FB_BASE              (VGA_LEGACY_FB_BASE + 0x18000ULL)
+#define VGA_TEXT_COLUMNS              80U
+#define VGA_TEXT_ROWS                 25U
+#define VGA_TEXT_CELL_WIDTH           8U
+#define VGA_TEXT_CELL_HEIGHT          16U
+#define VGA_TEXT_GLYPH_WIDTH          5U
+#define VGA_TEXT_GLYPH_HEIGHT         7U
+#define VGA_TEXT_GLYPH_X              1U
+#define VGA_TEXT_GLYPH_Y              1U
+#define VGA_TEXT_GLYPH_SCALE_Y        2U
+
 #endif /* IA64_FIRMWARE_FW_PLATFORM_LAYOUT_H */

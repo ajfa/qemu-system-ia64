@@ -60,10 +60,7 @@
 #define FW_NVRAM_VARIABLE_DATA_MAX 1024U
 #define NVRAM_VAR_DATA_MAX FW_NVRAM_VARIABLE_DATA_MAX
 
-typedef struct {
-    UINT16 ScanCode;
-    CHAR16 UnicodeChar;
-} EFI_INPUT_KEY;
+/* EFI_INPUT_KEY lives in fw-efi-types.h. */
 
 typedef struct {
     UINT16 Year;

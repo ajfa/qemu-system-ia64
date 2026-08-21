@@ -41,6 +41,15 @@
 #define PS2_DATA_PORT        (IA64_PCI_IO_BASE + 0x60U)
 #define PS2_STATUS_PORT      (IA64_PCI_IO_BASE + 0x64U)
 #define PS2_STATUS_OBF       0x01U
+#define PS2_CMD_READ_MODE             0x20U
+#define PS2_CMD_WRITE_MODE            0x60U
+#define PS2_CMD_KBD_ENABLE            0xAEU
+#define PS2_KBD_CMD_ENABLE_SCAN       0xF4U
+#define PS2_KBD_ACK                   0xFAU
+#define PS2_MODE_KBD_INT              0x01U
+#define PS2_MODE_MOUSE_INT            0x02U
+#define PS2_MODE_SYS                  0x04U
+#define PS2_MODE_KCC                  0x40U
 #define PS2_STATUS_IBF       0x02U
 #define PS2_STATUS_MOUSE_OBF 0x20U
 
@@ -87,6 +96,7 @@ EFI_STATUS bs_create_event(UINT32 type, UINTN notify_tpl,
 EFI_STATUS bs_signal_event(EFI_EVENT event);
 EFI_STATUS bs_close_event(EFI_EVENT event);
 EFI_STATUS bs_set_timer(EFI_EVENT event, UINTN type, UINT64 trigger_time);
+extern EFI_TPL mCurrentTpl;
 EFI_TPL bs_raise_tpl(EFI_TPL new_tpl);
 VOID bs_restore_tpl(EFI_TPL old_tpl);
 EFI_STATUS bs_stall(UINTN microseconds);
@@ -126,6 +136,42 @@ UINT8 table_checksum8(const void *buf, UINTN len);
 void smbios_init_table(void);
 BOOLEAN smbios_table_integrity_selftest(void);
 UINTN fw_smbios_entry_point_address(void);
+
+/* console.c */
+extern EFI_SIMPLE_TEXT_OUT_PROTOCOL mConOutProto;
+extern EFI_SIMPLE_TEXT_INPUT_PROTOCOL mConInProto;
+extern EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL mConInExProto;
+extern SIMPLE_TEXT_OUTPUT_MODE mConOutMode;
+extern EFI_KEY_STATE mConInCurrentKeyState;
+void efi_init_conout(void);
+void efi_init_conin_wait_events(void);
+void ps2_init_controller(void);
+BOOLEAN conin_key_available(void);
+EFI_STATUS conin_peek_key(EFI_INPUT_KEY *Key);
+EFI_STATUS conin_read_key_raw(EFI_INPUT_KEY *Key);
+BOOLEAN uefi_conout_selftest(void);
+BOOLEAN uefi_conin_buffer_selftest(void);
+BOOLEAN uefi_ps2_scancode_selftest(void);
+void text_redraw_screen(void);
+void text_clear_screen(void);
+void text_clear_legacy_cells(void);
+UINT64 text_glyph5x7(CHAR16 Ch);
+
+extern const UINT8 mConOutProtocolGuid[16];
+extern const UINT8 mConInProtocolGuid[16];
+extern const UINT8 mConInExProtocolGuid[16];
+
+extern UINT32 mGraphicsWidth;
+extern UINT32 mGraphicsHeight;
+extern UINT32 mGraphicsStride;
+extern BOOLEAN mGraphicsActive;
+BOOLEAN fw_data_translation_enabled(void);
+
+/* ohci.c */
+BOOLEAN uefi_usb_keyboard_selftest(void);
+BOOLEAN usb_keyboard_report_to_key(EFI_INPUT_KEY *Key);
+EFI_STATUS usb_keyboard_read_key(EFI_INPUT_KEY *Key);
+BOOLEAN usb_keyboard_init(void);
 
 /* unicode_collation.c */
 extern EFI_UNICODE_COLLATION_PROTOCOL mUnicodeCollationProto;
