@@ -3482,21 +3482,19 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
     mc->default_cpus = 1;
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("madison");
     mc->smp_props.prefer_sockets = true;
-    mc->default_ram_size = 2 * GiB;
+    mc->default_ram_size = 1 * GiB;
     mc->default_ram_id = "ia64-vpc.ram";
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     mc->default_display = "ati";
 #endif
 #ifdef CONFIG_IA64_VPC_NETWORK
     /*
-     * Default to the 82543GC: XP IA-64's inbox e1000 INF matches exactly
-     * PCI\VEN_8086&DEV_1004&REV_02 (e1000w64.sys), giving the guests an
-     * inbox *gigabit* adapter -- verified working in XP 2002 and Whistler
-     * 2462.  The previous default, the 100 Mbit PRO/100 (i82557b,
-     * NET557.IN_ / DEV_1229), remains available via -nic model=i82557b;
-     * the plain e1000 (82540EM, DEV_100E) has no inbox IA-64 driver.
+     * Default to the 100 Mbit PRO/100 (i82557b, NET557.IN_ / DEV_1229).
+     * The 82543GC gigabit adapter (PCI\VEN_8086&DEV_1004&REV_02,
+     * e1000w64.sys) remains available via -nic model=e1000-82543gc; the
+     * plain e1000 (82540EM, DEV_100E) has no inbox IA-64 driver.
      */
-    mc->default_nic = "e1000-82543gc";
+    mc->default_nic = "i82557b";
 #endif
 #ifdef CONFIG_IA64_VPC_STORAGE
     mc->block_default_type = IF_SCSI;
