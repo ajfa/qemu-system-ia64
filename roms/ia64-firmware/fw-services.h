@@ -105,6 +105,23 @@ BOOLEAN fw_protocol_interface_installed(EFI_HANDLE handle, VOID *protocol,
 
 extern const UINT8 mDevicePathProtocolGuid[16];
 
+UINT64 fw_guest_ram_size(void);
+UINT64 fw_guest_low_ram_end(void);
+UINTN fw_guest_processor_count(void);
+UINTN fw_guest_socket_count(void);
+UINTN fw_guest_cores_per_socket(void);
+UINTN fw_guest_threads_per_core(void);
+UINTN fw_guest_high_ram_count(void);
+UINT64 fw_guest_high_ram_base(UINTN Index);
+UINT64 fw_guest_high_ram_end(UINTN Index);
+
+UINT8 table_checksum8(const void *buf, UINTN len);
+
+/* smbios.c */
+void smbios_init_table(void);
+BOOLEAN smbios_table_integrity_selftest(void);
+UINTN fw_smbios_entry_point_address(void);
+
 /* unicode_collation.c */
 extern EFI_UNICODE_COLLATION_PROTOCOL mUnicodeCollationProto;
 BOOLEAN unicode_collation_selftest(void);
