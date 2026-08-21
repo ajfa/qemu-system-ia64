@@ -1247,8 +1247,8 @@ static void pal_perf_mon_info(CPUIA64State *env, uintptr_t ra)
 
 static bool pal_addr_overlaps_fw_update(uint64_t address, uint64_t alignment)
 {
-    uint64_t fw_base = 0xff000000ULL;
-    uint64_t fw_limit = 0x100000000ULL;
+    uint64_t fw_base = IA64_FW_ADDRESS_SPACE_BASE;
+    uint64_t fw_limit = IA64_FW_ADDRESS_SPACE_END;
     uint64_t block_end;
 
     if (address >= fw_limit) {

@@ -42,8 +42,14 @@ while IFS= read -r source || [ -n "$source" ]; do
 
     case "$source" in
         *.S)
-            "$AS" -o "$object" "$source_path"
+            # Via $CC so the C preprocessor runs: entry.S includes the shared
+            # ABI header.  Dependencies tracked like the C objects.
+            object_depfile="${object}.d"
+            "$CC" -nostdinc -nostdlib -I"$INCLUDE_DIR" \
+                -MMD -MP -MF "$object_depfile" -MT "$OUT_BIN" \
+                -c -o "$object" "$source_path"
             set -- "$@" "$object"
+            DEPFILES="${DEPFILES} ${object_depfile}"
             ;;
         *.c)
             object_depfile="${object}.d"

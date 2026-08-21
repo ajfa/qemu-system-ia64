@@ -6,21 +6,21 @@
  * No GP manual offset computation is needed.
  */
 
+#include "hw/ia64/ia64_vpc_abi.h"
+
     .section .text._start, "ax"
     /*
-     * The boot memory stacks live at the top of installed low RAM (see
-     * hw/ia64/ia64_vpc_abi.h).  This file is assembled without the C
-     * preprocessor, so the ABI values are repeated here and must match:
-     * IA64_FW_HANDOFF_ADDR/MAGIC, IA64_PCI_MMIO_BASE, IA64_FW_LOW_RAM_MIN,
-     * IA64_FW_LOW_RAM_ALIGN, and the per-CPU stride below (shl 17 = 128 KiB)
-     * must equal IA64_FW_CPU_STACK_SIZE.
+     * The boot memory stacks live at the top of installed low RAM.  The ABI
+     * constants come from hw/ia64/ia64_vpc_abi.h (this file is assembled
+     * with the C preprocessor); the per-CPU stride below (shl 17 = 128 KiB)
+     * equals IA64_FW_CPU_STACK_SIZE, enforced by a static assert there.
      */
-    .equ FW_HANDOFF_ADDR, 0x000ff000
-    .equ FW_HANDOFF_MAGIC, 0x4d41523436414951
-    .equ FW_HANDOFF_RAMSIZE_OFFSET, 16
-    .equ FW_PCI_MMIO_BASE, 0xee000000
-    .equ FW_LOW_RAM_MIN, 0x08000000
-    .equ FW_LOW_RAM_ALIGN_MASK, 0x1fff
+    .equ FW_HANDOFF_ADDR, IA64_FW_HANDOFF_ADDR
+    .equ FW_HANDOFF_MAGIC, IA64_FW_HANDOFF_MAGIC
+    .equ FW_HANDOFF_RAMSIZE_OFFSET, IA64_FW_HANDOFF_RAMSIZE_OFFSET
+    .equ FW_PCI_MMIO_BASE, IA64_PCI_MMIO_BASE
+    .equ FW_LOW_RAM_MIN, IA64_FW_LOW_RAM_MIN
+    .equ FW_LOW_RAM_ALIGN_MASK, (IA64_FW_LOW_RAM_ALIGN - 1)
     .global _start
     .type _start, @function
     .proc _start

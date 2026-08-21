@@ -66,22 +66,14 @@
  * is no DRAM island between the aperture and the chipset/SAPIC region.
  */
 #define IA64_LOW_RAM_LIMIT IA64_PCI_MMIO_BASE
-#define IA64_FIRMWARE_ADDRESS_SPACE_BASE 0x00000000ff000000ULL
-#define IA64_FIRMWARE_ADDRESS_SPACE_SIZE (16 * MiB)
-#define IA64_RTC_BASE 0x00000000ffef0000ULL
-#define IA64_RTC_SIZE (8 * KiB)
-#define IA64_WATCHDOG_BASE 0x00000000ffee0000ULL
-#define IA64_WATCHDOG_SIZE (4 * KiB)
-#define IA64_WATCHDOG_TIMEOUT 0x00
-#define IA64_WATCHDOG_CODE    0x08
-#define IA64_NVRAM_BASE 0x00000000fff00000ULL
-#define IA64_NVRAM_SIZE (64 * KiB)
-#define IA64_NVRAM_COMMIT_OFFSET (IA64_NVRAM_SIZE - 8)
-#define IA64_NVRAM_COMMIT_MAGIC 0x54494d4d4f43564eULL /* "NVCOMMIT" */
-#define IA64_HIGH_RAM_AFTER_FIRMWARE_BASE \
-    (IA64_FIRMWARE_ADDRESS_SPACE_BASE + IA64_FIRMWARE_ADDRESS_SPACE_SIZE)
-#define IA64_IVT_BASE   0x10000ULL
-#define IA64_IVT_SIZE   0x8000ULL
+/*
+ * The firmware address space, RTC/watchdog/NVRAM devices, IVT, IOSAPIC,
+ * local SAPIC and ACPI PM block addresses are shared with the firmware via
+ * hw/ia64/ia64_vpc_abi.h.
+ */
+#define IA64_FIRMWARE_ADDRESS_SPACE_BASE IA64_FW_ADDRESS_SPACE_BASE
+#define IA64_FIRMWARE_ADDRESS_SPACE_SIZE IA64_FW_ADDRESS_SPACE_SIZE
+#define IA64_HIGH_RAM_AFTER_FIRMWARE_BASE IA64_FW_ADDRESS_SPACE_END
 #define IA64_AHCI_IDP_IO_BASE   0x0000c100U
 #define IA64_UHCI_IO_BASE       0x0000c120U
 /* LSI BAR0 is 0x100 bytes and therefore requires 0x100-byte alignment. */
@@ -162,21 +154,8 @@
 #define IA64_ATI_PLL_MIN_FREQ     12500U
 #define IA64_ATI_PLL_MAX_FREQ     40000U
 #endif
-/*
- * IOSAPIC at the 460GX/i2000 SDV address (SAPIC/IOAPIC message block just
- * below the local SAPIC at 0xFEE00000), inside the fixed chipset region above
- * the PCI aperture.  Keeping it here -- rather than the old 2 GiB parking spot
- * -- leaves low DRAM contiguous all the way to the aperture.
- */
-#define IA64_IOSAPIC_BASE       0x00000000fec00000ULL
-#define IA64_IOSAPIC_SIZE       0x0000000000002000ULL
-#define IA64_ACPI_PM_IO_BASE    0x00002000U
-#define IA64_ACPI_PM_IO_SIZE    0x00000010U
 #define IA64_LEGACY_COM1_IO_BASE 0x000003f8U
 #define IA64_LEGACY_COM1_IO_SIZE 0x00000008U
-#define IA64_ACPI_PM_RESET_OFFSET 0x0000000cU
-#define IA64_ACPI_PM_RESET_VALUE  0x01U
-#define IA64_ACPI_SCI_IRQ       9
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
@@ -1525,9 +1504,9 @@ static uint64_t ia64_vpc_watchdog_read(void *opaque, hwaddr addr,
     (void)size;
 
     switch (addr) {
-    case IA64_WATCHDOG_TIMEOUT:
+    case IA64_WATCHDOG_TIMEOUT_OFFSET:
         return s->watchdog_timeout;
-    case IA64_WATCHDOG_CODE:
+    case IA64_WATCHDOG_CODE_OFFSET:
         return s->watchdog_code;
     default:
         return 0;
@@ -1546,10 +1525,10 @@ static void ia64_vpc_watchdog_write(void *opaque, hwaddr addr,
     }
 
     switch (addr) {
-    case IA64_WATCHDOG_CODE:
+    case IA64_WATCHDOG_CODE_OFFSET:
         s->watchdog_code = value;
         break;
-    case IA64_WATCHDOG_TIMEOUT:
+    case IA64_WATCHDOG_TIMEOUT_OFFSET:
         s->watchdog_timeout = value;
         timer_del(s->watchdog_timer);
         if (value == 0) {
