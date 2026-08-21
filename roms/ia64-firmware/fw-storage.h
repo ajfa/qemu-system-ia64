@@ -162,6 +162,11 @@ void pci_config_write_value(UINT64 Segment, UINT64 Bus, UINT64 Device,
                             UINT64 Function, UINT64 Offset,
                             UINTN Size, UINT64 Value);
 
+extern IDE_DEVICE *mBootIdeDevice;
+extern IDE_DEVICE *mHardDiskIdeDevice;
+void ide_probe_primary_devices(void);
+IDE_DEVICE *ide_pick_boot_device(void);
+
 /* IDE driver services used by the storage abstraction (storage.c). */
 UINT8 ata_pio_read8(UINT64 port);
 void ata_pio_write8(UINT64 port, UINT8 val);

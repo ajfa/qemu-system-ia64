@@ -4,6 +4,7 @@ unicode_collation.c
 smbios.c
 storage.c
 efi_memmap.c
+ide.c
 decompress.c
 debug_protocols.c
 pointer_protocol.c

@@ -55,6 +55,9 @@
 #define TIMER_RELATIVE 2U
 
 void fw_copy_mem(VOID *destination, const VOID *source, UINTN length);
+void fw_copy_mem_fast(VOID *Destination, const VOID *Source,
+                      UINTN Length);
+BOOLEAN fw_handoff_ide_dma_enabled(void);
 UINT64 fw_read_itc(void);
 volatile UINT8 *fw_uart_reg(UINTN offset);
 UINT64 fw_read_psr(void);
