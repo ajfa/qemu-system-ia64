@@ -1462,8 +1462,14 @@ void fw_boot_shell_run(VOID)
     CHAR8 *arguments[FW_SHELL_ARG_MAX];
 
     fw_shell_refresh_file_systems();
-    (void)fw_console_clear();
-    fw_shell_puts("IA-64 EFI shell\r\n"
+    /*
+     * Do not clear the screen on entry: print below whatever the firmware
+     * already displayed (e.g. the "No bootable image found" notice, or the
+     * boot-time self-test log) so it stays visible.  Two blank lines separate
+     * the shell banner from the preceding output.  (The 'clear'/'cls' command
+     * still clears on demand.)
+     */
+    fw_shell_puts("\r\n\r\nIA-64 EFI shell\r\n"
                   "Type 'help' for commands; 'exit' resumes boot.\r\n\r\n");
     while (!fw_boot_services_exited()) {
         UINTN argument_count;

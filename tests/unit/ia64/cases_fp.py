@@ -52,9 +52,11 @@ from .encoding import (
     br_ctop_many,
     break_b,
     bundle_words,
+    chk_a_clr_f,
     chk_a_nc_f,
     chk_s_f,
     cmp4_eq_unc_imm,
+    cmp_eq_imm,
     cmp_ltu_unc,
     dep,
     deterministic_words,
@@ -882,6 +884,55 @@ test_fcmp_invalid_fault_restores_predicates = require_registers(
         "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 1,
         "pr_mask": ExpectedBits(mask=(1 << 6) | (1 << 7), value=1 << 6),
         "ar_fpsr": 0x33e,
+    }, entry=0x10)
+
+test_fcmp_qnan_quiet_relations = require_registers(
+    "fcmp_qnan_quiet_relations", [
+        (0x10, *movl_mlx(2, 0x7ff8000000001234)),
+        (0x20, *movl_mlx(3, 0x3ff0000000000000)),
+        (0x30, 0x09, setf_d(6, 2), setf_d(7, 3), nop_i()),
+        (0x40, 0x1c, nop_m(), fcmp(6, 7, 6, 7, rel=0, sf=0), nop_b()),
+        (0x50, 0x1c, nop_m(), fcmp(8, 9, 6, 7, rel=3, sf=1), nop_b()),
+        (0x60, 0x1c, nop_m(), fcmp(10, 11, 6, 7, rel=1, sf=2), nop_b()),
+        (0x70, 0x1c, nop_m(), fcmp(12, 13, 6, 7, rel=2, sf=3), nop_b()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "pr_mask": ExpectedBits(
+            mask=sum(1 << predicate for predicate in range(6, 14)),
+            value=(1 << 7) | (1 << 8) | (1 << 11) | (1 << 13)),
+        # eq and unord are quiet; lt and le set V for this QNaN.
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (1 << (FPSR_SF2_SHIFT + FPSR_SF_FLAGS_SHIFT)) |
+                    (1 << (FPSR_SF2_SHIFT + 13 +
+                           FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fcmp_qnan_quiet_with_invalid_enabled = require_registers(
+    "fcmp_qnan_quiet_with_invalid_enabled", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~1)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x00, cmp4_eq_unc_imm(8, 9, 0, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(3, 0x7ff8000000005678)),
+        (0x50, *movl_mlx(4, 0x3ff0000000000000)),
+        (0x60, 0x09, setf_d(6, 3), setf_d(7, 4), nop_i()),
+        # Quiet eq commits before signaling lt takes the enabled V fault.
+        (0x70, 0x1c, nop_m(), fcmp(6, 7, 6, 7, rel=0), nop_b()),
+        (0x80, 0x1c, nop_m(), fcmp(8, 9, 6, 7, rel=1), nop_b()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x10,
+                 IA64_FP_FAULT_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 1,
+        "pr_mask": ExpectedBits(
+            mask=sum(1 << predicate for predicate in range(6, 10)),
+            value=(1 << 7) | (1 << 8)),
+        "ar_fpsr": DEFAULT_FPSR & ~1,
     }, entry=0x10)
 
 test_fp_inexact_trap_commits_result = require_registers(
@@ -3025,6 +3076,30 @@ test_predicated_off_disabled_fp_does_not_fault = require_registers(
         "ar_fpsr": DEFAULT_FPSR,
     }, entry=0x10)
 
+test_chk_a_clr_f_ignores_psr_dfh = require_registers(
+    "chk_a_clr_f_ignores_psr_dfh", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DFH)),
+        (0x20, 0x01, nop_m(), cmp_eq_imm(5, 6, 0, 0), nop_i()),
+        (0x30, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        # Floating data checks query an ALAT tag without reading the FR.
+        (0x50, 0x00, chk_a_clr_f(40, 0x50, 0x80, qp=5), nop_i(),
+         nop_i()),
+        (0x60, 0x00, adds(5, 1, 0), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x80)),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+        # Turn a regressed Disabled FP fault into an immediate state mismatch.
+        (IA64_DISABLED_FP_VECTOR, 0x00, nop_m(), adds(4, 1, 0), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR + 0x10, 0x80)),
+    ], {
+        "ip": 0x80,
+        "exception": IA64_EXCP_NONE,
+        "r4": 0,
+        "r5": 0,
+        "psr": ExpectedBits(mask=IA64_PSR_DFH, value=IA64_PSR_DFH),
+    }, entry=0x10)
+
 test_ldfp_requires_opposite_register_banks = require_exception(
     "ldfp_requires_opposite_register_banks", [
         (0x10, 0x08, ldfp8_postinc(2, 4, 3), nop_m(), nop_i()),
@@ -3148,6 +3223,7 @@ GROUP = 'fp'
 CASE_NAMES = (
 
     'br_ctop_rotates_floating_registers',
+    'chk_a_clr_f_ignores_psr_dfh',
     'chk_s_f_decode',
     'coreutils_hash_bucket_float_division',
     'data_big_endian_ldfe_stfe',
@@ -3168,6 +3244,8 @@ CASE_NAMES = (
     'fcmp_invalid_fault_restores_predicates',
     'fcmp_natval_clears_predicates',
     'fcmp_p2_high_bit_not_fchkfs',
+    'fcmp_qnan_quiet_relations',
+    'fcmp_qnan_quiet_with_invalid_enabled',
     'fcmp_same_pred_illegal',
     'fcmp_status_field_decode',
     'fcvt_fx_signed_trunc',

@@ -82,6 +82,19 @@ jobs:
             --disable-qom-cast-debug \
             --disable-stack-protector
 
+      - name: Check that the install is relocatable
+        # The package is used portably, so the ROMs must be found relative to
+        # the binary. See the Windows job for why a single-component prefix
+        # such as "/" silently turns that off. The default prefix satisfies
+        # this; the check is here so a future prefix change cannot regress it.
+        run: |
+          prefix=$(sed -n 's/^#define CONFIG_PREFIX "\(.*\)"$/\1/p' \
+                   build/config-host.h)
+          case "$prefix" in
+            /?*) echo "relocatable install anchored at $prefix" ;;
+            *) echo "CONFIG_PREFIX '$prefix' disables relocation" >&2; exit 1 ;;
+          esac
+
       - name: Build QEMU + firmware
         run: |
           export PATH=/usr/lib64/ccache:$PATH
@@ -89,6 +102,8 @@ jobs:
           ccache -s
 
       - name: Run ia64 regression gate
+        # Includes the ATI Rage 128 device tests (qtest-ia64/ia64-vpc-test);
+        # --print-errorlogs prints the failing test's TAP path on a regression.
         run: >
           build/pyvenv/bin/meson test -C build
           --suite ia64 --suite qtest-ia64
@@ -116,6 +131,11 @@ jobs:
         run: |
           DESTDIR=$PWD/dist ninja -C build install
           cp build/roms/ia64-firmware/ia64-firmware.bin dist/usr/local/share/qemu/
+          # Link-time only: headers plus libfdt.a and its pkg-config file.
+          # libexec/qemu-bridge-helper stays — it is used at runtime by
+          # -netdev bridge.
+          rm -rf dist/usr/local/include dist/usr/local/lib \
+                 dist/usr/local/lib64
 
       - name: Upload Linux package
         uses: actions/upload-artifact@v4
@@ -167,7 +187,7 @@ jobs:
           ../configure \
             --cross-prefix=x86_64-w64-mingw32- \
             --target-list=ia64-softmmu \
-            --prefix=/ \
+            --prefix=/qemu \
             --enable-gtk \
             --enable-slirp \
             --disable-docs \
@@ -175,30 +195,52 @@ jobs:
             --disable-qom-cast-debug \
             --disable-stack-protector
 
+      - name: Check that the install is relocatable
+        # QEMU resolves its data directory relative to the executable, but only
+        # if CONFIG_PREFIX has at least one path component: starts_with_prefix()
+        # requires a separator after the prefix, which "/" can never satisfy.
+        # With prefix "/" every lookup falls back to the literal built-in path,
+        # so the package looks for its ROMs in <drive>:\share and only works
+        # when started with "-L share". The prefix itself never appears at
+        # runtime; it only anchors the bindir -> datadir offset.
+        run: |
+          prefix=$(sed -n 's/^#define CONFIG_PREFIX "\(.*\)"$/\1/p' \
+                   build/config-host.h)
+          case "$prefix" in
+            /?*) echo "relocatable install anchored at $prefix" ;;
+            *) echo "CONFIG_PREFIX '$prefix' disables relocation" >&2; exit 1 ;;
+          esac
+
       - name: Build QEMU + firmware
         run: ninja -C build
 
       - name: Assemble Windows package
         # Windows installs use a flat layout: .exe files at the prefix root,
-        # firmware blobs in share/. The IA-64 firmware is install:false in
-        # meson, so copy it in explicitly, then pull in the mingw runtime DLLs
-        # the binaries link against (three passes to converge on transitive
-        # dependencies; system DLLs like kernel32 aren't in the sysroot and are
-        # skipped naturally).
+        # firmware blobs in share/ beside them. DESTDIR puts that layout under
+        # dist/qemu, which is the directory that gets published — the package
+        # is portable, so it runs from wherever the user unpacks it. The IA-64
+        # firmware is install:false in meson, so copy it in explicitly, then
+        # pull in the mingw runtime DLLs the binaries link against (three
+        # passes to converge on transitive dependencies; system DLLs like
+        # kernel32 aren't in the sysroot and are skipped naturally).
         run: |
           DESTDIR=$PWD/dist ninja -C build install
-          cp build/roms/ia64-firmware/ia64-firmware.bin dist/share/
+          cp build/roms/ia64-firmware/ia64-firmware.bin dist/qemu/share/
+          # Link-time only: headers plus libfdt.a and libslirp.dll.a. The
+          # slirp DLL the emulator actually loads is libslirp-0.dll at the
+          # package root and is not affected.
+          rm -rf dist/qemu/include dist/qemu/lib
           MINGW_PREFIX=/usr/x86_64-w64-mingw32/sys-root/mingw
           SYSROOT=$MINGW_PREFIX/bin
           # GTK needs its GSettings schemas at runtime or dialogs can abort;
           # compile them from the sysroot into the package (best-effort).
           if [ -d "$MINGW_PREFIX/share/glib-2.0/schemas" ]; then
-            mkdir -p dist/share/glib-2.0/schemas
+            mkdir -p dist/qemu/share/glib-2.0/schemas
             glib-compile-schemas \
-              --targetdir=dist/share/glib-2.0/schemas \
+              --targetdir=dist/qemu/share/glib-2.0/schemas \
               "$MINGW_PREFIX/share/glib-2.0/schemas" || true
           fi
-          cd dist
+          cd dist/qemu
           # Fedora's mingw64-SDL2 is sdl2-compat: SDL2.dll dlopens SDL3.dll at
           # runtime, which an import-table sweep cannot see. Seed such
           # runtime-loaded DLLs first so the sweep below also resolves their
@@ -229,7 +271,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: qemu-system-ia64-win64
-          path: dist/
+          path: dist/qemu/
           if-no-files-found: error
 
       - name: Upload build logs on failure

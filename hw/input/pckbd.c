@@ -146,6 +146,18 @@
 #define KBD_OBSRC_MOUSE         0x02
 #define KBD_OBSRC_CTRL          0x04
 
+/*
+ * Time (in microseconds) it takes the KBC to clock one byte across a PS/2
+ * serial link (KCLK/KDAT or MCLK/MDAT) before it is presented in the output
+ * buffer.  The PS/2 clock runs at ~10-16 kHz and a frame is 11 bits, i.e.
+ * roughly 1 ms per byte on real hardware (see LPC47B27 datasheet section 13).
+ * Modelling this transfer delay - rather than presenting a device byte
+ * synchronously with the guest port access - keeps a solicited reply from
+ * being delivered to another CPU before the CPU that issued the command has
+ * published its (unlocked) driver bookkeeping.
+ */
+#define KBD_THROTTLE_US         1000
+
 
 /*
  * XXX: not generating the irqs if KBD_MODE_DISABLE_KBD is set may be
@@ -256,6 +268,24 @@ static void kbd_update_aux_irq(void *opaque, int level)
     } else {
         s->pending &= ~KBD_PENDING_AUX;
     }
+
+    /*
+     * Model the PS/2 device->host transfer time for a mouse byte: present its
+     * OBF/IRQ12 only after KBD_THROTTLE_US instead of synchronously with the
+     * guest's port write.  Without this delay a solicited command reply (for
+     * instance the ACK to a probe command) can reach another CPU before the
+     * CPU that issued the command has published its unlocked acking/cmdcnt
+     * state, so the driver misreads the reply as unsolicited mouse data.  The
+     * subsequent bytes of a multi-byte reply are re-armed the same way when
+     * ps2_read_data() re-raises the line as the guest drains the queue.
+     */
+    if (level && s->throttle_timer && !(s->status & KBD_STAT_OBF) &&
+        !timer_pending(s->throttle_timer)) {
+        timer_mod(s->throttle_timer,
+                  qemu_clock_get_us(QEMU_CLOCK_VIRTUAL) + KBD_THROTTLE_US);
+        return;
+    }
+
     kbd_safe_update_irq(s);
 }
 
@@ -406,7 +436,8 @@ static uint64_t kbd_read_data(void *opaque, hwaddr addr,
         if (s->obsrc & KBD_OBSRC_KBD) {
             if (s->throttle_timer) {
                 timer_mod(s->throttle_timer,
-                          qemu_clock_get_us(QEMU_CLOCK_VIRTUAL) + 1000);
+                          qemu_clock_get_us(QEMU_CLOCK_VIRTUAL) +
+                          KBD_THROTTLE_US);
             }
             s->obdata = ps2_read_data(PS2_DEVICE(&s->ps2kbd));
         } else if (s->obsrc & KBD_OBSRC_MOUSE) {

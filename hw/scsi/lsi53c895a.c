@@ -480,6 +480,46 @@ static inline uint32_t read_dword(LSIState *s, uint32_t addr)
     return cpu_to_le32(buf);
 }
 
+/*
+ * Fetch a SCRIPTS dword (instruction word or immediate operand) from DSP-space.
+ * In 40-bit (DAC) mode the chip forms a 40-bit fetch address from the 32-bit
+ * DSP plus the SCRIPTS Fetch Selector (SFS) as the upper bits, so a guest that
+ * places its SCRIPTS above 4 GiB (e.g. the Linux sym53c8xx snoop test with
+ * FE_DAC_IN_USE) can be fetched at all.  Without this the fetch is truncated to
+ * 32 bits and reads zeroes, stalling the engine.
+ */
+static inline uint32_t lsi_fetch_dword(LSIState *s, uint32_t dsp_addr)
+{
+    dma_addr_t addr = dsp_addr;
+    uint32_t buf;
+
+    if (lsi_dma_40bit(s)) {
+        addr |= ((uint64_t)s->sfs << 32);
+    }
+    pci_dma_read(PCI_DEVICE(s), addr, &buf, 4);
+    return cpu_to_le32(buf);
+}
+
+/*
+ * Compose the full 64-bit DMA address for the current data pointer (DNAD),
+ * folding in the DAC upper-address bits the same way lsi_do_dma() does, so the
+ * command/status/message phases reach above-4 GiB buffers too.
+ */
+static inline dma_addr_t lsi_dnad_addr(LSIState *s)
+{
+    /*
+     * s->dnad64 holds the upper 32 address bits selected for the *current*
+     * block move.  lsi_execute_script() computes it per move honouring
+     * EN64DBMV / EN64TIBMV, the SBMS static fallback and DDAC (LSI53C895A
+     * technical manual 4-100).  Composing from it directly avoids leaking a
+     * stale Dynamic Block Move Selector (DBMS) — which is only meaningful for
+     * the 64-bit direct move that loaded it — into an unrelated later
+     * transfer (e.g. a 32-bit table-indirect or control move), which would
+     * wrongly push a below-4GB transfer above 4GB.
+     */
+    return s->dnad | ((uint64_t)s->dnad64 << 32);
+}
+
 static void lsi_stop_script(LSIState *s)
 {
     s->istat1 &= ~LSI_ISTAT1_SRUN;
@@ -648,14 +688,7 @@ static void lsi_do_dma(LSIState *s, int out)
     if (count > p->dma_len)
         count = p->dma_len;
 
-    addr = s->dnad;
-    /* both 40 and Table Indirect 64-bit DMAs store upper bits in dnad64 */
-    if (lsi_dma_40bit(s) || lsi_dma_ti64bit(s))
-        addr |= ((uint64_t)s->dnad64 << 32);
-    else if (s->dbms)
-        addr |= ((uint64_t)s->dbms << 32);
-    else if (s->sbms)
-        addr |= ((uint64_t)s->sbms << 32);
+    addr = lsi_dnad_addr(s);
 
     trace_lsi_do_dma(addr, count);
     s->csbc += count;
@@ -878,7 +911,7 @@ static void lsi_do_command(LSIState *s)
     trace_lsi_do_command(s->dbc);
     if (s->dbc > 16)
         s->dbc = 16;
-    pci_dma_read(PCI_DEVICE(s), s->dnad, buf, s->dbc);
+    pci_dma_read(PCI_DEVICE(s), lsi_dnad_addr(s), buf, s->dbc);
     s->sfbr = buf[0];
     s->command_complete = 0;
 
@@ -943,7 +976,7 @@ static void lsi_do_status(LSIState *s)
     s->dbc = 1;
     status = s->status;
     s->sfbr = status;
-    pci_dma_write(PCI_DEVICE(s), s->dnad, &status, 1);
+    pci_dma_write(PCI_DEVICE(s), lsi_dnad_addr(s), &status, 1);
     lsi_set_phase(s, PHASE_MI);
     s->msg_action = LSI_MSG_ACTION_DISCONNECT;
     lsi_add_msg_byte(s, 0); /* COMMAND COMPLETE */
@@ -960,7 +993,7 @@ static void lsi_do_msgin(LSIState *s)
         len = s->dbc;
 
     if (len) {
-        pci_dma_write(PCI_DEVICE(s), s->dnad, s->msg, len);
+        pci_dma_write(PCI_DEVICE(s), lsi_dnad_addr(s), s->msg, len);
         /* Linux drivers rely on the last byte being in the SIDL.  */
         s->sidl = s->msg[len - 1];
         s->msg_len -= len;
@@ -995,7 +1028,7 @@ static void lsi_do_msgin(LSIState *s)
 static uint8_t lsi_get_msgbyte(LSIState *s)
 {
     uint8_t data;
-    pci_dma_read(PCI_DEVICE(s), s->dnad, &data, 1);
+    pci_dma_read(PCI_DEVICE(s), lsi_dnad_addr(s), &data, 1);
     s->dnad++;
     s->dbc--;
     return data;
@@ -1208,7 +1241,7 @@ bad:
 }
 
 #define LSI_BUF_SIZE 4096
-static void lsi_memcpy(LSIState *s, uint32_t dest, uint32_t src, int count)
+static void lsi_memcpy(LSIState *s, dma_addr_t dest, dma_addr_t src, int count)
 {
     int n;
     QEMU_UNINITIALIZED uint8_t buf[LSI_BUF_SIZE];
@@ -1285,14 +1318,14 @@ again:
         object_unref(s);
         return;
     }
-    insn = read_dword(s, s->dsp);
+    insn = lsi_fetch_dword(s, s->dsp);
     if (!insn) {
         /* If we receive an empty opcode increment the DSP by 4 bytes
            instead of 8 and execute the next opcode at that location */
         s->dsp += 4;
         goto again;
     }
-    addr = read_dword(s, s->dsp + 4);
+    addr = lsi_fetch_dword(s, s->dsp + 4);
     addr_high = 0;
     trace_lsi_execute_script(s->dsp, insn, addr);
     s->dsps = addr;
@@ -1312,6 +1345,11 @@ again:
         if (insn & (1 << 29)) {
             /* Indirect addressing.  */
             addr = read_dword(s, addr);
+            /*
+             * An indirect move carries no per-move upper address dword, so
+             * bits [63:32] come from the static selector (or none under DDAC).
+             */
+            addr_high = s->sbms;
         } else if (insn & (1 << 28)) {
             uint32_t buf[2];
             int32_t offset;
@@ -1361,13 +1399,34 @@ again:
                           "for 64-bit DMA block move", selector);
                     break;
                 }
+            } else {
+                /*
+                 * EN64TIBMV clear: table indirect BMOVs take bits [63:32]
+                 * from the Static Block Move Selector (LSI53C895A 4-100).
+                 */
+                addr_high = s->sbms;
             }
         } else if (lsi_dma_64bit(s)) {
             /* fetch a 3rd dword if 64-bit direct move is enabled and
                only if we're not doing table indirect or indirect addressing */
-            s->dbms = read_dword(s, s->dsp);
+            s->dbms = lsi_fetch_dword(s, s->dsp);
             s->dsp += 4;
             s->ia = s->dsp - 12;
+            /*
+             * EN64DBMV: this direct move's upper 32 bits come from the
+             * Dynamic Block Move Selector just loaded from the instruction.
+             */
+            addr_high = s->dbms;
+        } else {
+            /*
+             * Plain 32-bit direct BMOV (EN64DBMV clear): bits [63:32] come
+             * from the Static Block Move Selector, never a stale dynamic one.
+             */
+            addr_high = s->sbms;
+        }
+        /* DDAC disables all dual-address cycles: force a 32-bit address. */
+        if (s->ccntl1 & LSI_CCNTL1_DDAC) {
+            addr_high = 0;
         }
         if ((s->sstat1 & PHASE_MASK) != ((insn >> 24) & 7)) {
             trace_lsi_execute_script_blockmove_badphase(
@@ -1689,12 +1748,27 @@ again:
         if ((insn & (1 << 29)) == 0) {
             /* Memory move.  */
             uint32_t dest;
+            dma_addr_t src64, dest64;
             /* ??? The docs imply the destination address is loaded into
                the TEMP register.  However the Linux drivers rely on
                the value being presrved.  */
-            dest = read_dword(s, s->dsp);
+            dest = lsi_fetch_dword(s, s->dsp);
             s->dsp += 4;
-            lsi_memcpy(s, dest, addr, insn & 0xffffff);
+            /*
+             * A 64-bit MOVE MEMORY takes bits [63:32] of the source from the
+             * Memory Move Read Selector (MMRS) and of the destination from the
+             * Memory Move Write Selector (MMWS); DDAC forces a 32-bit address
+             * (LSI53C895A 4-103/4-104).  Without this the copy truncates to 32
+             * bits, so an above-4GB memory move -- e.g. the sym53c8xx cache
+             * snoop test on a >4GB Linux guest -- silently hits the wrong page.
+             */
+            src64 = addr;
+            dest64 = dest;
+            if (!(s->ccntl1 & LSI_CCNTL1_DDAC)) {
+                src64 |= (dma_addr_t)s->mmrs << 32;
+                dest64 |= (dma_addr_t)s->mmws << 32;
+            }
+            lsi_memcpy(s, dest64, src64, insn & 0xffffff);
         } else {
             uint8_t data[7];
             int reg;

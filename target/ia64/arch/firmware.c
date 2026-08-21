@@ -193,14 +193,14 @@ static unsigned ia64_fw_debug_cpu_index(CPUIA64State *env)
     CPUState *cs = env_cpu(env);
     unsigned index = cs->cpu_index < 0 ? 0 : cs->cpu_index;
 
-    return MIN(index, IA64_FW_DEBUG_MAX_CPUS - 1);
+    return MIN(index, IA64_VPC_MAX_CPUS - 1);
 }
 
 static hwaddr ia64_fw_debug_context_pa(CPUIA64State *env)
 {
     unsigned index = ia64_fw_debug_cpu_index(env);
 
-    return IA64_FW_DEBUG_CONTEXT_BASE +
+    return ia64_fw_cpu_assist_base(env) + IA64_FW_DEBUG_CONTEXT_OFFSET +
            (hwaddr)index * IA64_FW_DEBUG_CONTEXT_STRIDE;
 }
 
@@ -229,7 +229,8 @@ uint32_t ia64_firmware_debug_enter(CPUIA64State *env, uint64_t address)
     env->gr[IA64_FW_DEBUG_GR_EXCEPTION] = exception_type;
     env->gr[IA64_FW_DEBUG_GR_CONTEXT] = ia64_fw_debug_context_pa(env);
     env->gr[IA64_FW_DEBUG_GR_CPU] = ia64_fw_debug_cpu_index(env);
-    env->gr[IA64_GR_STACK_POINTER] = IA64_FW_DEBUG_STACK_BASE +
+    env->gr[IA64_GR_STACK_POINTER] = ia64_fw_cpu_assist_base(env) +
+                  IA64_FW_DEBUG_STACK_OFFSET +
                   (ia64_fw_debug_cpu_index(env) + 1) *
                   IA64_FW_DEBUG_STACK_SIZE - 16;
     env->nat[0] &= ~((1ULL << IA64_GR_STACK_POINTER) |
@@ -656,6 +657,7 @@ static void ia64_unaligned_base_update(CPUIA64State *env,
     } else if (insn->imm_base_update) {
         env->gr[insn->operands.common.source2] =
             addr + insn->operands.common.immediate;
+        ia64_rse_mark_gr_dirty(env, insn->operands.common.source2);
     }
 }
 
@@ -884,6 +886,7 @@ uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
     IA64SalBridgeState *bridge = &env->sal_bridge;
     uint64_t block[4];
     uint64_t entry, gp, stack, bstore;
+    uint64_t sal_runtime_base;
 
     if (bridge->active) {
         return 0;
@@ -899,6 +902,23 @@ uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
     if (!entry || !gp || !stack || !bstore ||
         (entry & (IA64_BUNDLE_SIZE - 1)) || (bstore & 7)) {
         return 0;
+    }
+
+    /*
+     * The dispatch block publishes CPU 0's physical stack and backing
+     * store; every processor owns a private slot at a fixed stride so
+     * concurrent SAL calls cannot share re-entry memory.
+     */
+    sal_runtime_base = ia64_fw_cpu_assist_base(env) +
+                       IA64_FW_SAL_RUNTIME_OFFSET;
+    if (stack >= sal_runtime_base &&
+        stack < sal_runtime_base + IA64_FW_SAL_RUNTIME_SLOT_SIZE &&
+        bstore >= sal_runtime_base &&
+        bstore < sal_runtime_base + IA64_FW_SAL_RUNTIME_SLOT_SIZE) {
+        unsigned index = ia64_fw_debug_cpu_index(env);
+
+        stack += (uint64_t)index * IA64_FW_SAL_RUNTIME_SLOT_SIZE;
+        bstore += (uint64_t)index * IA64_FW_SAL_RUNTIME_SLOT_SIZE;
     }
 
     bridge->psr = env->psr;

@@ -26,15 +26,18 @@
 #define IA64_LEGACY_IO_BASE          0x000000800010000000ULL
 #define IA64_PCI_CONFIG_BASE         0x0000007ff0000000ULL
 #define IA64_ACPI_PM_IO_BASE         0x00002000ULL
+#define IA64_ACPI_PM1_EVT_EN_OFFSET  0x02ULL
 #define IA64_ACPI_PM1_CNT_OFFSET     0x04ULL
 #define IA64_ACPI_PM_RESET_OFFSET    0x0cULL
 #define IA64_ACPI_PM_RESET_VALUE     0x01U
 #define IA64_RTC_BASE                0x00000000ffef0000ULL
+#define IA64_WATCHDOG_BASE           0x00000000ffee0000ULL
+#define IA64_WATCHDOG_CODE_OFFSET    0x08ULL
 #define IA64_NVRAM_BASE              0x00000000fff00000ULL
 #define IA64_NVRAM_SIZE              (64 * KiB)
 #define IA64_NVRAM_COMMIT_OFFSET     (IA64_NVRAM_SIZE - 8)
 #define IA64_NVRAM_COMMIT_MAGIC      0x54494d4d4f43564eULL
-#define IA64_IOSAPIC_BASE            0x0000000080110000ULL
+#define IA64_IOSAPIC_BASE            0x00000000fec00000ULL
 #define IA64_IOSAPIC_IOREGSEL        0x00ULL
 #define IA64_IOSAPIC_IOWIN           0x10ULL
 #define IA64_IOSAPIC_EOI             0x40ULL
@@ -45,14 +48,18 @@
 #define IA64_IOSAPIC_RTE_LEVEL       BIT(15)
 #define IA64_TEST_RAM_SIZE           (256 * MiB)
 #define IA64_INT10_ROM_BASE          0x000c0000ULL
-#define IA64_INT10_ROM_SIZE          0x00000200U
+/*
+ * 2 KB: the XP inbox Rage 128 miniport rejects option ROMs whose size byte
+ * declares less than 2048 bytes.  Keep in sync with hw/ia64/ia64_vpc.c.
+ */
+#define IA64_INT10_ROM_SIZE          0x00000800U
 #define IA64_INT10_VECTOR_ADDR       0x00000040ULL
 #define IA64_INT10_ROM_PCIR_OFFSET   0x00e0U
 #define IA64_INT10_ROM_ATI_SIG_OFFSET 0x0030U
 #define IA64_INT10_ROM_ATI_HEADER_OFFSET 0x0080U
 #define IA64_INT10_ROM_ATI_PLL_OFFSET 0x00c0U
 #define IA64_INT10_ROM_HANDLER_OFFSET 0x0100U
-#define IA64_INT10_HANDLER_SIZE      116U
+#define IA64_INT10_HANDLER_SIZE      128U
 #define IA64_INT10_ROM_OEM_OFFSET    0x0180U
 #define IA64_INT10_ROM_MODES_OFFSET  0x01d0U
 #define IA64_INT10_IO_BASE           0x01e0U
@@ -60,8 +67,10 @@
 #define IA64_VBE2_SIGNATURE          0x32454256U
 #define IA64_VBE_IO_INDEX            0x01ceU
 #define IA64_VBE_IO_DATA             0x01d0U
-#define IA64_VGA_FB_BASE             0x00000000c4000000ULL
+#define IA64_VGA_FB_BASE             0x00000000f0000000ULL
+#define IA64_VGA_MMIO_BASE           0x00000000f5000000ULL
 #define IA64_VGA_LEGACY_BASE         0x00000000000a0000ULL
+#define IA64_ATI_BIOS_0_SCRATCH      0x0010U
 #define IA64_BDA_VIDEO_MODE          0x00000449ULL
 #define IA64_BDA_VIDEO_COLUMNS       0x0000044aULL
 #define IA64_BDA_VIDEO_PAGE_SIZE     0x0000044cULL
@@ -90,7 +99,7 @@ typedef struct TestInt10Registers {
     uint32_t input_signature;
 } TestInt10Registers;
 
-#define IA64_LSI_MMIO_BASE           0x00000000c1030000ULL
+#define IA64_LSI_MMIO_BASE           0x00000000ee030000ULL
 #define IA64_LSI_SCRIPT_ADDR         0x00100000U
 #define IA64_LSI_MSGOUT_ADDR         0x00110000U
 #define IA64_LSI_CDB_ADDR            0x00110010U
@@ -114,7 +123,7 @@ typedef struct TestInt10Registers {
 #define IA64_LSI_SCRIPT_MOVE(phase, count) \
     (((phase) << 24) | (count))
 
-#define IA64_E1000_MMIO_BASE         0x00000000c1040000ULL
+#define IA64_E1000_MMIO_BASE         0x00000000ee040000ULL
 #define IA64_E1000_IO_BASE           0x0000c400U
 #define IA64_E1000_SLOT              6U
 #define IA64_E1000_GSI               18U
@@ -149,21 +158,25 @@ static const ExpectedPCIDevice expected_e1000 = {
 };
 
 /*
- * The default adapter is the 82543GC, the device XP IA-64's inbox e1000
- * INF matches (DEV_1004 rev 02, e1000w64.sys).  Same e1000 core as the
- * 82540EM: a 128 KiB CSR memory BAR and a 64-byte I/O BAR, placed by the
- * machine's generic per-BAR NIC allocator inside the NIC windows.
+ * The default adapter is the 100 Mbit PRO/100 (i82557b, DEV_1229), the
+ * device Windows IA-64 actually ships an inbox driver for (NET557.IN_).
+ * Unlike the e1000 it exposes three BARs: a 4 KiB prefetchable CSR memory
+ * BAR, a 64-byte I/O BAR, and a 128 KiB flash memory BAR.  The machine's
+ * generic per-BAR NIC allocator hands each one a naturally aligned slice of
+ * the per-index memory / I/O window, so the flash BAR lands at the next
+ * 128 KiB boundary above the CSR BAR.
  */
-static const ExpectedPCIDevice expected_e1000_82543gc = {
+static const ExpectedPCIDevice expected_i82557b = {
     .slot = IA64_E1000_SLOT,
     .vendor = PCI_VENDOR_ID_INTEL,
-    .device = E1000_DEV_ID_82543GC_COPPER,
+    .device = 0x1229,
     .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
     .irq_line = IA64_E1000_GSI,
     .irq_pin = 1,
     .bars = {
-        [0] = IA64_E1000_MMIO_BASE,
+        [0] = IA64_E1000_MMIO_BASE | PCI_BASE_ADDRESS_MEM_PREFETCH,
         [1] = IA64_E1000_IO_BASE | PCI_BASE_ADDRESS_SPACE_IO,
+        [2] = IA64_E1000_MMIO_BASE + 0x20000,
     },
 };
 
@@ -308,7 +321,7 @@ static void test_int10_rom(void)
     qtest_memread(qts, IA64_INT10_ROM_BASE, rom, sizeof(rom));
     g_assert_cmphex(rom[0], ==, 0x55);
     g_assert_cmphex(rom[1], ==, 0xaa);
-    g_assert_cmphex(rom[2], ==, 1);
+    g_assert_cmphex(rom[2], ==, IA64_INT10_ROM_SIZE / 512);
     g_assert_cmphex(lduw_le_p(rom + 0x0d), ==,
                     IA64_INT10_ROM_HANDLER_OFFSET);
     g_assert_cmphex(lduw_le_p(rom + 0x13), ==,
@@ -349,8 +362,9 @@ static void test_int10_rom(void)
                     ==, 0x111);
     g_assert_cmphex(rom[IA64_INT10_ROM_HANDLER_OFFSET], ==, 0x55);
     g_assert_cmphex(rom[IA64_INT10_ROM_HANDLER_OFFSET + 1], ==, 0x89);
+    /* The handler ends in iret (0xcf) and abuts the OEM string at its size. */
     g_assert_cmphex(rom[IA64_INT10_ROM_HANDLER_OFFSET +
-                       IA64_INT10_HANDLER_SIZE], ==, 0);
+                       IA64_INT10_HANDLER_SIZE - 1], ==, 0xcf);
     for (i = 0; i < sizeof(rom); i++) {
         checksum += rom[i];
     }
@@ -429,7 +443,7 @@ static void test_int10_vbe_for_device(const char *extra_args)
     g_assert_cmphex(lduw_le_p(response + 18), ==, 1024);
     g_assert_cmphex(lduw_le_p(response + 20), ==, 768);
     g_assert_cmphex(response[25], ==, 32);
-    g_assert_cmphex((uint32_t)ldl_le_p(response + 40), ==, 0xc4000000U);
+    g_assert_cmphex((uint32_t)ldl_le_p(response + 40), ==, 0xf0000000U);
 
     memset(&regs, 0, sizeof(regs));
     regs.ax = 0x4f02;
@@ -443,6 +457,17 @@ static void test_int10_vbe_for_device(const char *extra_args)
     g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_BPP), ==, 32);
     g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_ENABLE) & 0x41,
                     ==, 0x41);
+
+    /*
+     * A VBE mode-set must also re-enable video output at the VGA attribute
+     * controller (Palette-Address-Source, bit 0x20).  Without it QEMU's VGA
+     * core forces GMODE_BLANK and the guest desktop, though rendered into
+     * VRAM, never reaches the screen.  Reset the attribute flip-flop to the
+     * index state (read Input Status 1) and read the index register back.
+     */
+    qtest_readb(qts, IA64_LEGACY_IO_BASE + VGA_IS1_RC);
+    g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE + VGA_ATT_W) &
+                    VGA_AR_ENABLE_DISPLAY, ==, VGA_AR_ENABLE_DISPLAY);
 
     memset(&regs, 0, sizeof(regs));
     regs.ax = 0x4f03;
@@ -674,6 +699,52 @@ static void test_firmware_handoff_defaults(void)
     qtest_quit(qts);
 }
 
+/*
+ * Real 460GX layout: low DRAM is a single contiguous run from 0 up to the PCI
+ * aperture (0xEE000000, ~3.72 GiB); only RAM displaced by that top-of-memory
+ * gap spills above 4 GiB.  There is no sub-4 GiB DRAM island and no hole at
+ * 2 GiB (the IOSAPIC no longer parks there).  Probe where DRAM actually lands
+ * for both the below-aperture and above-4 GiB cases.  The -m values reserve a
+ * large address space but qtest only touches a couple of pages, so RSS stays
+ * tiny.  Keep in lockstep with ia64_vpc_map_ram() /
+ * fw_init_guest_high_ram_ranges().
+ */
+#define IA64_RAM_AT_2GIB             0x0000000080000000ULL /* was the hole */
+#define IA64_HIGH_RAM_BELOW_PCI_BASE 0x0000000080200000ULL
+#define IA64_HIGH_RAM_ABOVE_4G_BASE  0x0000000100000000ULL
+
+static void test_ram_high_remap(void)
+{
+    const uint64_t magic = 0x0123456789abcdefULL;
+
+    /*
+     * 2304 MiB fits entirely below the aperture, so DRAM is contiguous across
+     * the old 2 GiB seam (both 0x80000000 and 0x80200000 are ordinary backed
+     * RAM now) and nothing lands above 4 GiB.
+     */
+    QTestState *qts = qtest_init("-machine ia64-vpc -m 2304M -S");
+
+    qtest_writeq(qts, IA64_RAM_AT_2GIB, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_RAM_AT_2GIB), ==, magic);
+    qtest_writeq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE), ==, magic);
+    /* No DRAM above 4 GiB at this size. */
+    qtest_writeq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE), !=, magic);
+    qtest_quit(qts);
+
+    /*
+     * 4096 MiB exceeds the aperture: DRAM is contiguous up to it AND the
+     * displaced remainder is remapped above 4 GiB.
+     */
+    qts = qtest_init("-machine ia64-vpc -m 4096M -S");
+    qtest_writeq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE), ==, magic);
+    qtest_writeq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE), ==, magic);
+    qtest_quit(qts);
+}
+
 static void assert_cpu_model_type(const char *cpu_arg, const char *expect_type)
 {
     g_autofree char *args = g_strdup_printf("-cpu %s", cpu_arg);
@@ -750,6 +821,38 @@ static void test_smp_explicit_topology(void)
         ia64_vpc_start("-smp 4,sockets=1,cores=2,threads=2");
 
     assert_firmware_handoff(qts, 1, 4, 0, 1, 2, 2);
+    qtest_quit(qts);
+}
+
+typedef struct TestSmpMulticoreTopology {
+    const char *name;
+    unsigned sockets;
+    unsigned cores;
+} TestSmpMulticoreTopology;
+
+static const TestSmpMulticoreTopology smp_multicore_topologies[] = {
+    { "4-sockets-2-cores", 4, 2 },
+    { "1-socket-8-cores", 1, 8 },
+    { "2-sockets-4-cores", 2, 4 },
+};
+
+static void test_smp_multicore_topology(gconstpointer opaque)
+{
+    const TestSmpMulticoreTopology *topology = opaque;
+    unsigned count = topology->sockets * topology->cores;
+    g_autofree char *args = g_strdup_printf(
+        "-smp %u,sockets=%u,cores=%u,threads=1",
+        count, topology->sockets, topology->cores);
+    QTestState *qts = ia64_vpc_start(args);
+    g_autoptr(QDict) response = NULL;
+    QList *cpus;
+
+    assert_firmware_handoff(qts, 1, count, 0, topology->sockets,
+                            topology->cores, 1);
+    response = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
+    g_assert(qdict_haskey(response, "return"));
+    cpus = qdict_get_qlist(response, "return");
+    g_assert_cmpuint(qlist_size(cpus), ==, count);
     qtest_quit(qts);
 }
 
@@ -898,16 +1001,35 @@ static void test_ahci_off(void)
     qtest_quit(qts);
 }
 
-static void test_ahci_on_default(void)
+/*
+ * AHCI is opt-in (ahci=on): the controller then appears at 0:1.0 with its
+ * fixed BARs and INTx line.  It is absent from the default machine (see
+ * test_ahci_off_default) because Windows IA-64 ships no SATA driver.
+ */
+static void test_ahci_on(void)
+{
+    static const ExpectedPCIDevice ahci_dev = {
+        .slot = 1, .vendor = 0x8086, .device = 0x2922,
+        .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
+        .irq_line = 17, .irq_pin = 1,
+        .bars = { [4] = 0x0000c101, [5] = 0xee020000 },
+    };
+    QTestState *qts = ia64_vpc_start("-machine ahci=on");
+    QGenericPCIBus gbus;
+
+    ia64_qpci_init(&gbus, qts);
+    assert_pci_device(&gbus.bus, &ahci_dev);
+    qtest_quit(qts);
+}
+
+/* The default machine has no AHCI controller: slot 1 is empty. */
+static void test_ahci_off_default(void)
 {
     QTestState *qts = ia64_vpc_start(NULL);
     QGenericPCIBus gbus;
-    QPCIDevice *ahci;
 
     ia64_qpci_init(&gbus, qts);
-    ahci = qpci_device_find(&gbus.bus, QPCI_DEVFN(1, 0));
-    g_assert_nonnull(ahci);
-    g_free(ahci);
+    g_assert_null(qpci_device_find(&gbus.bus, QPCI_DEVFN(1, 0)));
     qtest_quit(qts);
 }
 
@@ -915,16 +1037,10 @@ static void test_pci_default_layout(void)
 {
     static const ExpectedPCIDevice devices[] = {
         {
-            .slot = 1, .vendor = 0x8086, .device = 0x2922,
-            .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
-                       PCI_COMMAND_MASTER,
-            .irq_line = 17, .irq_pin = 1,
-            .bars = { [4] = 0x0000c101, [5] = 0xc1020000 },
-        }, {
             .slot = 2, .vendor = 0x106b, .device = 0x003f,
             .command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
             .irq_line = 18, .irq_pin = 1,
-            .bars = { [0] = 0xc1010000 },
+            .bars = { [0] = 0xee010000 },
         }, {
             .slot = 3, .vendor = 0x8086, .device = 0x7020,
             .command = PCI_COMMAND_IO | PCI_COMMAND_MASTER,
@@ -937,17 +1053,17 @@ static void test_pci_default_layout(void)
             .irq_line = 16, .irq_pin = 1,
             .bars = {
                 [0] = 0x0000c201,
-                [1] = 0xc1030000,
-                [2] = 0xc1032000,
+                [1] = 0xee030000,
+                [2] = 0xee032000,
             },
         }, {
             .slot = 5, .vendor = 0x1002, .device = 0x5046,
             .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY,
             .irq_line = 17, .irq_pin = 1,
             .bars = {
-                [0] = 0xc4000008,
+                [0] = 0xf0000008,
                 [1] = 0x0000c301,
-                [2] = 0xc8000000,
+                [2] = 0xf5000000,
             },
         },
     };
@@ -956,11 +1072,13 @@ static void test_pci_default_layout(void)
     unsigned i;
 
     ia64_qpci_init(&gbus, qts);
+    /* Slot 0 (IDE, ide=on) and slot 1 (AHCI, ahci=on) are empty by default. */
     for (i = 0; i < 8; i++) {
         QPCIDevice *empty = qpci_device_find(&gbus.bus, QPCI_DEVFN(0, i));
 
         g_assert_null(empty);
     }
+    g_assert_null(qpci_device_find(&gbus.bus, QPCI_DEVFN(1, 0)));
     for (i = 0; i < ARRAY_SIZE(devices); i++) {
         assert_pci_device(&gbus.bus, &devices[i]);
     }
@@ -974,7 +1092,7 @@ static void test_pci_default_layout(void)
                         PCI_VENDOR_ID_LSI_LOGIC);
         g_free(lsi);
     }
-    assert_pci_device(&gbus.bus, &expected_e1000_82543gc);
+    assert_pci_device(&gbus.bus, &expected_i82557b);
     qtest_quit(qts);
 }
 
@@ -1149,10 +1267,8 @@ static void test_e1000_packet_transfer(void)
     close(sockets[0]);
 }
 
-static void test_pci_explicit_cmd646_slot0(void)
+static void assert_cmd646_at_slot0(QTestState *qts)
 {
-    QTestState *qts = ia64_vpc_start(
-        "-device cmd646-ide,secondary=1,addr=0");
     QGenericPCIBus gbus;
     QPCIDevice *dev;
 
@@ -1165,6 +1281,17 @@ static void test_pci_explicit_cmd646_slot0(void)
                     PCI_CLASS_STORAGE_IDE);
     g_free(dev);
     qtest_quit(qts);
+}
+
+static void test_pci_explicit_cmd646_slot0(void)
+{
+    assert_cmd646_at_slot0(ia64_vpc_start("-device cmd646-ide,secondary=1,addr=0"));
+}
+
+/* The ide=on machine option instantiates the same CMD646 at slot 0. */
+static void test_ide_on_slot0(void)
+{
+    assert_cmd646_at_slot0(ia64_vpc_start("-machine ide=on"));
 }
 
 static void lsi_write_script_insn(QTestState *qts, uint32_t *addr,
@@ -1250,6 +1377,121 @@ static void test_lsi_async_nodata_command(void)
                                              sizeof(synchronize_cache),
                                              &status));
         g_assert_cmpuint(status, ==, 0);
+    }
+    qtest_quit(qts);
+}
+
+/*
+ * Regression for the lsi_dnad_addr stale-selector leak.  A non-zero Dynamic
+ * Block Move Selector (DBMS) left over from an earlier 64-bit direct move must
+ * NOT be OR-ed into bits [63:32] of a later plain (non-EN64DBMV) block move --
+ * a plain move takes its upper address bits from the Static selector (SBMS).
+ * Before the fix a stale DBMS leaked into every subsequent fetch/store,
+ * including the SCSI CDB fetch in lsi_do_command(), pushing it to an unmapped
+ * >4GB address; on IA-64 XP at 6GB (where above-4GB DMA sets DBMS) this
+ * corrupted disk page-ins and bugchecked the guest (STOP 0xF4).
+ */
+#define IA64_LSI_REG_SBMS            0xb0
+#define IA64_LSI_REG_DBMS            0xb4
+static void test_lsi_dbms_no_leak(void)
+{
+    const uint8_t test_unit_ready[6] = { 0 };
+    QTestState *qts;
+    uint8_t status;
+
+    qts = ia64_vpc_start(
+        "-blockdev driver=null-co,read-zeroes=on,"
+                  "node-name=disk0,size=1048576 "
+        "-device scsi-hd,drive=disk0,bus=scsi.0,scsi-id=0");
+
+    /* Consume the initial unit attention with a clean selector. */
+    g_assert_true(lsi_run_nodata_command(qts, test_unit_ready,
+                                         sizeof(test_unit_ready), &status));
+
+    /*
+     * Poison DBMS with a high-32 that, if leaked, moves every transfer 4GB up
+     * into unmapped space; keep SBMS clear.  The next plain command must
+     * consult SBMS (0), never this stale dynamic selector.
+     */
+    qtest_writel(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_SBMS, 0x00000000);
+    qtest_writel(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_DBMS, 0x00000001);
+
+    /*
+     * With the leak the message-out / CDB / status moves all target >4GB
+     * holes and the command cannot complete GOOD; the fix ignores DBMS, so
+     * the command still selects, transfers and reports GOOD status.
+     */
+    g_assert_true(lsi_run_nodata_command(qts, test_unit_ready,
+                                         sizeof(test_unit_ready), &status));
+    g_assert_cmpuint(status, ==, 0);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Regression for the lsi_memcpy 64-bit MOVE MEMORY fix.  A 64-bit memory move
+ * takes bits [63:32] of the destination from the Memory Move Write Selector
+ * (MMWS) and of the source from MMRS (LSI53C895A 4-103/4-104).  Before the fix
+ * lsi_memcpy() was 32-bit and ignored them, so an above-4GB memory move was
+ * truncated to the wrong page -- which broke the Linux sym53c8xx cache snoop
+ * test (a MOVE MEMORY) on large-memory guests.
+ */
+#define IA64_LSI_REG_MMRS            0xa0
+#define IA64_LSI_REG_MMWS            0xa4
+static void test_lsi_memory_move_mmws(void)
+{
+    static const uint8_t src_pattern[16] = {
+        0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+        0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a };
+    const uint32_t src = IA64_LSI_MSGOUT_ADDR;   /* low source */
+    const uint32_t dst = IA64_LSI_CDB_ADDR;      /* low destination */
+    uint32_t addr = IA64_LSI_SCRIPT_ADDR;
+    QTestState *qts;
+    uint8_t dstat = 0;
+    unsigned int i;
+
+    qts = ia64_vpc_start(NULL);   /* a memory move needs no SCSI target */
+
+    qtest_memwrite(qts, src, src_pattern, sizeof(src_pattern));
+    qtest_memset(qts, dst, 0xaa, sizeof(src_pattern));
+
+    /*
+     * MMWS=1 must push the destination 4GB up, into an unmapped hole on this
+     * 256M machine; MMRS=0 keeps the source low.  The low destination must
+     * therefore stay untouched.  Without the fix MMWS is ignored and the low
+     * destination is overwritten with the source pattern.
+     */
+    qtest_writel(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_MMRS, 0x00000000);
+    qtest_writel(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_MMWS, 0x00000001);
+
+    /* SCRIPT: MOVE MEMORY (3 dwords: insn, src, dst) then INTERRUPT. */
+    qtest_writel(qts, addr, 0xc0000000u | sizeof(src_pattern)); addr += 4;
+    qtest_writel(qts, addr, src); addr += 4;
+    qtest_writel(qts, addr, dst); addr += 4;
+    qtest_writel(qts, addr, IA64_LSI_SCRIPT_INTERRUPT); addr += 4;
+    qtest_writel(qts, addr, 0); addr += 4;
+
+    qtest_readb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_DSTAT);
+    qtest_readb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_SIST0);
+    qtest_readb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_SIST1);
+    qtest_writel(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_DSP,
+                 IA64_LSI_SCRIPT_ADDR);
+
+    for (i = 0; i < 1000; i++) {
+        if (qtest_readb(qts, IA64_LSI_MMIO_BASE + IA64_LSI_REG_ISTAT0) &
+            IA64_LSI_ISTAT0_DIP) {
+            dstat = qtest_readb(qts,
+                                IA64_LSI_MMIO_BASE + IA64_LSI_REG_DSTAT);
+            if (dstat & IA64_LSI_DSTAT_SIR) {
+                break;
+            }
+        }
+        g_usleep(1000);
+    }
+    g_assert_true((dstat & IA64_LSI_DSTAT_SIR) != 0);
+
+    for (i = 0; i < sizeof(src_pattern); i++) {
+        g_assert_cmphex(qtest_readb(qts, dst + i), ==, 0xaa);
     }
     qtest_quit(qts);
 }
@@ -1497,6 +1739,1397 @@ static void test_sparse_io_pm_register(void)
     qtest_quit(qts);
 }
 
+static bool sapic_irr_has_vector(QTestState *qts, uint8_t vector)
+{
+    g_autofree char *registers = qtest_hmp(qts, "info registers");
+    const char *line = strstr(registers, "SAPIC IRR:");
+    uint64_t irr[4];
+
+    g_assert_nonnull(line);
+    g_assert_cmpint(sscanf(line, "SAPIC IRR: %" SCNx64 " %" SCNx64
+                          " %" SCNx64 " %" SCNx64,
+                          &irr[0], &irr[1], &irr[2], &irr[3]), ==, 4);
+    return (irr[vector / 64] & BIT_ULL(vector % 64)) != 0;
+}
+
+/*
+ * SAPIC delivery is asynchronous; a single readback races it under host
+ * load.  Spin like the other interrupt tests do.
+ */
+static bool sapic_wait_irr_vector(QTestState *qts, uint8_t vector)
+{
+    int i;
+
+    for (i = 0; i < 1000; i++) {
+        if (sapic_irr_has_vector(qts, vector)) {
+            return true;
+        }
+        g_usleep(1000);
+    }
+    return false;
+}
+
+static void test_savevm_restores_platform_state(void)
+{
+    const char *machine = "ia64-vpc";
+    const uint64_t ram_addr = 0x00300000;
+    const uint64_t saved_ram = 0x0123456789abcdefULL;
+    const uint64_t changed_ram = 0xfedcba9876543210ULL;
+    const uint64_t saved_nvram = 0x1020304050607080ULL;
+    const uint64_t changed_nvram = 0x8877665544332211ULL;
+    const uint64_t saved_watchdog = 0xa5a55a5ac3c33c3cULL;
+    const uint64_t changed_watchdog = 0x55aa55aa66996699ULL;
+    const uint16_t saved_pm_enable = 0x0100;
+    const uint16_t changed_pm_enable = 0x0400;
+    const uint32_t saved_vram = 0x00112233;
+    const uint32_t changed_vram = 0x00aabbcc;
+    const uint32_t saved_ati_scratch = 0x13579bdf;
+    const uint32_t changed_ati_scratch = 0x2468ace0;
+    const unsigned pin = 23;
+    const uint8_t saved_vector = 0x55;
+    const uint8_t changed_vector = 0x56;
+    const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + pin * 2;
+    const uint64_t pm_enable_addr =
+        IA64_LEGACY_IO_BASE +
+        ia64_sparse_io_offset(IA64_ACPI_PM_IO_BASE +
+                              IA64_ACPI_PM1_EVT_EN_OFFSET);
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *disk_path = NULL;
+    g_autofree char *quoted_disk_path = NULL;
+    g_autofree char *args = NULL;
+    g_autofree char *iosapic_path = NULL;
+    g_autofree char *response = NULL;
+    g_autoptr(GError) error = NULL;
+    uint8_t int10_response[2];
+    TestInt10Registers int10_regs;
+    QTestState *qts;
+
+    if (!have_qemu_img()) {
+        g_test_skip("qemu-img is required for internal snapshot testing");
+        return;
+    }
+
+    tmpdir = g_dir_make_tmp("ia64-vpc-savevm-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    disk_path = g_build_filename(tmpdir, "snapshot.qcow2", NULL);
+    g_assert_true(mkimg(disk_path, "qcow2", 64));
+    quoted_disk_path = g_shell_quote(disk_path);
+    args = g_strdup_printf("-drive file=%s,format=qcow2,if=scsi",
+                           quoted_disk_path);
+
+    qts = qtest_initf("-machine %s -m 256M -smp 4 -S %s",
+                      machine, args);
+    iosapic_path = find_unattached_child(qts, "ia64-iosapic");
+
+    qtest_writeq(qts, ram_addr, saved_ram);
+    qtest_writeq(qts, IA64_NVRAM_BASE, saved_nvram);
+    qtest_writeq(qts, IA64_WATCHDOG_BASE + IA64_WATCHDOG_CODE_OFFSET,
+                 saved_watchdog);
+    qtest_writew(qts, pm_enable_addr, saved_pm_enable);
+    int10_regs = (TestInt10Registers) {
+        .ax = 0x4f02,
+        .bx = 0x4143,
+    };
+    g_assert_cmpuint(int10_call(qts, &int10_regs,
+                                int10_response, sizeof(int10_response)), ==, 0);
+    g_assert_cmphex(int10_regs.ax, ==, 0x004f);
+    qtest_writel(qts, IA64_VGA_FB_BASE, saved_vram);
+    qtest_writel(qts, IA64_VGA_MMIO_BASE + IA64_ATI_BIOS_0_SCRATCH,
+                 saved_ati_scratch);
+    iosapic_write(qts, rte_low,
+                  saved_vector | IA64_IOSAPIC_RTE_LEVEL);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    g_assert_true(sapic_wait_irr_vector(qts, saved_vector));
+    g_assert_cmphex(iosapic_read(qts, rte_low) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
+
+    response = qtest_hmp(qts, "savevm platform-state");
+    g_assert_cmpstr(response, ==, "");
+    g_clear_pointer(&response, g_free);
+
+    /*
+     * Reset first so that the CPU's Local SAPIC state differs as well as
+     * the memory-mapped machine and IOSAPIC state.
+     */
+    qtest_system_reset(qts);
+    qtest_writeq(qts, ram_addr, changed_ram);
+    qtest_writeq(qts, IA64_NVRAM_BASE, changed_nvram);
+    qtest_writeq(qts, IA64_WATCHDOG_BASE + IA64_WATCHDOG_CODE_OFFSET,
+                 changed_watchdog);
+    qtest_writew(qts, pm_enable_addr, changed_pm_enable);
+    int10_regs = (TestInt10Registers) {
+        .ax = 0x4f02,
+        .bx = 0x4144,
+    };
+    g_assert_cmpuint(int10_call(qts, &int10_regs,
+                                int10_response, sizeof(int10_response)), ==, 0);
+    g_assert_cmphex(int10_regs.ax, ==, 0x004f);
+    qtest_writel(qts, IA64_VGA_FB_BASE, changed_vram);
+    qtest_writel(qts, IA64_VGA_MMIO_BASE + IA64_ATI_BIOS_0_SCRATCH,
+                 changed_ati_scratch);
+    iosapic_write(qts, rte_low,
+                  changed_vector | IA64_IOSAPIC_RTE_LEVEL);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    g_assert_true(sapic_wait_irr_vector(qts, changed_vector));
+    g_assert_false(sapic_irr_has_vector(qts, saved_vector));
+
+    response = qtest_hmp(qts, "loadvm platform-state");
+    g_assert_cmpstr(response, ==, "");
+
+    g_assert_cmphex(qtest_readq(qts, ram_addr), ==, saved_ram);
+    g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, saved_nvram);
+    g_assert_cmphex(qtest_readq(qts, IA64_WATCHDOG_BASE +
+                               IA64_WATCHDOG_CODE_OFFSET),
+                    ==, saved_watchdog);
+    g_assert_cmphex(qtest_readw(qts, pm_enable_addr), ==, saved_pm_enable);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_XRES), ==, 800);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_YRES), ==, 600);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_BPP), ==, 32);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_ENABLE) & 0x41,
+                    ==, 0x41);
+    g_assert_cmphex(qtest_readl(qts, IA64_VGA_FB_BASE), ==, saved_vram);
+    g_assert_cmphex(qtest_readl(qts,
+                               IA64_VGA_MMIO_BASE +
+                               IA64_ATI_BIOS_0_SCRATCH),
+                    ==, saved_ati_scratch);
+    g_assert_cmphex(iosapic_read(qts, rte_low) & 0xff, ==, saved_vector);
+    g_assert_cmphex(iosapic_read(qts, rte_low) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
+    g_assert_true(sapic_irr_has_vector(qts, saved_vector));
+    g_assert_false(sapic_irr_has_vector(qts, changed_vector));
+
+    qtest_quit(qts);
+    g_assert_cmpint(g_unlink(disk_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+/*
+ * ATI RAGE 128 (Rage 128 Pro, 1002:5046) device-model regression tests.
+ *
+ * These drive the emulated adapter directly over its PCI BARs and lock in the
+ * fork's ATI fixes and the register behaviour documented in the RAGE 128 PRO
+ * Register Reference Guide: the indirect PLL register file, DAC load-sense,
+ * MM_INDEX/MM_DATA indirection, the PCI-ROM-BAR ATI-table patch, and 2D solid
+ * fills at every supported depth (including the 24bpp path that used to abort
+ * on 3-byte pixel accesses).
+ */
+#define ATI_SLOT                5
+
+/* Register offsets (RAGE 128 PRO RRG / hw/display/ati_regs.h). */
+#define ATI_MM_INDEX            0x0000
+#define ATI_MM_DATA             0x0004
+#define ATI_CLOCK_CNTL_INDEX    0x0008
+#define ATI_CLOCK_CNTL_DATA     0x000c
+#define ATI_DAC_CNTL            0x0058
+#define ATI_DST_OFFSET          0x1404
+#define ATI_DST_PITCH           0x1408
+#define ATI_DST_Y_X             0x1438
+#define ATI_DST_HEIGHT_WIDTH    0x143c
+#define ATI_DP_GUI_MASTER_CNTL  0x146c
+#define ATI_DP_BRUSH_FRGD_CLR   0x147c
+#define ATI_DP_CNTL             0x16c0
+#define ATI_DEFAULT_SC_BR       0x16e8
+
+/* Bit / field values. */
+#define ATI_PLL_WR_EN           0x00000080
+#define ATI_DAC_CMP_EN          0x00000008
+#define ATI_DAC_CMP_OUTPUT      0x00000080
+#define ATI_MM_INDEX_VRAM       0x80000000
+#define ATI_DP_LEFT_TO_RIGHT    0x00000001
+#define ATI_DP_TOP_TO_BOTTOM    0x00000002
+#define ATI_GMC_DST_POC         0x00000002 /* DST pitch/offset from registers */
+#define ATI_GMC_BRUSH_SOLID     0x000000d0
+#define ATI_GMC_ROP3_PATCOPY    0x00f00000
+
+typedef struct {
+    QTestState *qts;
+    QGenericPCIBus gbus;
+    QPCIDevice *dev;
+    uint64_t mmio;                     /* BAR2 - MMIO register aperture */
+    uint64_t fb;                       /* BAR0 - linear framebuffer      */
+} ATITestDev;
+
+static void ati_dev_open(ATITestDev *a, const char *extra)
+{
+    a->qts = extra ? ia64_vpc_start(extra) : ia64_vpc_start(NULL);
+    ia64_qpci_init(&a->gbus, a->qts);
+    a->dev = qpci_device_find(&a->gbus.bus, QPCI_DEVFN(ATI_SLOT, 0));
+    g_assert_nonnull(a->dev);
+    g_assert_cmphex(qpci_config_readw(a->dev, PCI_VENDOR_ID), ==, 0x1002);
+    g_assert_cmphex(qpci_config_readw(a->dev, PCI_DEVICE_ID), ==, 0x5046);
+    a->mmio = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_2) & 0xfffffff0;
+    a->fb = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_0) & 0xfffffff0;
+    g_assert_cmphex(a->mmio, ==, 0xf5000000);
+    g_assert_cmphex(a->fb, ==, 0xf0000000);
+}
+
+static void ati_dev_close(ATITestDev *a)
+{
+    g_free(a->dev);
+    qtest_quit(a->qts);
+}
+
+static inline void ati_wr(ATITestDev *a, uint32_t off, uint32_t v)
+{
+    qtest_writel(a->qts, a->mmio + off, v);
+}
+
+static inline uint32_t ati_rd(ATITestDev *a, uint32_t off)
+{
+    return qtest_readl(a->qts, a->mmio + off);
+}
+
+/* Read PLL register 'idx' through the CLOCK_CNTL_INDEX/DATA window. */
+static uint32_t ati_pll_rd(ATITestDev *a, uint32_t idx)
+{
+    ati_wr(a, ATI_CLOCK_CNTL_INDEX, idx & 0x3f);
+    return ati_rd(a, ATI_CLOCK_CNTL_DATA);
+}
+
+/* Write PLL register 'idx' with PLL_WR_EN asserted. */
+static void ati_pll_wr(ATITestDev *a, uint32_t idx, uint32_t v)
+{
+    ati_wr(a, ATI_CLOCK_CNTL_INDEX, ATI_PLL_WR_EN | (idx & 0x3f));
+    ati_wr(a, ATI_CLOCK_CNTL_DATA, v);
+}
+
+/*
+ * 460GX GXB AGP host bridge + GART.  Lock in exactly what Linux's i460-agp
+ * driver inspects to bind (8086:84ea host bridge with an AGP capability,
+ * GXBCTL bit1 = 0 for 4 KiB pages, AGPSIZ size_value = 1 for 256 MiB) and the
+ * GART SRAM window at 0xFE200000: writing a GATT entry through it reads back,
+ * so the driver's create_gatt_table zero+read-back works.  AGPSIZ bit3
+ * (BAPBASE_ENABLE) is set, so the aperture base is read from BAPBASE (0x98) --
+ * a non-header 64-bit BAR the driver masks to gart_bus_addr; it sits in the
+ * platform PCI MMIO hole (below 4 GiB, as the 32-bit r128 AGP_BASE requires).
+ */
+#define IA64_AGP_SLOT           31U
+#define IA64_AGP_BAPBASE        0x98
+#define IA64_AGP_GXBCTL         0xa0
+#define IA64_AGP_AGPSIZ         0xa2
+#define IA64_AGP_GART_WINDOW    0x00000000fe200000ULL
+#define IA64_AGP_APERTURE_BASE  0x00000000ee000000ULL
+
+static void test_agp_gxb(void)
+{
+    QTestState *qts = qtest_init("-machine ia64-vpc -m 256M -S");
+    QGenericPCIBus gbus;
+    QPCIDevice *dev;
+    uint8_t cap;
+    uint64_t bapbase;
+    bool have_agp_cap = false;
+
+    ia64_qpci_init(&gbus, qts);
+    dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(IA64_AGP_SLOT, 0));
+    g_assert_nonnull(dev);
+
+    /* i460-agp binds by vendor/device + host-bridge class. */
+    g_assert_cmphex(qpci_config_readw(dev, PCI_VENDOR_ID), ==, 0x8086);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x84ea);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_CLASS_DEVICE), ==,
+                    PCI_CLASS_BRIDGE_HOST);
+
+    /* And it requires an AGP capability (id 0x02) or returns -ENODEV. */
+    cap = qpci_config_readb(dev, PCI_CAPABILITY_LIST);
+    while (cap != 0 && cap != 0xff) {
+        if (qpci_config_readb(dev, cap) == PCI_CAP_ID_AGP) {
+            have_agp_cap = true;
+            break;
+        }
+        cap = qpci_config_readb(dev, cap + PCI_CAP_LIST_NEXT);
+    }
+    g_assert_true(have_agp_cap);
+
+    /* 4 KiB GART pages (GXBCTL bit1 clear) and a 256 MiB aperture (AGPSIZ=1). */
+    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_GXBCTL) & 0x02, ==, 0);
+    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x07, ==, 1);
+
+    /* BAPBASE_ENABLE set, and BAPBASE holds the sub-4 GiB aperture base. */
+    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x08, ==, 0x08);
+    bapbase = ((uint64_t)qpci_config_readl(dev, IA64_AGP_BAPBASE + 4) << 32) |
+              qpci_config_readl(dev, IA64_AGP_BAPBASE);
+    g_assert_cmphex(bapbase & ~7ULL, ==, IA64_AGP_APERTURE_BASE);
+
+    /* The GART SRAM window is writable/read-backable at its fixed address. */
+    qtest_writel(qts, IA64_AGP_GART_WINDOW + 4 * 7, 0x03001234);
+    g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 4 * 7), ==,
+                    0x03001234);
+    /* Parity bit 26 is HW-owned and must not stick. */
+    qtest_writel(qts, IA64_AGP_GART_WINDOW + 4 * 8, 0x04000005);
+    g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 4 * 8), ==,
+                    0x00000005);
+
+    g_free(dev);
+    qtest_quit(qts);
+}
+
+/*
+ * agp=off disables the GART: the AGP capability stays present (as on real
+ * silicon), but AGPSIZ asserts SRAM_IO_DISABLE (bit4) so i460-agp's
+ * fetch_size() bails and the guest keeps to the Rage 128's own PCI GART.
+ */
+static void test_agp_off(void)
+{
+    QTestState *qts = qtest_init("-machine ia64-vpc,agp=off -m 3G -S");
+    QGenericPCIBus gbus;
+    QPCIDevice *dev;
+    uint8_t cap;
+    bool have_agp_cap = false;
+
+    ia64_qpci_init(&gbus, qts);
+    dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(IA64_AGP_SLOT, 0));
+    g_assert_nonnull(dev);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x84ea);
+
+    /* The AGP capability is unchanged -- only the GART SRAM I/O is off. */
+    cap = qpci_config_readb(dev, PCI_CAPABILITY_LIST);
+    while (cap != 0 && cap != 0xff) {
+        if (qpci_config_readb(dev, cap) == PCI_CAP_ID_AGP) {
+            have_agp_cap = true;
+            break;
+        }
+        cap = qpci_config_readb(dev, cap + PCI_CAP_LIST_NEXT);
+    }
+    g_assert_true(have_agp_cap);
+
+    /* SRAM_IO_DISABLE (bit4) set; size/BAPBASE_ENABLE fields intact. */
+    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x10, ==, 0x10);
+    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x0f, ==, 0x09);
+
+    g_free(dev);
+    qtest_quit(qts);
+}
+
+/* Config space: the machine reports the documented SVID=vendor/SID=device. */
+static void test_ati_config_ids(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_VENDOR_ID), ==,
+                    0x1002);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_ID), ==, 0x5046);
+    ati_dev_close(&a);
+}
+
+/*
+ * Indirect PLL register file: power-up defaults, PLL_WR_EN gating, the 6-bit
+ * index mask, and the PPLL_ATOMIC_UPDATE "update pending" bit (bit 15 of
+ * indices 0x03..0x07) that hardware reports as clear once settled.
+ */
+static void test_ati_pll_regfile(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+
+    /* documented power-up values */
+    g_assert_cmphex(ati_pll_rd(&a, 0x01), ==, 0x000000f7);
+    g_assert_cmphex(ati_pll_rd(&a, 0x02), ==, 0x0000cc03);
+    g_assert_cmphex(ati_pll_rd(&a, 0x10), ==, 0x7a770000);
+
+    /* a write without PLL_WR_EN is dropped */
+    ati_wr(&a, ATI_CLOCK_CNTL_INDEX, 0x02);           /* no WR_EN */
+    ati_wr(&a, ATI_CLOCK_CNTL_DATA, 0xdeadbeef);
+    g_assert_cmphex(ati_pll_rd(&a, 0x02), ==, 0x0000cc03);
+
+    /* with PLL_WR_EN it sticks; the index masks to 6 bits on read-back */
+    ati_pll_wr(&a, 0x02, 0x00001234);
+    ati_wr(&a, ATI_CLOCK_CNTL_INDEX, 0x40 | 0x02);    /* high bits ignored */
+    g_assert_cmphex(ati_rd(&a, ATI_CLOCK_CNTL_DATA), ==, 0x00001234);
+
+    /* PPLL_ATOMIC_UPDATE: bit 15 of idx 0x03 reads back cleared */
+    ati_pll_wr(&a, 0x03, 0x0000800c);
+    g_assert_cmphex(ati_pll_rd(&a, 0x03), ==, 0x0000000c);
+    /* a non-atomic index keeps bit 15 */
+    ati_pll_wr(&a, 0x02, 0x00008111);
+    g_assert_cmphex(ati_pll_rd(&a, 0x02), ==, 0x00008111);
+
+    ati_dev_close(&a);
+}
+
+/*
+ * DAC load-sense: with the comparator enabled the model reports a connected
+ * CRT (DAC_CMP_OUTPUT set); with it disabled the bit stays clear.
+ */
+static void test_ati_dac_load_sense(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    ati_wr(&a, ATI_DAC_CNTL, 0);
+    g_assert_cmphex(ati_rd(&a, ATI_DAC_CNTL) & ATI_DAC_CMP_OUTPUT, ==, 0);
+    ati_wr(&a, ATI_DAC_CNTL, ATI_DAC_CMP_EN);
+    g_assert_cmphex(ati_rd(&a, ATI_DAC_CNTL) & ATI_DAC_CMP_OUTPUT, ==,
+                    ATI_DAC_CMP_OUTPUT);
+    ati_dev_close(&a);
+}
+
+/* MM_INDEX/MM_DATA indirection to both the register file and to VRAM. */
+static void test_ati_mm_index_indirect(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+
+    /* register indirection: reach DAC_CNTL through MM_DATA */
+    ati_wr(&a, ATI_DAC_CNTL, ATI_DAC_CMP_EN);
+    ati_wr(&a, ATI_MM_INDEX, ATI_DAC_CNTL);
+    g_assert_cmphex(ati_rd(&a, ATI_MM_DATA) & ATI_DAC_CMP_OUTPUT, ==,
+                    ATI_DAC_CMP_OUTPUT);
+
+    /* VRAM indirection (MM_INDEX bit 31): write then read back, and confirm
+     * it really landed in VRAM as seen through the framebuffer BAR. */
+    ati_wr(&a, ATI_MM_INDEX, ATI_MM_INDEX_VRAM | 0x40000);
+    ati_wr(&a, ATI_MM_DATA, 0xcafef00d);
+    ati_wr(&a, ATI_MM_INDEX, ATI_MM_INDEX_VRAM | 0x40000);
+    g_assert_cmphex(ati_rd(&a, ATI_MM_DATA), ==, 0xcafef00d);
+    g_assert_cmphex(qtest_readl(a.qts, a.fb + 0x40000), ==, 0xcafef00d);
+
+    ati_dev_close(&a);
+}
+
+/*
+ * PCI ROM BAR: the machine patches the stock SeaVGABIOS with the ATI tables a
+ * native Rage 128 driver validates (ia64_vpc_install_ati_rom_tables): the
+ * " 761295520" signature at 0x30, a PCIR structure restated to 1002:5046, and
+ * a valid overall checksum over the (grown) declared image.
+ */
+static void test_ati_rom_bar_tables(void)
+{
+    ATITestDev a;
+    uint32_t rom_bar;
+    uint64_t rom_base;
+    uint8_t *rom;
+    uint32_t declared, pcir, i;
+    uint8_t checksum = 0;
+    int sig_at = -1;
+
+    ati_dev_open(&a, NULL);
+    /*
+     * The machine assigns the ROM BAR but deliberately leaves decode OFF (an
+     * XP VideoPortGetAccessRanges workaround); readers enable it transiently,
+     * exactly as videoprt/pci.sys do around VideoPortGetRomImage.
+     */
+    rom_bar = qpci_config_readl(a.dev, PCI_ROM_ADDRESS);
+    rom_base = rom_bar & 0xfffff800;
+    g_assert_cmphex(rom_base, ==, 0xf6000000);
+    qpci_config_writel(a.dev, PCI_ROM_ADDRESS, rom_base | 1); /* enable decode */
+
+    rom = g_malloc(0x10000);
+    qtest_memread(a.qts, rom_base, rom, 0x10000);
+    g_assert_cmphex(rom[0], ==, 0x55);
+    g_assert_cmphex(rom[1], ==, 0xaa);
+    declared = (uint32_t)rom[2] * 512;
+    g_assert_cmpuint(declared, >, 0);
+    g_assert_cmpuint(declared, <=, 0x10000);
+
+    /* signature the ATI drivers look for, at the documented 0x30 */
+    g_assert_cmpmem(rom + 0x30, 10, " 761295520", 10);
+    for (i = 0; i + 10 <= declared; i++) {
+        if (memcmp(rom + i, " 761295520", 10) == 0) {
+            sig_at = i;
+            break;
+        }
+    }
+    g_assert_cmpint(sig_at, ==, 0x30);
+
+    /* PCIR restated to this adapter (EFI 1.10 wants it to match the header) */
+    pcir = lduw_le_p(rom + 0x18);
+    g_assert_cmpuint(pcir + 0x18, <=, declared);
+    g_assert_cmpmem(rom + pcir, 4, "PCIR", 4);
+    g_assert_cmphex(lduw_le_p(rom + pcir + 4), ==, 0x1002);
+    g_assert_cmphex(lduw_le_p(rom + pcir + 6), ==, 0x5046);
+    g_assert_cmphex(lduw_le_p(rom + pcir + 0x10), ==, declared / 512);
+
+    /* the grown image checksums to zero */
+    for (i = 0; i < declared; i++) {
+        checksum += rom[i];
+    }
+    g_assert_cmphex(checksum, ==, 0);
+
+    g_free(rom);
+    ati_dev_close(&a);
+}
+
+/*
+ * Program a solid-colour rectangle through the 2D engine and read it back out
+ * of VRAM.  Exercises the DP_GUI_MASTER_CNTL datatype decode, the RAGE 128
+ * DST_PITCH*bpp byte-stride rule, the brush/ROP fill path and ati_stpix.  At
+ * 24bpp this is the case that used to abort in stn_he_p on a 3-byte store.
+ */
+static void ati_do_fill(ATITestDev *a, unsigned datatype, unsigned bypp,
+                        uint32_t pitch_regs, uint32_t color)
+{
+    const uint32_t dst_off = 0x100000;
+    const unsigned width = 32, height = 4;
+    unsigned x, y, b;
+    uint32_t gmc = (datatype << 8) | ATI_GMC_BRUSH_SOLID |
+                   ATI_GMC_ROP3_PATCOPY | ATI_GMC_DST_POC;
+
+    ati_wr(a, ATI_DEFAULT_SC_BR, 0x3fff3fff);         /* no clipping */
+    ati_wr(a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(a, ATI_DST_OFFSET, dst_off);
+    ati_wr(a, ATI_DST_PITCH, pitch_regs);
+    ati_wr(a, ATI_DP_BRUSH_FRGD_CLR, color);
+    ati_wr(a, ATI_DP_GUI_MASTER_CNTL, gmc);
+    ati_wr(a, ATI_DST_Y_X, 0);
+    /* the DST_HEIGHT_WIDTH write triggers the blit */
+    ati_wr(a, ATI_DST_HEIGHT_WIDTH, (height << 16) | width);
+
+    /* every pixel of the rectangle carries the fill colour, byte-exact */
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            uint64_t p = a->fb + dst_off + y * (width * bypp) + x * bypp;
+
+            for (b = 0; b < bypp; b++) {
+                g_assert_cmphex(qtest_readb(a->qts, p + b), ==,
+                                (color >> (b * 8)) & 0xff);
+            }
+        }
+    }
+}
+
+static void test_ati_2d_solid_fill(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    /* DST_PITCH is in units of 8 pixels; byte stride = pitch * bpp. */
+    ati_do_fill(&a, 2, 1, 32 / 8,     0x0000005a);     /* 8bpp  */
+    ati_do_fill(&a, 3, 2, 32 / 8,     0x00001234);     /* 16bpp */
+    ati_do_fill(&a, 6, 4, 32 / 8,     0x11223344);     /* 32bpp */
+    ati_dev_close(&a);
+}
+
+/*
+ * 24bpp fill: the RAGE 128 treats the surface as byte-wide, so the driver
+ * pre-triples the pitch register; the model must store 3-byte pixels without
+ * tripping stn_he_p (fixed in 605127d/d2140f0) and land them contiguously.
+ */
+static void test_ati_2d_fill_24bpp(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    /* 24bpp: driver folds the *3 into the register -> (width/8)*3. */
+    ati_do_fill(&a, 5, 3, (32 / 8) * 3, 0x00334455);
+    ati_dev_close(&a);
+}
+
+/* Extra setup-engine / 2D-engine register offsets. */
+#define ATI_DP_BRUSH_BKGD_CLR   0x1478
+#define ATI_BRUSH_Y_X           0x1474
+#define ATI_BRUSH_DATA0         0x1480
+#define ATI_BRUSH_DATA1         0x1484
+#define ATI_SRC_OFFSET          0x15ac
+#define ATI_SRC_PITCH           0x15b0
+#define ATI_SRC_Y_X             0x1434
+#define ATI_SC_TOP_LEFT         0x16ec
+#define ATI_SCALE_3D_CNTL       0x1a00
+#define ATI_SETUP_CNTL          0x1bc4
+#define ATI_SU_DDA_BASE         0x1a40      /* per-channel {dx,dy,val}, 12B/ch */
+#define ATI_GMC_SRC_POC         0x00000001
+#define ATI_ROP3_SRCCOPY        0x00cc0000
+#define ATI_ROP3_SRCINVERT      0x00660000
+#define ATI_ROP3_SRCPAINT       0x00ee0000
+
+static inline void ati_vram_wr32(ATITestDev *a, uint32_t off, uint32_t v)
+{
+    qtest_writel(a->qts, a->fb + off, v);
+}
+
+static inline uint32_t ati_vram_rd32(ATITestDev *a, uint32_t off)
+{
+    return qtest_readl(a->qts, a->fb + off);
+}
+
+/*
+ * Caption gradient: the ati2draa driver programs the 2D setup engine's
+ * per-channel colour DDA (0x1a40..) and issues a solid rectangle paint with
+ * SCALE_3D_CNTL enabled and SETUP_CNTL COLOR_FCN = Gouraud; the engine then
+ * interpolates the colour across the rectangle instead of using the brush.
+ * Colour_c(x,y) = val_c + dx_c*(x-x0)*xstep + dy_c*(y-y0), clamped, where
+ * xstep is 3 at 24bpp (the DDA advances once per byte) and 1 otherwise.  The
+ * test programs a known plane and checks the engine reproduces the formula.
+ */
+static void ati_run_gradient(ATITestDev *a, unsigned datatype, unsigned bypp,
+                             int xstep, const int32_t val[3],
+                             const int32_t dx[3], const int32_t dy[3])
+{
+    const uint32_t dst_off = 0x100000;
+    const unsigned w = 32, h = 4, pitch = (bypp == 3) ? (w / 8) * 3 : w / 8;
+    const uint32_t stride = pitch * ((bypp == 3) ? 8 : bypp * 8);
+    unsigned ch, x, y, b;
+
+    ati_wr(a, ATI_DEFAULT_SC_BR, 0x3fff3fff);
+    ati_wr(a, ATI_SC_TOP_LEFT, 0);
+    ati_wr(a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(a, ATI_DST_OFFSET, dst_off);
+    ati_wr(a, ATI_DST_PITCH, pitch);
+    ati_wr(a, ATI_DP_GUI_MASTER_CNTL, (datatype << 8) | ATI_GMC_DST_POC);
+    ati_wr(a, ATI_SCALE_3D_CNTL, 0x40);               /* setup block enable */
+    ati_wr(a, ATI_SETUP_CNTL, 4 << 3);                /* COLOR_FCN = Gouraud */
+    for (ch = 0; ch < 3; ch++) {
+        ati_wr(a, ATI_SU_DDA_BASE + ch * 0xc + 0, (uint32_t)dx[ch]);
+        ati_wr(a, ATI_SU_DDA_BASE + ch * 0xc + 4, (uint32_t)dy[ch]);
+        ati_wr(a, ATI_SU_DDA_BASE + ch * 0xc + 8, (uint32_t)val[ch]);
+    }
+    ati_wr(a, ATI_DST_Y_X, 0);
+    ati_wr(a, ATI_DST_HEIGHT_WIDTH, (h << 16) | w);   /* triggers the paint */
+
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            uint8_t exp[3];                            /* R,G,B */
+            uint64_t p = a->fb + dst_off + y * stride + x * bypp;
+
+            for (ch = 0; ch < 3; ch++) {
+                int64_t v = (int64_t)val[ch] +
+                            (int64_t)dx[ch] * (int)x * xstep +
+                            (int64_t)dy[ch] * (int)y;
+                int iv = (int)(v >> 16);
+
+                exp[ch] = iv < 0 ? 0 : iv > 255 ? 255 : iv;
+            }
+            if (bypp >= 3) {                            /* stored B,G,R(,A) */
+                g_assert_cmphex(qtest_readb(a->qts, p + 0), ==, exp[2]);
+                g_assert_cmphex(qtest_readb(a->qts, p + 1), ==, exp[1]);
+                g_assert_cmphex(qtest_readb(a->qts, p + 2), ==, exp[0]);
+            } else if (bypp == 2) {                     /* RGB565 */
+                uint16_t px = qtest_readw(a->qts, p);
+                g_assert_cmpuint((px >> 11) & 0x1f, ==, exp[0] >> 3);
+                g_assert_cmpuint((px >> 5) & 0x3f, ==, exp[1] >> 2);
+                g_assert_cmpuint(px & 0x1f, ==, exp[2] >> 3);
+            }
+            (void)b;
+        }
+    }
+}
+
+static void test_ati_gradient_32bpp(void)
+{
+    ATITestDev a;
+    /* horizontal ramp on R, flat G/B (16.16). */
+    const int32_t val[3] = { 16 << 16, 64 << 16, 128 << 16 };
+    const int32_t dx[3]  = { 1 << 16, 0, 0 };
+    const int32_t dy[3]  = { 0, 0, 0 };
+
+    ati_dev_open(&a, NULL);
+    ati_run_gradient(&a, 6, 4, 1, val, dx, dy);
+    ati_dev_close(&a);
+}
+
+static void test_ati_gradient_24bpp(void)
+{
+    ATITestDev a;
+    /* dx is programmed at ~1/3 the slope; the engine multiplies by xstep=3. */
+    const int32_t val[3] = { 16 << 16, 64 << 16, 128 << 16 };
+    const int32_t dx[3]  = { (1 << 16) / 3, 0, 0 };
+    const int32_t dy[3]  = { 0, 0, 0 };
+
+    ati_dev_open(&a, NULL);
+    ati_run_gradient(&a, 5, 3, 3, val, dx, dy);
+    ati_dev_close(&a);
+}
+
+/*
+ * 8x8 monochrome pattern brush (PATCOPY, brush type 0): the pattern bit at
+ * (x,y) selects foreground vs background.  Regresses the pattern-brush fill.
+ */
+static void test_ati_pattern_brush(void)
+{
+    ATITestDev a;
+    const uint32_t dst_off = 0x100000;
+    const unsigned w = 8, h = 4;
+    unsigned x, y;
+
+    ati_dev_open(&a, NULL);
+    ati_wr(&a, ATI_DEFAULT_SC_BR, 0x3fff3fff);
+    ati_wr(&a, ATI_SC_TOP_LEFT, 0);
+    ati_wr(&a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(&a, ATI_DST_OFFSET, dst_off);
+    ati_wr(&a, ATI_DST_PITCH, w / 8);
+    ati_wr(&a, ATI_DP_BRUSH_FRGD_CLR, 0xaa);
+    ati_wr(&a, ATI_DP_BRUSH_BKGD_CLR, 0xbb);
+    ati_wr(&a, ATI_BRUSH_Y_X, 0);
+    ati_wr(&a, ATI_BRUSH_DATA0, 0x55555555);          /* each row 0b01010101 */
+    ati_wr(&a, ATI_BRUSH_DATA1, 0x55555555);
+    /* datatype 8bpp, brush field 0 (8x8 mono), ROP PATCOPY, dst from regs */
+    ati_wr(&a, ATI_DP_GUI_MASTER_CNTL,
+           (2 << 8) | ATI_GMC_ROP3_PATCOPY | ATI_GMC_DST_POC);
+    ati_wr(&a, ATI_DST_Y_X, 0);
+    ati_wr(&a, ATI_DST_HEIGHT_WIDTH, (h << 16) | w);
+
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            uint8_t exp = (x & 1) ? 0xbb : 0xaa;       /* bit0 set on even x */
+            g_assert_cmphex(qtest_readb(a.qts, a.fb + dst_off + y * w + x),
+                            ==, exp);
+        }
+    }
+    ati_dev_close(&a);
+}
+
+/*
+ * Source/destination ROP blits (32bpp): the engine combines a source and the
+ * existing destination per the ROP3 code.  Regresses the general-ROP path
+ * (SRCINVERT was the XOR-trail case, SRCPAINT the OR case).
+ */
+static void ati_rop_case(ATITestDev *a, uint32_t rop3, uint32_t sc,
+                         uint32_t dc, uint32_t expect)
+{
+    const uint32_t src_off = 0x200000, dst_off = 0x100000;
+    const unsigned w = 8, h = 2;
+    const uint32_t stride = (w / 8) * 32;              /* 32bpp byte stride */
+    unsigned x, y;
+
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            ati_vram_wr32(a, src_off + y * stride + x * 4, sc);
+            ati_vram_wr32(a, dst_off + y * stride + x * 4, dc);
+        }
+    }
+    ati_wr(a, ATI_DEFAULT_SC_BR, 0x3fff3fff);
+    ati_wr(a, ATI_SC_TOP_LEFT, 0);
+    ati_wr(a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(a, ATI_SRC_OFFSET, src_off);
+    ati_wr(a, ATI_SRC_PITCH, w / 8);
+    ati_wr(a, ATI_SRC_Y_X, 0);
+    ati_wr(a, ATI_DST_OFFSET, dst_off);
+    ati_wr(a, ATI_DST_PITCH, w / 8);
+    ati_wr(a, ATI_DP_GUI_MASTER_CNTL,
+           (6 << 8) | rop3 | ATI_GMC_SRC_POC | ATI_GMC_DST_POC);
+    ati_wr(a, ATI_DST_Y_X, 0);
+    ati_wr(a, ATI_DST_HEIGHT_WIDTH, (h << 16) | w);
+
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            g_assert_cmphex(ati_vram_rd32(a, dst_off + y * stride + x * 4),
+                            ==, expect);
+        }
+    }
+}
+
+static void test_ati_rop_src_dst(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    ati_rop_case(&a, ATI_ROP3_SRCCOPY, 0x11223344, 0x55667788, 0x11223344);
+    ati_rop_case(&a, ATI_ROP3_SRCINVERT, 0x11223344, 0x0f0f0f0f, 0x1e2d3c4b);
+    ati_rop_case(&a, ATI_ROP3_SRCPAINT, 0x11002200, 0x00330044, 0x11332244);
+    ati_dev_close(&a);
+}
+
+/*
+ * Overlapping same-surface SRCCOPY (a window move / scroll): pixman shears
+ * overlapping copies, so the model memmoves each row walking away from the
+ * destination.  Copy a strip of distinct-per-row values down by two rows and
+ * confirm no row is clobbered before it is read.  Regresses the drag smear.
+ */
+static void test_ati_overlap_copy(void)
+{
+    ATITestDev a;
+    const uint32_t off = 0x100000;
+    const unsigned w = 8, h = 4;
+    const uint32_t stride = (w / 8) * 32;
+    unsigned x, y;
+
+    ati_dev_open(&a, NULL);
+    for (y = 0; y < 6; y++) {                          /* seed 6 distinct rows */
+        for (x = 0; x < w; x++) {
+            ati_vram_wr32(&a, off + y * stride + x * 4, 0x1000 + y);
+        }
+    }
+    ati_wr(&a, ATI_DEFAULT_SC_BR, 0x3fff3fff);
+    ati_wr(&a, ATI_SC_TOP_LEFT, 0);
+    ati_wr(&a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(&a, ATI_SRC_OFFSET, off);
+    ati_wr(&a, ATI_SRC_PITCH, w / 8);
+    ati_wr(&a, ATI_SRC_Y_X, 0);                        /* src rows 0..3 */
+    ati_wr(&a, ATI_DST_OFFSET, off);
+    ati_wr(&a, ATI_DST_PITCH, w / 8);
+    ati_wr(&a, ATI_DP_GUI_MASTER_CNTL,
+           (6 << 8) | ATI_ROP3_SRCCOPY | ATI_GMC_SRC_POC | ATI_GMC_DST_POC);
+    ati_wr(&a, ATI_DST_Y_X, 2 << 16);                  /* dst rows 2..5 */
+    ati_wr(&a, ATI_DST_HEIGHT_WIDTH, (h << 16) | w);
+
+    /* rows 0,1 untouched; rows 2..5 are the copied old rows 0..3 */
+    for (x = 0; x < w; x++) {
+        g_assert_cmphex(ati_vram_rd32(&a, off + 0 * stride + x * 4), ==,
+                        0x1000);
+        g_assert_cmphex(ati_vram_rd32(&a, off + 1 * stride + x * 4), ==,
+                        0x1001);
+        g_assert_cmphex(ati_vram_rd32(&a, off + 2 * stride + x * 4), ==,
+                        0x1000);
+        g_assert_cmphex(ati_vram_rd32(&a, off + 3 * stride + x * 4), ==,
+                        0x1001);
+        g_assert_cmphex(ati_vram_rd32(&a, off + 4 * stride + x * 4), ==,
+                        0x1002);
+        g_assert_cmphex(ati_vram_rd32(&a, off + 5 * stride + x * 4), ==,
+                        0x1003);
+    }
+    ati_dev_close(&a);
+}
+
+/*
+ * 14-bit SIGNED destination coordinates (ati_sext14): a caption whose left
+ * edge is off-screen is encoded as a negative 14-bit X.  Exercised on the
+ * gradient path, which is where it matters (an off-origin caption ramp).
+ * Without sign extension DST_X = 0x3ffe reads as +16382, placing the whole
+ * rectangle past the right scissor edge so columns 0..3 stay clear; with it
+ * the origin is -2 and those columns render, interpolated from x0 = -2.
+ */
+static void test_ati_sext14_coord(void)
+{
+    ATITestDev a;
+    const uint32_t dst_off = 0x100000;
+    const int x0 = -2;
+    const int32_t val[3] = { 16 << 16, 64 << 16, 128 << 16 };
+    const int32_t dx[3]  = { 1 << 16, 0, 0 };
+    unsigned x, ch;
+
+    ati_dev_open(&a, NULL);
+    for (x = 0; x < 8; x++) {                          /* clear the row */
+        ati_vram_wr32(&a, dst_off + x * 4, 0);
+    }
+    ati_wr(&a, ATI_DEFAULT_SC_BR, 0x3fff3fff);
+    ati_wr(&a, ATI_SC_TOP_LEFT, 0);
+    ati_wr(&a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(&a, ATI_DST_OFFSET, dst_off);
+    ati_wr(&a, ATI_DST_PITCH, 8 / 8);
+    ati_wr(&a, ATI_DP_GUI_MASTER_CNTL, (6 << 8) | ATI_GMC_DST_POC);
+    ati_wr(&a, ATI_SCALE_3D_CNTL, 0x40);
+    ati_wr(&a, ATI_SETUP_CNTL, 4 << 3);
+    for (ch = 0; ch < 3; ch++) {
+        ati_wr(&a, ATI_SU_DDA_BASE + ch * 0xc + 0, (uint32_t)dx[ch]);
+        ati_wr(&a, ATI_SU_DDA_BASE + ch * 0xc + 4, 0);
+        ati_wr(&a, ATI_SU_DDA_BASE + ch * 0xc + 8, (uint32_t)val[ch]);
+    }
+    ati_wr(&a, ATI_DST_Y_X, 0x3ffe);                   /* x = -2 (sext14) */
+    ati_wr(&a, ATI_DST_HEIGHT_WIDTH, (1 << 16) | 6);   /* covers x -2..3 */
+
+    /* columns 0..3 render with R interpolated from the negative origin */
+    for (x = 0; x < 4; x++) {
+        int r = 16 + ((int)x - x0);                    /* val_R + dx_R*(x-x0) */
+        g_assert_cmphex(ati_vram_rd32(&a, dst_off + x * 4), ==,
+                        0xff000000u | (uint32_t)r << 16 | (64 << 8) | 128);
+    }
+    for (x = 4; x < 8; x++) {                          /* untouched */
+        g_assert_cmphex(ati_vram_rd32(&a, dst_off + x * 4), ==, 0);
+    }
+    ati_dev_close(&a);
+}
+
+#define ATI_CLR_CMP_CLR_SRC     0x15c4
+#define ATI_CLR_CMP_MASK        0x15cc
+#define ATI_CLR_CMP_CNTL        0x15c0
+#define ATI_GMC_CLR_CMP_FCN_CLR 0x10000000 /* DP_GUI_MASTER_CNTL bit 28 */
+
+/*
+ * A GUI-master-control write with GMC_CLR_CMP_CNTL_DIS (bit 28) must clear the
+ * colour-compare function (CLR_CMP_CNTL FN_SRC/FN_DST).  The XFree86 r128
+ * driver sets this bit in the base control word of every op, so a colour key
+ * enabled by a transparent (window-decoration) blit does not leak into the
+ * following text/fill ops.  Without this, a stale key drops keyed pixels and
+ * corrupts KDE's terminal text and window frames.
+ */
+static void test_ati_clr_cmp_clear(void)
+{
+    ATITestDev a;
+    const uint32_t src_off = 0x200000, dst_off = 0x100000;
+    const unsigned w = 4, h = 1;
+    const uint32_t stride = (w / 8 ? w / 8 : 1) * 32;
+    const uint32_t key = 0x00aaaaaa, other = 0x00112233;
+    unsigned x;
+
+    ati_dev_open(&a, NULL);
+
+    /* src: [key, other, key, other]; dst pre-cleared to 0 */
+    ati_vram_wr32(&a, src_off + 0 * 4, key);
+    ati_vram_wr32(&a, src_off + 1 * 4, other);
+    ati_vram_wr32(&a, src_off + 2 * 4, key);
+    ati_vram_wr32(&a, src_off + 3 * 4, other);
+    for (x = 0; x < w; x++) {
+        ati_vram_wr32(&a, dst_off + x * 4, 0);
+    }
+
+    /* Enable a NEQ colour key on 'key' (draw only where src != key). */
+    ati_wr(&a, ATI_CLR_CMP_CLR_SRC, key);
+    ati_wr(&a, ATI_CLR_CMP_MASK, 0xffffffff);
+    ati_wr(&a, ATI_CLR_CMP_CNTL, 5);              /* FN_SRC = CMP_NEQ */
+
+    ati_wr(&a, ATI_DEFAULT_SC_BR, 0x3fff3fff);
+    ati_wr(&a, ATI_SC_TOP_LEFT, 0);
+    ati_wr(&a, ATI_DP_CNTL, ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM);
+    ati_wr(&a, ATI_SRC_OFFSET, src_off);
+    ati_wr(&a, ATI_SRC_PITCH, 1);
+    ati_wr(&a, ATI_SRC_Y_X, 0);
+    ati_wr(&a, ATI_DST_OFFSET, dst_off);
+    ati_wr(&a, ATI_DST_PITCH, 1);
+    /*
+     * This control write carries GMC_CLR_CMP_CNTL_DIS, so it must clear the
+     * key first: the copy then draws ALL four source pixels, key ones included.
+     */
+    ati_wr(&a, ATI_DP_GUI_MASTER_CNTL,
+           (6 << 8) | ATI_ROP3_SRCCOPY | ATI_GMC_SRC_POC | ATI_GMC_DST_POC |
+           ATI_GMC_CLR_CMP_FCN_CLR);
+    ati_wr(&a, ATI_DST_Y_X, 0);
+    ati_wr(&a, ATI_DST_HEIGHT_WIDTH, (h << 16) | w);
+
+    /* every source pixel copied, including the two that matched the key */
+    g_assert_cmphex(ati_vram_rd32(&a, dst_off + 0 * 4), ==, key);
+    g_assert_cmphex(ati_vram_rd32(&a, dst_off + 1 * 4), ==, other);
+    g_assert_cmphex(ati_vram_rd32(&a, dst_off + 2 * 4), ==, key);
+    g_assert_cmphex(ati_vram_rd32(&a, dst_off + 3 * 4), ==, other);
+
+    (void)stride;
+    ati_dev_close(&a);
+}
+
+/* PM4 indirect-buffer launch registers and the CCE type-0 packet header. */
+#define ATI_PM4_IW_INDOFF       0x0738
+#define ATI_PM4_IW_INDSIZE      0x073c
+/* CCE_PACKET0(reg, n): type-0, writes n+1 registers from reg. n=0 -> one. */
+#define ATI_CCE_PACKET0_1(reg)  ((reg) >> 2)
+
+/*
+ * PM4 indirect buffers.  The r128 DRM (unlike the XP inbox driver, which
+ * inlines type-3 packets in the ring) batches all 2D work into DMA buffers and
+ * only writes the buffer's card VM byte offset and dword length into the ring;
+ * writing PM4_IW_INDSIZE makes the CCE fetch and run that buffer as a packet
+ * stream.  Build such a buffer in VRAM -- with no GART configured it is read
+ * straight from local video memory -- carrying the CCE_PACKET0 register writes
+ * for a solid fill, and confirm the fill reaches VRAM.  Critically, nothing
+ * may draw until the INDSIZE write fires the launch (writing INDOFF alone is
+ * inert), which is exactly the path that was dropped before: the greeter's
+ * whole render batch went unexecuted.
+ */
+static void test_ati_cce_indirect_buffer(void)
+{
+    ATITestDev a;
+    const uint32_t buf_off = 0x200000;   /* indirect buffer, in VRAM  */
+    const uint32_t dst_off = 0x100000;   /* fill destination, in VRAM */
+    const unsigned width = 32, height = 4;
+    const uint32_t color = 0xa1b2c3d4;
+    const uint32_t gmc = (6 << 8) | ATI_GMC_BRUSH_SOLID |    /* 32bpp */
+                         ATI_GMC_ROP3_PATCOPY | ATI_GMC_DST_POC;
+    const uint32_t prog[] = {
+        ATI_CCE_PACKET0_1(ATI_DEFAULT_SC_BR),      0x3fff3fff,
+        ATI_CCE_PACKET0_1(ATI_DP_CNTL),
+            ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM,
+        ATI_CCE_PACKET0_1(ATI_DST_OFFSET),         dst_off,
+        ATI_CCE_PACKET0_1(ATI_DST_PITCH),          32 / 8,
+        ATI_CCE_PACKET0_1(ATI_DP_BRUSH_FRGD_CLR),  color,
+        ATI_CCE_PACKET0_1(ATI_DP_GUI_MASTER_CNTL), gmc,
+        ATI_CCE_PACKET0_1(ATI_DST_Y_X),            0,
+        ATI_CCE_PACKET0_1(ATI_DST_HEIGHT_WIDTH),   (height << 16) | width,
+    };
+    unsigned i, x, y;
+
+    ati_dev_open(&a, NULL);
+
+    /* Lay the packet stream into VRAM and pre-poison the fill target. */
+    for (i = 0; i < ARRAY_SIZE(prog); i++) {
+        ati_vram_wr32(&a, buf_off + i * 4, prog[i]);
+    }
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            ati_vram_wr32(&a, dst_off + (y * width + x) * 4, 0xdeadbeef);
+        }
+    }
+
+    /* INDOFF alone is inert -- the launch is the INDSIZE write. */
+    ati_wr(&a, ATI_PM4_IW_INDOFF, buf_off);
+    g_assert_cmphex(ati_vram_rd32(&a, dst_off), ==, 0xdeadbeef);
+
+    /* Writing INDSIZE fetches and runs the buffer; the fill lands in VRAM. */
+    ati_wr(&a, ATI_PM4_IW_INDSIZE, ARRAY_SIZE(prog));
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            g_assert_cmphex(ati_vram_rd32(&a, dst_off + (y * width + x) * 4),
+                            ==, color);
+        }
+    }
+
+    ati_dev_close(&a);
+}
+
+/*
+ * r128 AGP_BASE (0x0170) and where the r128 MC images the AGP aperture
+ * (R128_AGP_OFFSET).  IA64_AGP_GART_WINDOW / IA64_AGP_APERTURE_BASE are shared
+ * with test_agp_gxb above.
+ */
+#define ATI_AGP_BASE            0x0170
+#define R128_AGP_OFFSET         0x02000000u
+
+/*
+ * End-to-end >4 GiB DMA path: an r128 CCE fetch of an AGP-resident indirect
+ * buffer, routed through the 460GX GXB GART to DRAM.  This is the whole reason
+ * approach B exists -- prove the two halves compose:
+ *
+ *   1. r128 AGP forwarding: with AGP_BASE set, a card VM address at/above
+ *      R128_AGP_OFFSET maps to AGP bus AGP_BASE + (vm - R128_AGP_OFFSET) and is
+ *      issued as a DMA, hitting the GXB IOMMU (ati.c ati_cce_vm_dword);
+ *   2. GXB GART: that aperture page is relocated by its GATT entry to the DRAM
+ *      page the driver mapped.
+ *
+ * The indirect buffer (a solid-fill packet stream) lives ONLY in DRAM, reached
+ * exclusively through the aperture -- the VM offset used is past the 16 MiB
+ * framebuffer, so if either half were broken the CCE would read zeros and the
+ * fill would never land.
+ */
+static void test_agp_gart_dma(void)
+{
+    ATITestDev a;
+    const uint32_t dram_page = 0x08000000;       /* scratch DRAM (128 MiB)  */
+    const uint32_t agp_vm = R128_AGP_OFFSET;     /* aperture page 0         */
+    const uint32_t dst_off = 0x100000;           /* fill target, in VRAM    */
+    const unsigned width = 32, height = 4;
+    const uint32_t color = 0xcafe1260;
+    const uint32_t gmc = (6 << 8) | ATI_GMC_BRUSH_SOLID |
+                         ATI_GMC_ROP3_PATCOPY | ATI_GMC_DST_POC;
+    const uint32_t prog[] = {
+        ATI_CCE_PACKET0_1(ATI_DEFAULT_SC_BR),      0x3fff3fff,
+        ATI_CCE_PACKET0_1(ATI_DP_CNTL),
+            ATI_DP_LEFT_TO_RIGHT | ATI_DP_TOP_TO_BOTTOM,
+        ATI_CCE_PACKET0_1(ATI_DST_OFFSET),         dst_off,
+        ATI_CCE_PACKET0_1(ATI_DST_PITCH),          32 / 8,
+        ATI_CCE_PACKET0_1(ATI_DP_BRUSH_FRGD_CLR),  color,
+        ATI_CCE_PACKET0_1(ATI_DP_GUI_MASTER_CNTL), gmc,
+        ATI_CCE_PACKET0_1(ATI_DST_Y_X),            0,
+        ATI_CCE_PACKET0_1(ATI_DST_HEIGHT_WIDTH),   (height << 16) | width,
+    };
+    unsigned i, x, y;
+
+    ati_dev_open(&a, NULL);
+
+    /* The AGP fetch is a bus-master DMA cycle: enable bus mastering. */
+    qpci_config_writew(a.dev, PCI_COMMAND,
+                       qpci_config_readw(a.dev, PCI_COMMAND) |
+                       PCI_COMMAND_MASTER);
+
+    /* Map aperture page 0 -> the DRAM scratch page: valid | phys[35:12]. */
+    qtest_writel(a.qts, IA64_AGP_GART_WINDOW + 0,
+                 0x03000000u | (dram_page >> 12));
+    /* Point the card's AGP window at the chipset aperture base. */
+    ati_wr(&a, ATI_AGP_BASE, (uint32_t)IA64_AGP_APERTURE_BASE);
+
+    /* Indirect buffer lives in DRAM, reachable only through the aperture. */
+    for (i = 0; i < ARRAY_SIZE(prog); i++) {
+        qtest_writel(a.qts, dram_page + i * 4, prog[i]);
+    }
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            ati_vram_wr32(&a, dst_off + (y * width + x) * 4, 0xdeadbeef);
+        }
+    }
+
+    /* Launch: CCE fetches the buffer via AGP -> GART -> DRAM and runs it. */
+    ati_wr(&a, ATI_PM4_IW_INDOFF, agp_vm);
+    ati_wr(&a, ATI_PM4_IW_INDSIZE, ARRAY_SIZE(prog));
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            g_assert_cmphex(ati_vram_rd32(&a, dst_off + (y * width + x) * 4),
+                            ==, color);
+        }
+    }
+
+    ati_dev_close(&a);
+}
+
+/*
+ * Mach64 3D Rage (DEV_4754) tests.  The adapter is selected with
+ * -machine ia64-vpc,vga=mach64; its BAR2 register block and BAR0 framebuffer
+ * land on the same fixed windows the machine assigns to any VGA-slot device.
+ * A Block-0 register at Mach64 block index r decodes to BAR2 + 0x400 + r*4.
+ */
+#define M64_REG(r)              (0x400u + (unsigned)(r) * 4u)
+#define M64_CONFIG_CHIP_ID      0x38
+#define M64_SCRATCH_REG0        0x20
+#define M64_DST_OFF_PITCH       0x40
+#define M64_DST_Y_X             0x43
+#define M64_DST_HEIGHT_WIDTH    0x46
+#define M64_SC_LEFT             0xa8
+#define M64_SC_RIGHT            0xa9
+#define M64_SC_TOP              0xab
+#define M64_SC_BOTTOM           0xac
+#define M64_DP_BKGD_CLR         0xb0
+#define M64_DP_FRGD_CLR         0xb1
+#define M64_DP_WRITE_MASK       0xb2
+#define M64_DP_PIX_WIDTH        0xb4
+#define M64_DP_MIX              0xb5
+#define M64_DP_SRC              0xb6
+
+/* Mach64 DP_*_PIX_WIDTH codes (2 = 8bpp, 4 = 16bpp, 6 = 32bpp). */
+#define M64_PIX_WIDTH_8BPP      2
+#define M64_PIX_WIDTH_16BPP     4
+#define M64_PIX_WIDTH_32BPP     6
+
+typedef struct {
+    QTestState *qts;
+    QGenericPCIBus gbus;
+    QPCIDevice *dev;
+    uint64_t mmio;
+    uint64_t fb;
+} Mach64TestDev;
+
+static void mach64_dev_open_id(Mach64TestDev *a, const char *extra,
+                               uint16_t dev_id)
+{
+    a->qts = ia64_vpc_start(extra ?: "-machine vga=mach64");
+    ia64_qpci_init(&a->gbus, a->qts);
+    a->dev = qpci_device_find(&a->gbus.bus, QPCI_DEVFN(ATI_SLOT, 0));
+    g_assert_nonnull(a->dev);
+    g_assert_cmphex(qpci_config_readw(a->dev, PCI_VENDOR_ID), ==, 0x1002);
+    g_assert_cmphex(qpci_config_readw(a->dev, PCI_DEVICE_ID), ==, dev_id);
+    a->mmio = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_2) & 0xfffffff0;
+    a->fb = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_0) & 0xfffffff0;
+    g_assert_cmphex(a->mmio, ==, 0xf5000000);
+    g_assert_cmphex(a->fb, ==, 0xf0000000);
+}
+
+static void mach64_dev_open(Mach64TestDev *a)
+{
+    /* default adapter is the Rage XL (0x4752). */
+    mach64_dev_open_id(a, "-machine vga=mach64", 0x4752);
+}
+
+static void mach64_dev_close(Mach64TestDev *a)
+{
+    g_free(a->dev);
+    qtest_quit(a->qts);
+}
+
+static inline void m64_wr(Mach64TestDev *a, unsigned reg, uint32_t v)
+{
+    qtest_writel(a->qts, a->mmio + M64_REG(reg), v);
+}
+
+static inline uint32_t m64_rd(Mach64TestDev *a, unsigned reg)
+{
+    return qtest_readl(a->qts, a->mmio + M64_REG(reg));
+}
+
+static void test_mach64_ids(void)
+{
+    Mach64TestDev a;
+
+    /* Default: Rage XL 0x4752, auto revision 0x27 (the id both XP builds match). */
+    mach64_dev_open(&a);
+    g_assert_cmphex(qpci_config_readb(a.dev, PCI_REVISION_ID), ==, 0x27);
+    /* CONFIG_CHIP_ID: device id in the type field, PCI revision in [31:24]. */
+    g_assert_cmphex(m64_rd(&a, M64_CONFIG_CHIP_ID) & 0xffff, ==, 0x4752);
+    g_assert_cmphex(m64_rd(&a, M64_CONFIG_CHIP_ID) >> 24, ==, 0x27);
+    /* subsystem falls back to vendor/device (set by the machine). */
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_VENDOR_ID), ==,
+                    0x1002);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_ID), ==, 0x4752);
+    /* a scratch register round-trips. */
+    m64_wr(&a, M64_SCRATCH_REG0, 0xdeadbeef);
+    g_assert_cmphex(m64_rd(&a, M64_SCRATCH_REG0), ==, 0xdeadbeef);
+    mach64_dev_close(&a);
+
+    /* x-device-id=0x4754 selects 3D Rage II with auto revision 0x9A. */
+    mach64_dev_open_id(&a, "-machine vga=mach64 -global mach64-vga.x-device-id=0x4754",
+                       0x4754);
+    g_assert_cmphex(qpci_config_readb(a.dev, PCI_REVISION_ID), ==, 0x9a);
+    g_assert_cmphex(m64_rd(&a, M64_CONFIG_CHIP_ID) & 0xffff, ==, 0x4754);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_ID), ==, 0x4754);
+    mach64_dev_close(&a);
+}
+
+static void mach64_do_fill(Mach64TestDev *a, unsigned pixw, unsigned bypp,
+                           uint32_t color)
+{
+    const unsigned width = 32, height = 4;
+    const unsigned pitch_px = 32;
+
+    m64_wr(a, M64_DP_PIX_WIDTH, pixw);                 /* DST pixel width */
+    m64_wr(a, M64_DST_OFF_PITCH, (pitch_px / 8) << 22);/* offset 0, pitch */
+    m64_wr(a, M64_DP_FRGD_CLR, color);
+    m64_wr(a, M64_DP_MIX, 0x7u << 16);                 /* FRGD_MIX = SRC */
+    m64_wr(a, M64_DP_SRC, 0x1u << 8);                  /* FRGD_SRC = FRGD_CLR */
+    m64_wr(a, M64_DP_WRITE_MASK, 0xffffffff);
+    m64_wr(a, M64_SC_LEFT, 0);
+    m64_wr(a, M64_SC_RIGHT, 0x3fff);
+    m64_wr(a, M64_SC_TOP, 0);
+    m64_wr(a, M64_SC_BOTTOM, 0x3fff);
+    m64_wr(a, M64_DST_Y_X, 0);                          /* x=0, y=0 */
+    /* the DST_HEIGHT_WIDTH write (W high, H low) triggers the fill */
+    m64_wr(a, M64_DST_HEIGHT_WIDTH, (width << 16) | height);
+
+    for (unsigned y = 0; y < height; y++) {
+        for (unsigned x = 0; x < width; x++) {
+            uint64_t p = a->fb + y * (pitch_px * bypp) + x * bypp;
+
+            for (unsigned b = 0; b < bypp; b++) {
+                g_assert_cmphex(qtest_readb(a->qts, p + b), ==,
+                                (color >> (b * 8)) & 0xff);
+            }
+        }
+    }
+}
+
+static void test_mach64_2d_solid_fill(void)
+{
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    mach64_do_fill(&a, M64_PIX_WIDTH_8BPP,  1, 0x0000005a);
+    mach64_do_fill(&a, M64_PIX_WIDTH_16BPP, 2, 0x00001234);
+    mach64_do_fill(&a, M64_PIX_WIDTH_32BPP, 4, 0x11223344);
+    mach64_dev_close(&a);
+}
+
+/*
+ * DDC/EDID monitor detection.  The native Rage XL miniport bit-bangs I2C over
+ * "LCD register 7" (LCD_INDEX selects 7, LCD_DATA is the GPIO byte) to read the
+ * monitor EDID; without a valid EDID it spins forever in a DAC load-sense
+ * fallback.  Drive that same register here as an I2C master and confirm the
+ * i2c-ddc slave ACKs and returns a well-formed EDID.  This exercises exactly
+ * the register bit model the guest driver depends on, with no guest boot.
+ */
+#define M64_LCD_INDEX           0x29
+#define M64_LCD_DATA            0x2a
+#define M64_DDC_INDEX_I2C       7
+/*
+ * LCD-reg-7 DDC uses the Mach64 direction+state open-drain model split across
+ * two bytes of LCD_DATA, each accessed on its own (read-modify-write):
+ *   byte 1 (dword bits 13/14) = STATE     (SDA bit5, SCL bit6 within the byte)
+ *   byte 3 (dword bits 29/30) = DIRECTION (SDA bit5, SCL bit6; 1 = output)
+ * A line is low only when output with state 0; otherwise released.  A state
+ * read gives the driven value while output, else the live bus level.
+ */
+#define M64_DDC_SDA             (1u << 5)      /* within a byte */
+#define M64_DDC_SCL             (1u << 6)
+#define M64_DDC_STATE_BYTE      1              /* value / live level */
+#define M64_DDC_DIR_BYTE        3              /* direction (1 = output) */
+
+/* RMW one byte of LCD_DATA (byte-wise, exactly like the miniport). */
+static void ddc_bit(Mach64TestDev *a, unsigned byteoff, uint8_t mask, int set)
+{
+    uint64_t addr = a->mmio + M64_REG(M64_LCD_DATA) + byteoff;
+    uint8_t v = qtest_readb(a->qts, addr);
+    v = set ? (v | mask) : (v & ~mask);
+    qtest_writeb(a->qts, addr, v);
+}
+
+/* Drive a line to `level` (1 = release/high, 0 = pull low): output+state 0 to
+ * pull low, input to release. */
+static void ddc_line(Mach64TestDev *a, uint8_t mask, int level)
+{
+    if (level) {
+        ddc_bit(a, M64_DDC_DIR_BYTE, mask, 0);      /* input -> released */
+    } else {
+        ddc_bit(a, M64_DDC_STATE_BYTE, mask, 0);    /* state 0 */
+        ddc_bit(a, M64_DDC_DIR_BYTE, mask, 1);      /* output -> pulls low */
+    }
+}
+
+static void ddc_drive(Mach64TestDev *a, int scl, int sda)
+{
+    ddc_line(a, M64_DDC_SCL, scl);
+    ddc_line(a, M64_DDC_SDA, sda);
+}
+
+static int ddc_sda(Mach64TestDev *a)
+{
+    ddc_bit(a, M64_DDC_DIR_BYTE, M64_DDC_SDA, 0);   /* input: release SDA */
+    return !!(qtest_readb(a->qts, a->mmio + M64_REG(M64_LCD_DATA) +
+                          M64_DDC_STATE_BYTE) & M64_DDC_SDA);
+}
+
+static void i2c_start(Mach64TestDev *a)
+{
+    ddc_drive(a, 1, 1);
+    ddc_drive(a, 1, 0);         /* SDA falls while SCL high */
+    ddc_drive(a, 0, 0);
+}
+
+static void i2c_stop(Mach64TestDev *a)
+{
+    ddc_drive(a, 0, 0);
+    ddc_drive(a, 1, 0);
+    ddc_drive(a, 1, 1);         /* SDA rises while SCL high */
+}
+
+/* Clock one bit out; returns nothing. */
+static void i2c_wr_bit(Mach64TestDev *a, int b)
+{
+    ddc_drive(a, 0, b);
+    ddc_drive(a, 1, b);         /* slave samples on the rising edge */
+    ddc_drive(a, 0, b);
+}
+
+/* Release SDA, clock, sample the line the slave now drives. */
+static int i2c_rd_bit(Mach64TestDev *a)
+{
+    int b;
+    ddc_drive(a, 0, 1);
+    ddc_drive(a, 1, 1);
+    b = ddc_sda(a);
+    ddc_drive(a, 0, 1);
+    return b;
+}
+
+/* Returns 1 if the slave ACKed (pulled SDA low on the 9th clock). */
+static int i2c_wr_byte(Mach64TestDev *a, uint8_t v)
+{
+    int i;
+    for (i = 7; i >= 0; i--) {
+        i2c_wr_bit(a, (v >> i) & 1);
+    }
+    return i2c_rd_bit(a) == 0;
+}
+
+static uint8_t i2c_rd_byte(Mach64TestDev *a, int ack)
+{
+    uint8_t v = 0;
+    int i;
+    for (i = 7; i >= 0; i--) {
+        v = (v << 1) | i2c_rd_bit(a);
+    }
+    i2c_wr_bit(a, ack ? 0 : 1);   /* master ACK (0) to continue, NAK (1) to end */
+    return v;
+}
+
+static void test_mach64_ddc_edid(void)
+{
+    Mach64TestDev a;
+    uint8_t edid[128];
+    unsigned sum = 0;
+    int i;
+
+    mach64_dev_open(&a);
+    m64_wr(&a, M64_LCD_INDEX, M64_DDC_INDEX_I2C);
+
+    /* DDC2B: address the EDID EEPROM at 0xA0, set the byte offset to 0, then
+     * repeated-start into a read of all 128 bytes of block 0. */
+    i2c_start(&a);
+    g_assert_cmpint(i2c_wr_byte(&a, 0xA0), ==, 1);   /* slave must ACK its addr */
+    g_assert_cmpint(i2c_wr_byte(&a, 0x00), ==, 1);   /* offset 0 */
+    i2c_start(&a);
+    g_assert_cmpint(i2c_wr_byte(&a, 0xA1), ==, 1);   /* read */
+    for (i = 0; i < 128; i++) {
+        edid[i] = i2c_rd_byte(&a, i < 127);
+    }
+    i2c_stop(&a);
+
+    /* Fixed EDID 1.x header and a correct block checksum. */
+    g_assert_cmphex(edid[0], ==, 0x00);
+    g_assert_cmphex(edid[1], ==, 0xff);
+    g_assert_cmphex(edid[2], ==, 0xff);
+    g_assert_cmphex(edid[7], ==, 0x00);
+    for (i = 0; i < 128; i++) {
+        sum += edid[i];
+    }
+    g_assert_cmphex(sum & 0xff, ==, 0);
+
+    mach64_dev_close(&a);
+}
+
 int main(int argc, char **argv)
 {
     unsigned cpus;
@@ -1510,15 +3143,17 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/vga/int10-legacy", test_int10_legacy);
     qtest_add_func("/ia64-vpc/vga/int10-legacy-std",
                    test_int10_legacy_std);
+    qtest_add_func("/ia64-vpc/ram/high-remap-above-4g", test_ram_high_remap);
     qtest_add_func("/ia64-vpc/firmware-handoff/defaults",
                    test_firmware_handoff_defaults);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);
-    qtest_add_func("/ia64-vpc/ahci/on-default", test_ahci_on_default);
+    qtest_add_func("/ia64-vpc/ahci/off-default", test_ahci_off_default);
+    qtest_add_func("/ia64-vpc/ahci/on", test_ahci_on);
     qtest_add_func("/ia64-vpc/cpu/merced", test_cpu_merced);
     qtest_add_func("/ia64-vpc/cpu/itanium-alias", test_cpu_itanium_alias);
     qtest_add_func("/ia64-vpc/firmware-handoff/i8042-off",
                    test_firmware_handoff_i8042_off);
-    for (cpus = 1; cpus <= 4; cpus++) {
+    for (cpus = 1; cpus <= 8; cpus++) {
         g_autofree char *path =
             g_strdup_printf("/ia64-vpc/smp/topology/%u", cpus);
 
@@ -1526,6 +3161,19 @@ int main(int argc, char **argv)
     }
     qtest_add_func("/ia64-vpc/smp/explicit-topology",
                    test_smp_explicit_topology);
+    {
+        unsigned i;
+
+        for (i = 0; i < G_N_ELEMENTS(smp_multicore_topologies); i++) {
+            const TestSmpMulticoreTopology *topology =
+                &smp_multicore_topologies[i];
+            g_autofree char *path = g_strdup_printf(
+                "/ia64-vpc/smp/multicore/%s", topology->name);
+
+            qtest_add_data_func(path, topology,
+                                test_smp_multicore_topology);
+        }
+    }
     qtest_add_func("/ia64-vpc/smp/reject-full-alat",
                    test_smp_rejects_full_alat);
     qtest_add_func("/ia64-vpc/input/default-usb",
@@ -1536,6 +3184,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/default-layout", test_pci_default_layout);
     qtest_add_func("/ia64-vpc/pci/explicit-cmd646-slot0",
                    test_pci_explicit_cmd646_slot0);
+    qtest_add_func("/ia64-vpc/pci/ide-on-slot0", test_ide_on_slot0);
     qtest_add_func("/ia64-vpc/network/resources-survive-reset",
                    test_e1000_resources_survive_reset);
     qtest_add_func("/ia64-vpc/network/intx-route",
@@ -1544,6 +3193,10 @@ int main(int argc, char **argv)
                    test_e1000_packet_transfer);
     qtest_add_func("/ia64-vpc/lsi/async-nodata-command",
                    test_lsi_async_nodata_command);
+    qtest_add_func("/ia64-vpc/lsi/dbms-no-leak",
+                   test_lsi_dbms_no_leak);
+    qtest_add_func("/ia64-vpc/lsi/memory-move-mmws",
+                   test_lsi_memory_move_mmws);
     qtest_add_func("/ia64-vpc/iosapic/level-remote-irr",
                    test_iosapic_level_remote_irr);
     qtest_add_func("/ia64-vpc/iosapic/lowest-priority",
@@ -1552,6 +3205,32 @@ int main(int argc, char **argv)
                    test_iosapic_edge_rte_write_is_not_a_request);
     qtest_add_func("/ia64-vpc/sparse-io/pm-register",
                    test_sparse_io_pm_register);
+    qtest_add_func("/ia64-vpc/savevm/platform-state",
+                   test_savevm_restores_platform_state);
+    qtest_add_func("/ia64-vpc/agp/gxb", test_agp_gxb);
+    qtest_add_func("/ia64-vpc/agp/off", test_agp_off);
+    qtest_add_func("/ia64-vpc/ati/config-ids", test_ati_config_ids);
+    qtest_add_func("/ia64-vpc/ati/pll-regfile", test_ati_pll_regfile);
+    qtest_add_func("/ia64-vpc/ati/dac-load-sense", test_ati_dac_load_sense);
+    qtest_add_func("/ia64-vpc/ati/mm-index-indirect",
+                   test_ati_mm_index_indirect);
+    qtest_add_func("/ia64-vpc/ati/rom-bar-tables", test_ati_rom_bar_tables);
+    qtest_add_func("/ia64-vpc/ati/2d-solid-fill", test_ati_2d_solid_fill);
+    qtest_add_func("/ia64-vpc/ati/2d-fill-24bpp", test_ati_2d_fill_24bpp);
+    qtest_add_func("/ia64-vpc/ati/gradient-32bpp", test_ati_gradient_32bpp);
+    qtest_add_func("/ia64-vpc/ati/gradient-24bpp", test_ati_gradient_24bpp);
+    qtest_add_func("/ia64-vpc/ati/pattern-brush", test_ati_pattern_brush);
+    qtest_add_func("/ia64-vpc/ati/rop-src-dst", test_ati_rop_src_dst);
+    qtest_add_func("/ia64-vpc/ati/overlap-copy", test_ati_overlap_copy);
+    qtest_add_func("/ia64-vpc/ati/sext14-coord", test_ati_sext14_coord);
+    qtest_add_func("/ia64-vpc/ati/clr-cmp-clear", test_ati_clr_cmp_clear);
+    qtest_add_func("/ia64-vpc/ati/cce-indirect-buffer",
+                   test_ati_cce_indirect_buffer);
+    qtest_add_func("/ia64-vpc/agp/gart-dma", test_agp_gart_dma);
+    qtest_add_func("/ia64-vpc/mach64/ids", test_mach64_ids);
+    qtest_add_func("/ia64-vpc/mach64/2d-solid-fill",
+                   test_mach64_2d_solid_fill);
+    qtest_add_func("/ia64-vpc/mach64/ddc-edid", test_mach64_ddc_edid);
 
     return g_test_run();
 }

@@ -23,6 +23,7 @@
 #define IA64_TB_FLAG_PSR_IC       (1u << 5)
 #define IA64_TB_FLAG_BE           (1u << 6)
 #define IA64_TB_FLAG_GROUP_START  (1u << 7)
+#define IA64_TB_FLAG_PSR_AC       (1u << 8)
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
 #define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
 #define IA64_TB_FLAG_PSR_IS       (1u << 31)
@@ -32,6 +33,8 @@
 typedef struct IA64TranslationMemoryState {
     int mmu_idx;
     bool be_data;
+    /* PSR.ac at TB entry: valid for alignment checks until psr_ac_modified. */
+    bool psr_ac;
     bool full_alat;
     uint64_t nat_known_clear[2];
 } IA64TranslationMemoryState;
@@ -41,6 +44,18 @@ typedef struct IA64TranslationRestartState {
     uint8_t current_ri;
     bool current_ri_known;
     bool track_iipa;
+    /*
+     * Set once an ssm/rsm/mov-psr in the current bundle may have changed
+     * PSR.ic, so the IIPA note for a later slot cannot trust the TB flag and
+     * must test PSR.ic at run time.  While false, PSR.ic equals the TB flag.
+     */
+    bool psr_ic_modified;
+    /*
+     * Set once an ssm/rsm/sum/rum/mov-psr in the current bundle may have
+     * changed PSR.ac, so a later ld/st in the same bundle cannot trust the TB
+     * flag and must test PSR.ac at run time.  While false, PSR.ac == psr_ac.
+     */
+    bool psr_ac_modified;
     bool track_psr_suppression;
     bool exit_after_bundle;
     bool instruction_group_start;
@@ -81,6 +96,12 @@ typedef struct DisasContext {
      */
     TCGv_i32 cfm_sof;
     bool cfm_sof_valid;
+    /*
+     * Largest SOF a dominating, certainly-executed frame check has already
+     * proven in this TB.  Checks for the same or a smaller SOF need no new
+     * branch or exception path.  Reset whenever CFM.SOF may change.
+     */
+    uint8_t cfm_sof_checked;
 } DisasContext;
 
 typedef enum IA64GenResult {
@@ -131,6 +152,8 @@ void ia64_gen_gr_nat_set(uint8_t reg);
 void ia64_gen_gr_nat_assign(uint8_t reg, TCGv_i64 bit);
 void ia64_gen_gr_nat_from_1(uint8_t dst, uint8_t src);
 void ia64_gen_gr_nat_from_2(uint8_t dst, uint8_t src1, uint8_t src2);
+bool ia64_nat_result_is_known_clear(const DisasContext *ctx,
+                                    const Ia64Instruction *insn);
 void ia64_gen_fr_nat_from_gr(uint8_t dst, uint8_t src);
 void ia64_gen_fr_mov(uint8_t reg, TCGv_i64 value);
 void ia64_gen_fr_mov_sig(uint8_t reg, TCGv_i64 value);

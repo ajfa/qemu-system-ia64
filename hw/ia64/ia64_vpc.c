@@ -30,6 +30,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/ide/ahci-pci.h"
 #include "hw/ide/ide-dev.h"
+#include "hw/ide/pci.h"
 #include "hw/input/i8042.h"
 #include "hw/acpi/acpi.h"
 #include "hw/pci/pci.h"
@@ -41,6 +42,8 @@
 #include "hw/ia64/ia64_loader.h"
 #include "hw/ia64/ia64_pci.h"
 #include "hw/ia64/ia64_iosapic.h"
+#include "hw/ia64/ia64_agp.h"
+#include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "system/rtc.h"
 #include "system/runstate.h"
@@ -51,8 +54,18 @@
 #include "target/ia64/cpu.h"
 
 #define IA64_FW_BASE    0x0000000000100000ULL
-#define IA64_LOW_RAM_LIMIT 0x0000000080000000ULL
-#define IA64_HIGH_RAM_BASE 0x0000000080200000ULL
+/*
+ * Firmware image loaded when no -bios is given.  It is installed beside the
+ * binary (share/), so an unpacked package runs without naming it every time.
+ */
+#define IA64_VPC_DEFAULT_FIRMWARE "ia64-firmware.bin"
+/*
+ * Low (sub-aperture) DRAM runs contiguously from 0 up to the PCI/MMIO
+ * aperture, exactly as the real 460GX keeps a single MMIO gap at the top of
+ * the 32-bit space; RAM displaced by that gap is remapped above 4 GiB.  There
+ * is no DRAM island between the aperture and the chipset/SAPIC region.
+ */
+#define IA64_LOW_RAM_LIMIT IA64_PCI_MMIO_BASE
 #define IA64_FIRMWARE_ADDRESS_SPACE_BASE 0x00000000ff000000ULL
 #define IA64_FIRMWARE_ADDRESS_SPACE_SIZE (16 * MiB)
 #define IA64_RTC_BASE 0x00000000ffef0000ULL
@@ -67,8 +80,6 @@
 #define IA64_NVRAM_COMMIT_MAGIC 0x54494d4d4f43564eULL /* "NVCOMMIT" */
 #define IA64_HIGH_RAM_AFTER_FIRMWARE_BASE \
     (IA64_FIRMWARE_ADDRESS_SPACE_BASE + IA64_FIRMWARE_ADDRESS_SPACE_SIZE)
-#define IA64_FW_BOOTSTRAP_STACK_TOP (128 * MiB)
-#define IA64_FW_LOW_RAM_MIN IA64_FW_BOOTSTRAP_STACK_TOP
 #define IA64_IVT_BASE   0x10000ULL
 #define IA64_IVT_SIZE   0x8000ULL
 #define IA64_AHCI_IDP_IO_BASE   0x0000c100U
@@ -93,14 +104,20 @@
  */
 #define IA64_NIC_MMIO_STRIDE    0x00200000ULL
 #define IA64_NIC_IO_STRIDE      0x00000100U
-#define IA64_VGA_FB_PCI_BASE    0x00000000c4000000ULL
-#define IA64_VGA_MMIO_PCI_BASE  0x00000000c8000000ULL
-#define IA64_VGA_ROM_PCI_BASE   0x00000000c9000000ULL
+#define IA64_VGA_FB_PCI_BASE    (IA64_PCI_MMIO_BASE + 0x02000000ULL)
+#define IA64_VGA_MMIO_PCI_BASE  (IA64_PCI_MMIO_BASE + 0x07000000ULL)
+#define IA64_VGA_ROM_PCI_BASE   (IA64_PCI_MMIO_BASE + 0x08000000ULL)
 #define IA64_VGA_LEGACY_BASE   0x000a0000U
 #define IA64_VGA_LEGACY_SIZE   0x00020000U
 #ifdef CONFIG_IA64_VPC_GRAPHICS
 #define IA64_INT10_ROM_BASE     0x000c0000U
-#define IA64_INT10_ROM_SIZE     0x00000200U
+/*
+ * At least 2 KB: the XP inbox Rage 128 miniport validates the option ROM's
+ * size byte and rejects images smaller than 4 x 512 bytes
+ * (.GetVgaEnabledRomImage compares size_byte << 9 against 2048 and logs
+ * event 0xC1010002 UniqueId 26 on failure).
+ */
+#define IA64_INT10_ROM_SIZE     0x00000800U
 /*
  * PCIR sits above the ATI data blocks.  A real Rage 128 Pro BIOS keeps it
  * at 16Ch, well clear of both the ATI ROM signature at 30h and the legacy
@@ -145,7 +162,13 @@
 #define IA64_ATI_PLL_MIN_FREQ     12500U
 #define IA64_ATI_PLL_MAX_FREQ     40000U
 #endif
-#define IA64_IOSAPIC_BASE       0x0000000080110000ULL
+/*
+ * IOSAPIC at the 460GX/i2000 SDV address (SAPIC/IOAPIC message block just
+ * below the local SAPIC at 0xFEE00000), inside the fixed chipset region above
+ * the PCI aperture.  Keeping it here -- rather than the old 2 GiB parking spot
+ * -- leaves low DRAM contiguous all the way to the aperture.
+ */
+#define IA64_IOSAPIC_BASE       0x00000000fec00000ULL
 #define IA64_IOSAPIC_SIZE       0x0000000000002000ULL
 #define IA64_ACPI_PM_IO_BASE    0x00002000U
 #define IA64_ACPI_PM_IO_SIZE    0x00000010U
@@ -157,12 +180,9 @@
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
-#define IA64_VPC_MAX_CPUS           4
+/* Graphics (Rage 128) lands here: slots 0-4 are reserved/built-in, VGA next. */
+#define IA64_VPC_VGA_SLOT           5
 #define IA64_VPC_NIC_SLOT           6
-#define IA64_VPC_RSE_STACK_SIZE     0x8000ULL
-#define IA64_VPC_EARLY_STACK_TOP    0x08000000ULL
-#define IA64_VPC_AP_EARLY_STACK_TOP 0x00100000ULL
-#define IA64_VPC_EARLY_STACK_STRIDE 0x10000ULL
 
 #define IA64_SAPIC_DELIVERY_INT     0
 #define IA64_SAPIC_DELIVERY_NMI     4
@@ -311,8 +331,14 @@ static const char ia64_vbe_revision[] = "1.0";
  *     in   ax, dx
  *     mov  cx, ax
  *     jcxz response_done
- *     push di
- *     add  dx, 2
+ *     push di                 ; deliver the response to the RESULT es:di.  For
+ *     mov  dx, 1e8h           ; VBE that is the request es:di (unchanged); the
+ *     in   ax, dx             ; ATI BIOS query sets it to the caller's dx:bx
+ *     mov  di, ax             ; buffer instead.
+ *     mov  dx, 1eah
+ *     in   ax, dx
+ *     mov  es, ax
+ *     mov  dx, 1eeh
  *     cld
  * response_loop:
  *     in   ax, dx
@@ -347,12 +373,13 @@ static const uint8_t ia64_int10_handler[] = {
     0x75, 0x0f, 0x83, 0xc2, 0x02, 0x26, 0x8b, 0x05,
     0xef, 0x26, 0x8b, 0x45, 0x02, 0xef, 0x83, 0xea,
     0x02, 0xb8, 0x41, 0x49, 0xef, 0xed, 0x89, 0xc1,
-    0xe3, 0x0a, 0x57, 0x83, 0xc2, 0x02, 0xfc, 0xed,
-    0xab, 0xe2, 0xfc, 0x5f, 0xba, 0xe0, 0x01, 0xed,
-    0x89, 0x46, 0xfe, 0x83, 0xc2, 0x02, 0xed, 0x89,
-    0xc3, 0x83, 0xc2, 0x02, 0xed, 0x89, 0xc1, 0x83,
-    0xc2, 0x02, 0xed, 0x89, 0xc2, 0x8b, 0x46, 0xfe,
-    0x89, 0xec, 0x5d, 0xcf,
+    0xe3, 0x16, 0x57, 0xba, 0xe8, 0x01, 0xed, 0x89,
+    0xc7, 0xba, 0xea, 0x01, 0xed, 0x8e, 0xc0, 0xba,
+    0xee, 0x01, 0xfc, 0xed, 0xab, 0xe2, 0xfc, 0x5f,
+    0xba, 0xe0, 0x01, 0xed, 0x89, 0x46, 0xfe, 0x83,
+    0xc2, 0x02, 0xed, 0x89, 0xc3, 0x83, 0xc2, 0x02,
+    0xed, 0x89, 0xc1, 0x83, 0xc2, 0x02, 0xed, 0x89,
+    0xc2, 0x8b, 0x46, 0xfe, 0x89, 0xec, 0x5d, 0xcf,
 };
 
 /* Option-ROM initialization entry: install C000:0100 as vector 10h. */
@@ -371,12 +398,17 @@ struct IA64VpcMachineState {
 
     bool i8042_enabled;
     bool ahci_enabled;
+    bool ide_enabled;
     bool firmware_ide_dma;
+    bool agp_enabled;
     uint64_t firmware_console;
     char *nvram_path;
+    char *vga_model;
     bool alat_full;
 
+    PCIDevice *agp_dev;
     PCIDevice *ahci_dev;
+    PCIDevice *ide_dev;
     PCIDevice *ohci_dev;
     PCIDevice *uhci_dev;
     PCIDevice *lsi_dev;
@@ -425,6 +457,7 @@ struct IA64VpcMachineState {
     qemu_irq isa_irqs[ISA_NUM_IRQS];
     Notifier powerdown_notifier;
     Notifier done_notifier;
+    bool vmstate_registered;
 };
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -831,6 +864,35 @@ static void ia64_int10_set_mode(IA64VpcMachineState *s)
         enable |= VBE_DISPI_NOCLEARMEM;
     }
     ia64_vbe_write(VBE_DISPI_INDEX_ENABLE, enable);
+
+    /*
+     * Enabling the Bochs VBE registers programs the packed-pixel layout but
+     * leaves the VGA attribute controller's Palette-Address-Source bit clear,
+     * exactly as it is after reset.  QEMU's VGA core treats a clear PAS bit as
+     * "screen disabled" and forces GMODE_BLANK in vga_update_display(), so the
+     * guest would render its desktop into VRAM yet the console would stay
+     * black.  A real VGABIOS finishes every mode-set by writing 0x20 to the
+     * attribute-controller write port to re-enable video output; the legacy
+     * text/planar path above already does this.  Do the same for VBE modes so
+     * the linear framebuffer is actually scanned out.
+     *
+     * The attribute controller shares an address/data flip-flop that a read of
+     * Input Status 1 resets to the index state.  That register is only decoded
+     * at its colour alias (0x3DA) when the Misc Output register selects colour
+     * I/O addressing, so force that bit first; otherwise the reset (and hence
+     * the enable) would silently depend on whatever mode ran before.
+     */
+    ia64_vga_writeb(VGA_MIS_W, ia64_vga_readb(VGA_MIS_R) | 0x01);
+    (void)ia64_vga_readb(VGA_IS1_RC);
+    ia64_vga_writeb(VGA_ATT_W, VGA_AR_ENABLE_DISPLAY);
+
+    if (getenv("IA64_INT10_TRACE")) {
+        fprintf(stderr, "int10: set_mode bx=%04x -> %dx%dx%d img=%u vbemem=%u "
+                "enable=%04x readback=%04x\n", s->int10_request.bx,
+                mode->width, mode->height, mode->bpp, image_size,
+                (unsigned)ia64_vbe_memory_size(), enable,
+                ia64_vbe_read(VBE_DISPI_INDEX_ENABLE));
+    }
     ia64_int10_vbe_success(s);
 }
 
@@ -970,12 +1032,89 @@ static void ia64_int10_ddc(IA64VpcMachineState *s)
     ia64_int10_vbe_success(s);
 }
 
+/*
+ * ATI Accelerator-BIOS INT 10h functions (BIOS prefix 0xA000, "VGA enabled").
+ * The native Mach64 miniport calls these to obtain the card's configuration;
+ * the function number is the low byte of AX.  The synthesised VBE handler does
+ * not otherwise answer them, so without this the driver reports "Unable to
+ * obtain configuration information for graphics card" and never brings up a
+ * mode.  Contract from the ATI Mach64 SDK (M64BIOS.C long_query) and the
+ * query_structure layout (Mach64 driver source amach1.h / SDK MAIN.H):
+ *   0x08 BIOS_GET_QUERY_SIZE -> CX = header size in bytes, AH = 0.
+ *   0x09 BIOS_QUERY          -> write the query_structure header to the buffer
+ *                               at DX:BX (segment:offset), AH = 0.
+ */
+static void ia64_int10_ati_bios(IA64VpcMachineState *s)
+{
+    unsigned fn = s->int10_request.ax & 0xff;
+    uint8_t *q;
+
+    switch (fn) {
+    case 0x08:  /* BIOS_GET_QUERY_SIZE */
+        s->int10_result.cx = 0x20;              /* 32-byte header */
+        s->int10_result.ax &= 0x00ff;           /* AH = 0: success */
+        break;
+    case 0x09:  /* BIOS_QUERY: deliver the header to DX:BX via the stub copy */
+        ia64_int10_response_size(s, 0x20);
+        q = s->int10_response;
+        stw_le_p(q + 0x00, 0x20);               /* q_sizeof_struct */
+        q[0x02] = 0x02;                         /* q_structure_rev */
+        q[0x03] = 0x00;                         /* q_number_modes (header only) */
+        stw_le_p(q + 0x04, 0x0000);             /* q_mode_offset */
+        q[0x06] = 0x00;                         /* q_sizeof_mode */
+        q[0x07] = 0x01;                         /* q_VGA_type: enabled */
+        stw_le_p(q + 0x08, 0x4752);             /* q_asic_id (Rage XL) */
+        q[0x0a] = 0x00;                         /* q_VGA_boundary */
+        /*
+         * q_memory_size is an INDEX into the miniport's video-RAM-size table,
+         * NOT a byte/quarter-meg count.  The XP Rage XL miniport (atimpae.sys
+         * .BiosQueryAdapter) rejects the whole query with
+         * "Unable to obtain configuration information" (0xC1010003, event
+         * DumpData UniqueId 0x106) when this index is >= 16, then falls back to
+         * VgaSave.  Its table (ex_ulaVideoRamSize) maps 0->512K, 1->1M, 2->2M,
+         * 3->4M, 4->6M, 5->8M, ... so 8 MiB of VRAM is index 5.
+         */
+        q[0x0b] = 0x05;                         /* q_memory_size: index 5 = 8MiB */
+        q[0x0c] = 0x00;                         /* q_DAC_type: 0 = internal (CT) DAC */
+        q[0x0d] = 0x0a;                         /* q_memory_type: SDRAM */
+        q[0x0e] = 0x07;                         /* q_bus_type: BUS_PCI */
+        q[0x0f] = 0x00;                         /* q_monitor_cntl */
+        stw_le_p(q + 0x10, IA64_VGA_FB_PCI_BASE >> 20); /* q_aperture_addr (MiB) */
+        q[0x12] = 0x02;                         /* q_aperture_cfg: 8MiB linear */
+        q[0x13] = 0x2f;                         /* colour depths 565/555/RGB/BGR/RGBA */
+        s->int10_result.es = s->int10_request.dx;
+        s->int10_result.di = s->int10_request.bx;
+        s->int10_result.ax &= 0x00ff;           /* AH = 0: success */
+        break;
+    default:
+        /* Acknowledge other ATI functions (e.g. 0x14) as success no-ops. */
+        s->int10_result.ax &= 0x00ff;
+        break;
+    }
+}
+
 static void ia64_int10_execute(IA64VpcMachineState *s)
 {
     uint16_t current_mode;
 
     s->int10_result = s->int10_request;
     ia64_int10_response_clear(s);
+
+    if (getenv("IA64_INT10_TRACE")) {
+        bool handled = (s->int10_request.ax & 0xff00) == 0x4f00 ||
+                       (s->int10_request.ax >> 8) == 0x00 ||
+                       (s->int10_request.ax >> 8) == 0x0f ||
+                       (s->int10_request.ax >> 8) == 0x1a;
+        fprintf(stderr, "int10: ax=%04x bx=%04x cx=%04x dx=%04x di=%04x "
+                "es=%04x%s\n", s->int10_request.ax, s->int10_request.bx,
+                s->int10_request.cx, s->int10_request.dx, s->int10_request.di,
+                s->int10_request.es, handled ? "" : "  [UNHANDLED]");
+    }
+
+    if ((s->int10_request.ax & 0xff00) == 0xa000) {
+        ia64_int10_ati_bios(s);
+        return;
+    }
 
     if ((s->int10_request.ax & 0xff00) == 0x4f00) {
         switch (s->int10_request.ax & 0xff) {
@@ -1143,7 +1282,35 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
                                              uint16_t vendor,
                                              uint16_t device)
 {
-    if (vendor != IA64_ATI_VENDOR_ID || device != IA64_ATI_RAGE128_PF_ID) {
+    if (vendor != IA64_ATI_VENDOR_ID) {
+        return;
+    }
+
+    /*
+     * ATI's drivers locate and validate the video BIOS by the ROM signature
+     * " 761295520" at 30h before following the pointer chain at 48h.  All
+     * three retail Rage 128 Pro dumps carry it there.  Windows Whistler
+     * build 2462's miniport (ati2mpaa.sys, "RAGE128/128PRO Miniport Driver
+     * VersionR128.121") embeds the string and bugchecks 0x1E dereferencing
+     * the NULL table pointer it is left with when the signature is absent.
+     *
+     * The Server 2003 (build 3790) inbox *mach64* miniport (ati2mpad.sys)
+     * needs it too: its GetVgaEnabledRomImage scans offsets 30h..80h of the
+     * C0000h shadow for "761295520" (Get_BIOS_Seg, WSRV03 drivers/video/ms/
+     * ati/mini/services.c:1472) and, when absent, returns a NULL RomImage
+     * that RageProEnable->InitializeBiosInfoStructure dereferences unchecked
+     * at base+78h -> STOP 0x8E in videoprt!VideoPortReadRegisterBufferUchar.
+     * So the signature is published for every ATI adapter, not just Rage128.
+     */
+    memcpy(rom + IA64_INT10_ROM_ATI_SIG_OFFSET, " 761295520", 10);
+
+    if (device != IA64_ATI_RAGE128_PF_ID) {
+        /*
+         * mach64 (DEV_4752 Rage XL): ati2mpad reads its adapter configuration
+         * through the a009 INT 10h query (ia64_int10_ati_bios), not the legacy
+         * 48h Rage128 PLL pointer chain, so only the signature is required
+         * here.  Do not publish the Rage128-format header/PLL block below.
+         */
         return;
     }
 
@@ -1159,15 +1326,6 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
      * are in 10 kHz units.  They match the range supported by QEMU's
      * Rage128-compatible display model and its existing VGA BIOS.
      */
-    /*
-     * ATI's drivers locate and validate the video BIOS by the ROM signature
-     * " 761295520" at 30h before following the pointer chain at 48h.  All
-     * three retail Rage 128 Pro dumps carry it there.  Windows Whistler
-     * build 2462's miniport (ati2mpaa.sys, "RAGE128/128PRO Miniport Driver
-     * VersionR128.121") embeds the string and bugchecks 0x1E dereferencing
-     * the NULL table pointer it is left with when the signature is absent.
-     */
-    memcpy(rom + IA64_INT10_ROM_ATI_SIG_OFFSET, " 761295520", 10);
     stw_le_p(rom + 0x48, IA64_INT10_ROM_ATI_HEADER_OFFSET);
     stw_le_p(rom + IA64_INT10_ROM_ATI_HEADER_OFFSET + 0x30,
              IA64_INT10_ROM_ATI_PLL_OFFSET);
@@ -1599,6 +1757,19 @@ static const IA64VpcCompatDefault ia64_vpc_compat_defaults[] = {
     { "usb-kbd", "msos-desc", "off" },
     { "usb-mouse", "msos-desc", "off" },
     { "usb-tablet", "msos-desc", "off" },
+    /*
+     * Render the RAGE 128 hardware cursor into the framebuffer rather than as
+     * a host overlay.  The chip has no hotspot register -- the driver bakes the
+     * hotspot into CUR_HORZ_VERT_POSN/_OFF -- so a host overlay (which needs an
+     * explicit hotspot) cannot place arbitrary cursors correctly: Windows XP
+     * drives the hardware cursor at 8bpp and the overlay landed ~10px off, and
+     * a per-cursor hotspot guess only works for the arrow, not centre-hotspot
+     * cursors (I-beam, hourglass).  Compositing reproduces the exact hardware
+     * pixels at the exact hardware position, so every cursor type is correct.
+     */
+    { "ati-vga", "guest_hwcursor", "on" },
+    /* Same reasoning for the Mach64 hardware cursor. */
+    { "mach64-vga", "guest_hwcursor", "on" },
 };
 
 static void ia64_vpc_add_compat_defaults(MachineClass *mc)
@@ -1666,6 +1837,49 @@ static void ia64_vpc_set_ahci(Object *obj, bool value, Error **errp)
     s->ahci_enabled = value;
 }
 
+static bool ia64_vpc_get_ide(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->ide_enabled;
+}
+
+static void ia64_vpc_set_ide(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+#ifndef CONFIG_IA64_VPC_STORAGE
+    if (value) {
+        error_setg(errp, "IDE support is not present in this build");
+        return;
+    }
+#else
+    (void)errp;
+#endif
+
+    s->ide_enabled = value;
+}
+
+static bool ia64_vpc_get_agp(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->agp_enabled;
+}
+
+static void ia64_vpc_set_agp(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    s->agp_enabled = value;
+}
+
 static bool ia64_vpc_get_firmware_ide_dma(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -1722,6 +1936,29 @@ static void ia64_vpc_set_firmware_console(Object *obj, const char *value,
     }
 
     error_setg(errp, "firmware-console must be 'serial' or 'vga'");
+}
+
+static char *ia64_vpc_get_vga(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return g_strdup(s->vga_model ? s->vga_model : "rage128");
+}
+
+static void ia64_vpc_set_vga(Object *obj, const char *value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    if (g_strcmp0(value, "rage128") != 0 &&
+        g_strcmp0(value, "mach64") != 0 &&
+        g_strcmp0(value, "std") != 0) {
+        error_setg(errp, "vga must be 'rage128', 'mach64' or 'std'");
+        return;
+    }
+    g_free(s->vga_model);
+    s->vga_model = g_strdup(value);
 }
 
 static char *ia64_vpc_get_alat(Object *obj, Error **errp)
@@ -1832,6 +2069,86 @@ static void ia64_vpc_powerdown_req(Notifier *n, void *opaque)
         qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
     }
 }
+
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+static const VMStateDescription vmstate_ia64_int10_registers = {
+    .name = "ia64-vpc/int10-registers",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT16(ax, IA64Int10Registers),
+        VMSTATE_UINT16(bx, IA64Int10Registers),
+        VMSTATE_UINT16(cx, IA64Int10Registers),
+        VMSTATE_UINT16(dx, IA64Int10Registers),
+        VMSTATE_UINT16(di, IA64Int10Registers),
+        VMSTATE_UINT16(es, IA64Int10Registers),
+        VMSTATE_END_OF_LIST()
+    }
+};
+#endif
+
+static int ia64_vpc_post_load(void *opaque, int version_id)
+{
+    IA64VpcMachineState *s = opaque;
+    uint16_t pm_enable = s->acpi_regs.pm1.evt.en;
+
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+    if (s->int10_response_length > sizeof(s->int10_response) ||
+        s->int10_response_offset > s->int10_response_length ||
+        s->int10_input_signature_words > 2) {
+        return -EINVAL;
+    }
+#endif
+
+    qemu_system_wakeup_enable(
+        QEMU_WAKEUP_REASON_RTC,
+        (pm_enable & ACPI_BITMASK_RT_CLOCK_ENABLE) != 0);
+    qemu_system_wakeup_enable(
+        QEMU_WAKEUP_REASON_PMTIMER,
+        (pm_enable & ACPI_BITMASK_TIMER_ENABLE) != 0);
+    ia64_vpc_acpi_update_sci(&s->acpi_regs);
+    return 0;
+}
+
+static const VMStateDescription vmstate_ia64_vpc = {
+    .name = "ia64-vpc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = ia64_vpc_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64(watchdog_timeout, IA64VpcMachineState),
+        VMSTATE_UINT64(watchdog_code, IA64VpcMachineState),
+        VMSTATE_TIMER_PTR(watchdog_timer, IA64VpcMachineState),
+        VMSTATE_UINT8_ARRAY(nvram_data, IA64VpcMachineState,
+                            IA64_NVRAM_SIZE),
+
+        VMSTATE_UINT16(acpi_regs.pm1.evt.sts, IA64VpcMachineState),
+        VMSTATE_UINT16(acpi_regs.pm1.evt.en, IA64VpcMachineState),
+        VMSTATE_UINT16(acpi_regs.pm1.cnt.cnt, IA64VpcMachineState),
+        VMSTATE_TIMER_PTR(acpi_regs.tmr.timer, IA64VpcMachineState),
+        VMSTATE_INT64(acpi_regs.tmr.overflow_time, IA64VpcMachineState),
+        VMSTATE_BUFFER_POINTER_UNSAFE(acpi_regs.gpe.sts,
+                                      IA64VpcMachineState, 1, 2),
+        VMSTATE_BUFFER_POINTER_UNSAFE(acpi_regs.gpe.en,
+                                      IA64VpcMachineState, 1, 2),
+
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+        VMSTATE_STRUCT(int10_request, IA64VpcMachineState, 1,
+                       vmstate_ia64_int10_registers, IA64Int10Registers),
+        VMSTATE_STRUCT(int10_result, IA64VpcMachineState, 1,
+                       vmstate_ia64_int10_registers, IA64Int10Registers),
+        VMSTATE_UINT32(int10_input_signature, IA64VpcMachineState),
+        VMSTATE_UINT8_ARRAY(int10_response, IA64VpcMachineState, 512),
+        VMSTATE_UINT16(int10_response_length, IA64VpcMachineState),
+        VMSTATE_UINT16(int10_response_offset, IA64VpcMachineState),
+        VMSTATE_UINT8(int10_input_signature_words, IA64VpcMachineState),
+        VMSTATE_UINT8(int10_dpms_state, IA64VpcMachineState),
+        VMSTATE_UINT8(int10_legacy_mode, IA64VpcMachineState),
+        VMSTATE_UINT8(int10_legacy_columns, IA64VpcMachineState),
+#endif
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static uint64_t ia64_vpc_lsapic_read(void *opaque, hwaddr addr,
                                        unsigned size)
@@ -1988,29 +2305,19 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
     }
 
     /*
-     * Keep the RAM backing densely packed while leaving the platform's
-     * firmware and PCI apertures free in the guest physical address space.
-     * RAM displaced by those apertures is mapped above 4 GiB instead of
-     * being hidden by higher-priority device regions.
+     * Real 460GX layout: DRAM is contiguous from 0 up to the top-of-memory
+     * MMIO gap (the PCI aperture just below the fixed chipset/SAPIC/firmware
+     * region at [0xFE000000, 4 GiB)), and only RAM displaced by that gap is
+     * remapped above 4 GiB.  There is no DRAM island between the aperture and
+     * the chipset region.  With the IOSAPIC no longer parked at 2 GiB the low
+     * band is a single unbroken run, which also avoids the fragmented
+     * single-DMA-zone layout that Linux 2.6.8 IA-64 mishandled.  Keep this in
+     * lockstep with fw_init_guest_high_ram_ranges() in
+     * roms/ia64-firmware/firmware.c.
      */
     size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
                                   IA64_LOW_RAM_LIMIT,
                                   "ia64-vpc.low-ram");
-    offset += size;
-    remaining -= size;
-
-    size = ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_BASE, offset,
-                                  remaining,
-                                  IA64_PCI_MMIO_BASE - IA64_HIGH_RAM_BASE,
-                                  "ia64-vpc.high-ram-below-pci");
-    offset += size;
-    remaining -= size;
-
-    size = ia64_vpc_map_ram_alias(
-        s, IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE, offset, remaining,
-        IA64_LOCAL_SAPIC_PA -
-            (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE),
-        "ia64-vpc.high-ram-above-pci");
     offset += size;
     remaining -= size;
 
@@ -2221,7 +2528,68 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
     if (pcir != 0 && pcir + 0x18U <= declared &&
         memcmp(rom + pcir, "PCIR", 4) == 0) {
         stw_le_p(rom + pcir + 0x10, declared / 512U);
+        /*
+         * The shipped image is a SeaVGABIOS build whose PCIR data structure
+         * still advertises 1002:5159 (Radeon RV100).  EFI 1.10 §12.4 requires
+         * the PCIR vendor/device ID to match the adapter's configuration
+         * header, and a driver that validates the ROM against the device it
+         * bound to will reject an image belonging to another chip.  We only
+         * get here when the header really is 1002:5046, so restate that.
+         */
+        stw_le_p(rom + pcir + 0x04, IA64_ATI_VENDOR_ID);
+        stw_le_p(rom + pcir + 0x06, IA64_ATI_RAGE128_PF_ID);
     }
+    rom[declared - 1] = 0;
+    for (i = 0; i < declared - 1U; i++) {
+        checksum += rom[i];
+    }
+    rom[declared - 1] = (uint8_t)(-checksum);
+}
+
+/*
+ * Restate a video BIOS's PCI Data Structure vendor/device id to match the
+ * adapter's configuration header, and fix the ROM image checksum.  A real ATI
+ * ROM carries the id of the exact board it shipped on (e.g. a Mach64 GT VBIOS
+ * declares 1002:4754 in its PCIR), but we may present that same silicon under
+ * a different, driver-friendlier id (the Rage XL 1002:4752, the one both XP
+ * IA-64 builds auto-match).  EFI 1.10 12.4 requires the PCIR id to match the
+ * device, and a driver that validates its ROM against the bound device rejects
+ * a mismatch, so bring the two into agreement.  A no-op when they already
+ * agree (e.g. the Rage 128 SeaBIOS path, whose PCIR is fixed up above).
+ */
+static void ia64_vpc_match_rom_pcir(PCIDevice *pci_dev)
+{
+    uint8_t *rom;
+    uint64_t rom_size;
+    uint32_t declared, pcir, i;
+    uint16_t ven, dev;
+    uint8_t checksum = 0;
+
+    if (pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
+        return;
+    }
+    rom = memory_region_get_ram_ptr(&pci_dev->rom);
+    rom_size = memory_region_size(&pci_dev->rom);
+    if (rom == NULL || rom_size < 0x400 || rom[0] != 0x55 || rom[1] != 0xaa) {
+        return;
+    }
+    declared = (uint32_t)rom[2] * 512U;
+    if (declared == 0 || declared > rom_size) {
+        return;
+    }
+    pcir = lduw_le_p(rom + 0x18);
+    if (pcir == 0 || pcir + 0x18U > declared ||
+        memcmp(rom + pcir, "PCIR", 4) != 0) {
+        return;
+    }
+    ven = pci_get_word(pci_dev->config + PCI_VENDOR_ID);
+    dev = pci_get_word(pci_dev->config + PCI_DEVICE_ID);
+    if (lduw_le_p(rom + pcir + 0x04) == ven &&
+        lduw_le_p(rom + pcir + 0x06) == dev) {
+        return; /* already matches */
+    }
+    stw_le_p(rom + pcir + 0x04, ven);
+    stw_le_p(rom + pcir + 0x06, dev);
     rom[declared - 1] = 0;
     for (i = 0; i < declared - 1U; i++) {
         checksum += rom[i];
@@ -2234,6 +2602,18 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
     if (pci_dev == NULL) {
         return;
     }
+
+    /*
+     * QEMU's generic 1af4:1100 subsystem ID is not a value this chip can
+     * report.  A Rage 128 loads the subsystem ID from the video BIOS on an
+     * add-in card; with none loaded the documented hardware fallback is
+     * SVID = vendor, SID = device (RAGE 128 PRO Register Reference Guide,
+     * configuration space chapter).  Drivers index board tables by it.
+     */
+    pci_set_word(pci_dev->config + PCI_SUBSYSTEM_VENDOR_ID,
+                 pci_get_word(pci_dev->config + PCI_VENDOR_ID));
+    pci_set_word(pci_dev->config + PCI_SUBSYSTEM_ID,
+                 pci_get_word(pci_dev->config + PCI_DEVICE_ID));
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
                              IA64_VGA_FB_PCI_BASE, 4);
@@ -2254,10 +2634,47 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
      */
     if (pci_dev->io_regions[PCI_ROM_SLOT].size != 0) {
         ia64_vpc_install_ati_rom_tables(pci_dev);
+        ia64_vpc_match_rom_pcir(pci_dev);
+        /*
+         * Assign the ROM BAR but leave its enable bit CLEAR.  With the bit
+         * set at enumeration time, Windows' pci.sys generates a fourth
+         * memory resource for the devnode (busdrv/pci device.c/enum.c), and
+         * XP's inbox Rage 128 miniport calls VideoPortGetAccessRanges with a
+         * three-entry array: videoprt's copy loop filters only legacy VGA
+         * ranges, so the ROM range overflows the array and the call fails
+         * with ERROR_MORE_DATA - silently, no event log - and HwFindAdapter
+         * returns 234 (captured live: VideoPortGetAccessRanges RVA 0x33180
+         * -> ati2mpaa .GetResources -> .FindAdapter -> Code 10).
+         *
+         * Readers of the ROM image do not need the bit set at handoff:
+         * videoprt/pci.sys enable ROM decode transiently around
+         * VideoPortGetRomImage (busdrv/pci romimage.c), which is how build
+         * 2462's miniport reads the BIOS tables through BAR6.
+         */
         pci_default_write_config(pci_dev, PCI_ROM_ADDRESS,
-                                 IA64_VGA_ROM_PCI_BASE |
-                                 PCI_ROM_ADDRESS_ENABLE, 4);
+                                 IA64_VGA_ROM_PCI_BASE, 4);
     }
+    /*
+     * Both decodes on.  Windows XP's inbox Rage 128 miniport branches on
+     * (Command & 3) == 3 in .GetResources (ati2mpaa.sys VMA 0x9375c) and only
+     * then treats itself as the VGA device, so it is tempting to advertise
+     * something else and take the "VGA disabled" path, which claims no legacy
+     * VGA resources and reads the video BIOS from the ROM BAR instead of from
+     * the 0xC0000 shadow (which this machine does provide - see
+     * ia64_vpc_install_int10()).
+     *
+     * That does not work, and the reason is worth recording so it is not
+     * retried: the miniport claims all three BARs as access ranges, and BAR1
+     * is an I/O BAR.  videoprt's CheckIoEnabled (WSRV03 drivers/video/ms/port/
+     * registry.c:2114) walks the claimed ranges and fails the whole call if a
+     * RangeInIoSpace range is claimed while PCI_ENABLE_IO_SPACE is clear -
+     * or, symmetrically, a memory range while PCI_ENABLE_MEMORY_SPACE is
+     * clear.  VideoPortVerifyAccessRanges then returns ERROR_INVALID_PARAMETER
+     * (registry.c:1966) *silently*, with no event logged, and the device stops
+     * with Code 10 before touching a single register.  Any Command value that
+     * satisfies CheckIoEnabled for a device with both I/O and memory BARs is
+     * therefore exactly 3, which is also what real hardware presents.
+     */
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY, 2);
 
@@ -2342,6 +2759,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
         ia64_vpc_configure_nic(s->nic_devs[i], i);
     }
     ia64_vpc_configure_pci_irq(s->ahci_dev);
+    ia64_vpc_configure_pci_irq(s->ide_dev);
     ia64_vpc_configure_pci_irq(s->ohci_dev);
     ia64_vpc_configure_pci_irq(s->uhci_dev);
     ia64_vpc_configure_pci_irq(s->lsi_dev);
@@ -2537,21 +2955,29 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
 }
 #endif
 
-static IA64BootInfo ia64_vpc_boot_info(unsigned int cpu_index,
+static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
+                                       unsigned int cpu_index,
                                        uint64_t entry,
                                        uint64_t global_pointer)
 {
+    /*
+     * The firmware's CPU-assist region (SAL re-entry slots, debug
+     * contexts/stacks, early RSE backing stores, boot memory stacks) sits at
+     * the top of installed low RAM, as real IA-64 firmware places its SAL
+     * scratch; entry.S re-derives the same base from the handoff block.
+     */
+    uint64_t assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(machine->ram_size);
     IA64BootInfo info = {
         .firmware_base = IA64_FW_BASE,
         .firmware_entry = entry,
         .global_pointer = global_pointer,
         .iva = IA64_IVT_BASE,
-        .bsp = 0x80000 + cpu_index * IA64_VPC_RSE_STACK_SIZE,
-        .stack_pointer = cpu_index == 0 ?
-            IA64_VPC_EARLY_STACK_TOP - 16 :
-            IA64_VPC_AP_EARLY_STACK_TOP - 16 -
-                cpu_index * IA64_VPC_EARLY_STACK_STRIDE,
+        .bsp = assist_base + IA64_FW_EARLY_RSE_OFFSET +
+            cpu_index * IA64_FW_EARLY_RSE_SIZE,
+        .stack_pointer = assist_base + IA64_FW_CPU_ASSIST_SIZE - 16 -
+            cpu_index * IA64_FW_CPU_STACK_SIZE,
         .rsc = IA64_RSC_MODE,
+        .fw_cpu_assist_base = assist_base,
         .powered_off = cpu_index != 0,
     };
 
@@ -2596,7 +3022,6 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
 {
     IA64VpcMachineState *s = container_of(notifier, IA64VpcMachineState,
                                           done_notifier);
-    MachineState *machine = MACHINE(s);
     g_autofree uint8_t *image = NULL;
     IA64FirmwareEntrypoint entrypoint;
     CPUState *cs;
@@ -2604,7 +3029,7 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
     (void)data;
     ia64_vpc_configure_platform_pci(s);
 
-    if (!machine->firmware || s->firmware_size == 0) {
+    if (s->firmware_size == 0) {
         return;
     }
 
@@ -2621,7 +3046,7 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
     }
 
     CPU_FOREACH(cs) {
-        IA64BootInfo info = ia64_vpc_boot_info(cs->cpu_index,
+        IA64BootInfo info = ia64_vpc_boot_info(MACHINE(s), cs->cpu_index,
                                                entrypoint.entry,
                                                entrypoint.global_pointer);
 
@@ -2651,32 +3076,42 @@ static bool ia64_vpc_load_firmware(IA64VpcMachineState *s,
                                    MachineState *machine, Error **errp)
 {
     g_autofree char *firmware_path = NULL;
+    const char *firmware = machine->firmware;
     Error *local_err = NULL;
     int64_t firmware_size;
 
-    if (machine->firmware == NULL) {
-        return true;
-    }
-
-    firmware_path = qemu_find_file(QEMU_FILE_TYPE_BIOS, machine->firmware);
-    if (firmware_path == NULL) {
-        firmware_path = g_strdup(machine->firmware);
+    if (firmware == NULL) {
+        /*
+         * Fall back to the shipped image.  Not finding it is not an error:
+         * qtest brings this machine up with no firmware at all.
+         */
+        firmware_path = qemu_find_file(QEMU_FILE_TYPE_BIOS,
+                                       IA64_VPC_DEFAULT_FIRMWARE);
+        if (firmware_path == NULL) {
+            return true;
+        }
+        firmware = IA64_VPC_DEFAULT_FIRMWARE;
+    } else {
+        firmware_path = qemu_find_file(QEMU_FILE_TYPE_BIOS, firmware);
+        if (firmware_path == NULL) {
+            firmware_path = g_strdup(firmware);
+        }
     }
     firmware_size = get_image_size(firmware_path, &local_err);
     if (local_err != NULL) {
         error_prepend(&local_err, "failed to inspect firmware '%s': ",
-                      machine->firmware);
+                      firmware);
         error_propagate(errp, local_err);
         return false;
     }
     if (firmware_size <= 0 ||
         (uint64_t)firmware_size > machine->ram_size - IA64_FW_BASE) {
         error_setg(errp, "invalid firmware image size for '%s'",
-                   machine->firmware);
+                   firmware);
         return false;
     }
-    if (rom_add_file_fixed(machine->firmware, IA64_FW_BASE, -1)) {
-        error_setg(errp, "failed to load firmware '%s'", machine->firmware);
+    if (rom_add_file_fixed(firmware, IA64_FW_BASE, -1)) {
+        error_setg(errp, "failed to load firmware '%s'", firmware);
         return false;
     }
     s->firmware_size = firmware_size;
@@ -2716,7 +3151,8 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         uint32_t cores = MAX(machine->smp.cores, 1U);
         uint32_t per_socket = threads * cores;
         uint32_t package_base = (i / per_socket) * per_socket;
-        IA64BootInfo boot_info = ia64_vpc_boot_info(i, IA64_FW_BASE,
+        IA64BootInfo boot_info = ia64_vpc_boot_info(machine, i,
+                                                    IA64_FW_BASE,
                                                     IA64_FW_BASE);
 
         cpu = IA64_CPU(object_new(machine->cpu_type));
@@ -2779,6 +3215,25 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     pci_bus = PCI_BUS(qdev_get_child_bus(pci_host, "pci"));
 
     /*
+     * The 460GX GXB AGP host bridge + GART.  Created before any other PCI
+     * device so its pci_setup_iommu() installs the per-devfn DMA routing before
+     * any master's bus-master address space is resolved.  The GART translates
+     * only the AGP graphics master (the Rage 128, deterministically at the fixed
+     * graphics slot below); every other master identity-passes to memory, as on
+     * the real 460GX where only the GXB AGP port carries a GART.  Parked at a
+     * fixed high slot so it neither shifts the historical BDFs of the built-in
+     * devices nor is mistaken for a NIC by the slot-6+ scan.
+     */
+    s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
+    object_property_set_int(OBJECT(s->agp_dev), "agp-master-devfn",
+                            PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), &error_abort);
+    object_property_set_bool(OBJECT(s->agp_dev), "gart-enabled",
+                            s->agp_enabled, &error_abort);
+    if (!pci_realize_and_unref(s->agp_dev, pci_bus, errp)) {
+        return false;
+    }
+
+    /*
      * Slot 0 is intentionally empty in the default machine.  Reserve it while
      * creating the built-in devices so their historical slot numbers remain
      * stable, then release it for an explicitly requested PCI controller.
@@ -2826,8 +3281,16 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         ia64_vpc_configure_ahci(s->ahci_dev);
         ahci = ICH9_AHCI(s->ahci_dev);
         g_assert(ahci->ahci.ports <= ARRAY_SIZE(sata_drives));
-        ide_drive_get(sata_drives, ahci->ahci.ports);
-        ahci_ide_create_devs(&ahci->ahci, sata_drives);
+        /*
+         * The AHCI ports and the cmd646 IDE controller both present an ATA
+         * "if=ide" bus.  When ide=on the CMD646 owns those drives (below), so
+         * only bind if=ide media to SATA when IDE is not the active owner;
+         * a user can still attach disks to this controller explicitly.
+         */
+        if (!s->ide_enabled) {
+            ide_drive_get(sata_drives, ahci->ahci.ports);
+            ahci_ide_create_devs(&ahci->ahci, sata_drives);
+        }
     } else {
         pci_bus_set_slot_reserved_mask(pci_bus, 1U << 1);
     }
@@ -2843,7 +3306,21 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
 #ifdef CONFIG_IA64_VPC_PS2
     if (s->i8042_enabled) {
-        isa_create_simple(isa_bus, TYPE_I8042);
+        ISADevice *i8042 = isa_new(TYPE_I8042);
+
+        /*
+         * Model the PS/2 serial transfer latency of the Super I/O KBC (see
+         * the LPC47B27 that real Merced platforms carry).  Presenting mouse
+         * and keyboard bytes synchronously with the guest port access lets a
+         * solicited AUX reply race the psmouse driver's unlocked command
+         * bookkeeping across CPUs and fatally dereference a not-yet-installed
+         * protocol_handler; the throttle spaces bytes at ~1 ms as on hardware.
+         */
+        object_property_set_bool(OBJECT(i8042), "kbd-throttle", true,
+                                 &error_abort);
+        if (!isa_realize_and_unref(i8042, isa_bus, errp)) {
+            return false;
+        }
     }
 #endif
 
@@ -2866,7 +3343,30 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
-    s->vga_dev = pci_vga_init(pci_bus);
+    if (g_strcmp0(s->vga_model, "mach64") == 0) {
+        /*
+         * The Mach64 3D Rage (DEV_4754): a PCI 2D adapter with no AGP, chosen
+         * with -machine ia64-vpc,vga=mach64.  Create it explicitly at the VGA
+         * slot rather than through pci_vga_init()/-vga.
+         */
+        s->vga_dev = pci_new(PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), "mach64-vga");
+        if (!pci_realize_and_unref(s->vga_dev, pci_bus, errp)) {
+            return false;
+        }
+    } else {
+        s->vga_dev = pci_vga_init(pci_bus);
+    }
+    /*
+     * The GART scoping above assumes the graphics device is the AGP master at
+     * IA64_VPC_VGA_SLOT.  pci_vga_init() auto-assigns the lowest free slot,
+     * which is 5 given the built-in layout; fail loudly if that ever drifts.
+     */
+    if (s->vga_dev != NULL &&
+        s->vga_dev->devfn != PCI_DEVFN(IA64_VPC_VGA_SLOT, 0)) {
+        error_setg(errp, "graphics device landed at devfn %#x, expected %#x",
+                   s->vga_dev->devfn, PCI_DEVFN(IA64_VPC_VGA_SLOT, 0));
+        return false;
+    }
 #endif
     if (!ia64_vpc_enable_vga_legacy_switch(s->vga_dev, errp)) {
         return false;
@@ -2883,6 +3383,27 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
     pci_bus_clear_slot_reserved_mask(pci_bus, (1U << 0) | (1U << 1));
 
+    /*
+     * With ide=on, populate the reserved slot 0 with a dual-channel CMD646
+     * PCI IDE controller.  Slot 0 is the platform-anticipated home for IDE:
+     * the firmware's fixed PCI-I/O table and the DSDT _PRT both describe an
+     * IDE function there, and it keeps every other device's BDF stable.  The
+     * firmware assigns the controller's I/O BARs on demand, exactly as for a
+     * hand-attached -device cmd646-ide.  secondary=1 enables both channels;
+     * pci_ide_create_devs() auto-binds any if=ide media across them.
+     */
+#ifdef CONFIG_IA64_VPC_STORAGE
+    if (s->ide_enabled) {
+        s->ide_dev = pci_new(PCI_DEVFN(0, 0), "cmd646-ide");
+        qdev_prop_set_uint32(DEVICE(s->ide_dev), "secondary", 1);
+        if (!pci_realize_and_unref(s->ide_dev, pci_bus, errp)) {
+            return false;
+        }
+        ia64_vpc_configure_pci_irq(s->ide_dev);
+        pci_ide_create_devs(s->ide_dev);
+    }
+#endif
+
     s->powerdown_notifier.notify = ia64_vpc_powerdown_req;
     qemu_register_powerdown_notifier(&s->powerdown_notifier);
 
@@ -2890,6 +3411,11 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     s->pci_fixup_reset = object_new(TYPE_IA64_PCI_FIXUP_RESET);
     IA64_PCI_FIXUP_RESET(s->pci_fixup_reset)->machine = s;
     qemu_register_resettable(s->pci_fixup_reset);
+    if (vmstate_register_with_alias_id(NULL, 0, &vmstate_ia64_vpc, s,
+                                       -1, 0, errp) < 0) {
+        return false;
+    }
+    s->vmstate_registered = true;
     return true;
 }
 
@@ -2910,7 +3436,15 @@ static void ia64_vpc_machine_instance_init(Object *obj)
     s->i8042_enabled = true;
 #endif
 #ifdef CONFIG_IA64_VPC_STORAGE
-    s->ahci_enabled = true;
+    /*
+     * Default the SATA controller off: Windows XP/2003 IA-64 ship no inbox
+     * AHCI driver and otherwise see an unidentified PCI device, so the guest
+     * that most wants storage is better served booting off the LSI SCSI HBA.
+     * Re-enable with ahci=on for SATA-aware guests.  IDE (cmd646) is likewise
+     * opt-in via ide=on.
+     */
+    s->ahci_enabled = false;
+    s->ide_enabled = false;
     s->firmware_ide_dma = true;
 #endif
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -2918,14 +3452,22 @@ static void ia64_vpc_machine_instance_init(Object *obj)
 #else
     s->firmware_console = IA64_FW_CONSOLE_SERIAL;
 #endif
+    /* The 460GX GXB AGP GART is on by default, as on real hardware. */
+    s->agp_enabled = true;
+    /* Default display adapter: the Rage 128 (honouring -vga); mach64 opt-in. */
+    s->vga_model = g_strdup("rage128");
 }
 
 static void ia64_vpc_machine_instance_finalize(Object *obj)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
+    if (s->vmstate_registered) {
+        vmstate_unregister(NULL, &vmstate_ia64_vpc, s);
+    }
     g_free(s->nvram_path);
     g_free(s->nvram_resolved_path);
+    g_free(s->vga_model);
 }
 
 static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
@@ -2938,23 +3480,21 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
     mc->init = ia64_vpc_init;
     mc->max_cpus = IA64_VPC_MAX_CPUS;
     mc->default_cpus = 1;
-    mc->default_cpu_type = IA64_CPU_TYPE_NAME("montecito");
+    mc->default_cpu_type = IA64_CPU_TYPE_NAME("madison");
     mc->smp_props.prefer_sockets = true;
-    mc->default_ram_size = 2 * GiB;
+    mc->default_ram_size = 1 * GiB;
     mc->default_ram_id = "ia64-vpc.ram";
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     mc->default_display = "ati";
 #endif
 #ifdef CONFIG_IA64_VPC_NETWORK
     /*
-     * Default to the 82543GC: XP IA-64's inbox e1000 INF matches exactly
-     * PCI\VEN_8086&DEV_1004&REV_02 (e1000w64.sys), giving the guests an
-     * inbox *gigabit* adapter -- verified working in XP 2002 and Whistler
-     * 2462.  The previous default, the 100 Mbit PRO/100 (i82557b,
-     * NET557.IN_ / DEV_1229), remains available via -nic model=i82557b;
-     * the plain e1000 (82540EM, DEV_100E) has no inbox IA-64 driver.
+     * Default to the 100 Mbit PRO/100 (i82557b, NET557.IN_ / DEV_1229).
+     * The 82543GC gigabit adapter (PCI\VEN_8086&DEV_1004&REV_02,
+     * e1000w64.sys) remains available via -nic model=e1000-82543gc; the
+     * plain e1000 (82540EM, DEV_100E) has no inbox IA-64 driver.
      */
-    mc->default_nic = "e1000-82543gc";
+    mc->default_nic = "i82557b";
 #endif
 #ifdef CONFIG_IA64_VPC_STORAGE
     mc->block_default_type = IF_SCSI;
@@ -2977,8 +3517,29 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_get_ahci,
                                    ia64_vpc_set_ahci);
     object_class_property_set_description(oc, "ahci",
-        "Set on/off to enable/disable the AHCI SATA controller "
-        "(off removes the PCI device some guests lack a driver for)");
+        "Set on/off to enable/disable the AHCI SATA controller (default off; "
+        "on adds a PCI device that guests without a SATA driver cannot use)");
+    object_class_property_add_bool(oc, "ide",
+                                   ia64_vpc_get_ide,
+                                   ia64_vpc_set_ide);
+    object_class_property_set_description(oc, "ide",
+        "Set on/off to enable/disable the CMD646 PCI IDE controller "
+        "(default off; on adds a dual-channel ATA/ATAPI controller in slot 0 "
+        "and auto-attaches if=ide drives)");
+    object_class_property_add_bool(oc, "agp",
+                                   ia64_vpc_get_agp,
+                                   ia64_vpc_set_agp);
+    object_class_property_set_description(oc, "agp",
+        "Set on/off to enable/disable the 460GX AGP GART (default on, as on "
+        "real hardware); off makes the Rage 128 fall back to its 32-bit PCI "
+        "GART -- clean 2D, but graphics DMA cannot reach RAM above 4 GiB");
+    object_class_property_add_str(oc, "vga",
+                                  ia64_vpc_get_vga,
+                                  ia64_vpc_set_vga);
+    object_class_property_set_description(oc, "vga",
+        "Display adapter: 'rage128' (default, ATI Rage 128, honours -vga), "
+        "'mach64' (ATI Mach64 3D Rage, a PCI 2D adapter with no AGP), or "
+        "'std'");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,
                                    ia64_vpc_set_firmware_ide_dma);

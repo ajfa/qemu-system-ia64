@@ -1,0 +1,445 @@
+/*
+ * QEMU ATI Mach64 "3D Rage" (DEV_4754) emulation - 2D GUI engine
+ *
+ * The Mach64 GUI engine is a synchronous MMIO blitter: the guest programs the
+ * data-path (DP_*), source (SRC_*), pattern (PAT_*), scissor (SC_*) and colour-
+ * compare (CLR_CMP_*) context, then a write to a trajectory register
+ * (DST_HEIGHT_WIDTH for rectangles, DST_BRES_LNTH for lines) launches the
+ * operation.  There is no command FIFO or DMA to model - each launch executes
+ * immediately against the linear framebuffer.
+ *
+ * This work is licensed under the GNU GPL license version 2 or later.
+ */
+
+#include "qemu/osdep.h"
+#include "mach64_int.h"
+#include "mach64_regs.h"
+#include "qemu/log.h"
+#include "ui/console.h"
+
+typedef struct {
+    Mach64VGAState *s;
+    uint8_t *vram;
+    uint32_t vram_size;
+    int bypp;
+    int dst_pitch;          /* bytes */
+    uint32_t dst_base;      /* bytes */
+    uint32_t src_pitch;     /* bytes */
+    uint32_t src_base;      /* bytes */
+    unsigned frgd_mix;
+    unsigned bkgd_mix;
+    uint32_t frgd_clr;
+    uint32_t bkgd_clr;
+    uint32_t write_mask;
+    /* scissor (inclusive) */
+    int sc_left, sc_right, sc_top, sc_bottom;
+    /* colour-compare */
+    unsigned cmp_fn;
+    bool cmp_on_src;
+    uint32_t cmp_clr;
+    uint32_t cmp_msk;
+} Mach64Ctx;
+
+static uint32_t px_read(const Mach64Ctx *c, uint32_t off)
+{
+    const uint8_t *p = c->vram + off;
+
+    switch (c->bypp) {
+    case 1:
+        return p[0];
+    case 2:
+        return lduw_le_p(p);
+    case 3:
+        return p[0] | (p[1] << 8) | (p[2] << 16);
+    default:
+        return ldl_le_p(p);
+    }
+}
+
+static void px_write(const Mach64Ctx *c, uint32_t off, uint32_t v)
+{
+    uint8_t *p = c->vram + off;
+
+    switch (c->bypp) {
+    case 1:
+        p[0] = v;
+        break;
+    case 2:
+        stw_le_p(p, v);
+        break;
+    case 3:
+        p[0] = v;
+        p[1] = v >> 8;
+        p[2] = v >> 16;
+        break;
+    default:
+        stl_le_p(p, v);
+        break;
+    }
+}
+
+static uint32_t apply_mix(unsigned mix, uint32_t src, uint32_t dst)
+{
+    switch (mix & 0xf) {
+    case MIX_NOT_DST:          return ~dst;
+    case MIX_0:                return 0;
+    case MIX_1:                return ~0u;
+    case MIX_DST:              return dst;
+    case MIX_NOT_SRC:          return ~src;
+    case MIX_XOR:              return src ^ dst;
+    case MIX_XNOR:             return ~(src ^ dst);
+    case MIX_SRC:              return src;
+    case MIX_NAND:             return ~(src & dst);
+    case MIX_NOT_SRC_OR_DST:   return ~src | dst;
+    case MIX_SRC_OR_NOT_DST:   return src | ~dst;
+    case MIX_OR:               return src | dst;
+    case MIX_AND:              return src & dst;
+    case MIX_SRC_AND_NOT_DST:  return src & ~dst;
+    case MIX_NOT_SRC_AND_DST:  return ~src & dst;
+    case MIX_NOR:              return ~(src | dst);
+    default:                   return src;   /* arithmetic mixes: treat as SRC */
+    }
+}
+
+/* Colour-compare: returns true if the pixel should be drawn. */
+static bool cmp_pass(const Mach64Ctx *c, uint32_t src)
+{
+    if (!c->cmp_on_src) {
+        return true;
+    }
+    switch (c->cmp_fn) {
+    case CLR_CMP_FN_FALSE:
+        return true;                       /* comparison disabled: always draw */
+    case CLR_CMP_FN_TRUE:
+        return false;
+    case CLR_CMP_FN_EQUAL:
+        return (src & c->cmp_msk) == (c->cmp_clr & c->cmp_msk);
+    case CLR_CMP_FN_NOT_EQUAL:
+        return (src & c->cmp_msk) != (c->cmp_clr & c->cmp_msk);
+    default:
+        return true;
+    }
+}
+
+static void blend_px(const Mach64Ctx *c, uint32_t off, unsigned mix,
+                     uint32_t src)
+{
+    uint32_t dst = px_read(c, off);
+    uint32_t res = apply_mix(mix, src, dst);
+
+    res = (res & c->write_mask) | (dst & ~c->write_mask);
+    px_write(c, off, res);
+}
+
+static bool in_scissor(const Mach64Ctx *c, int x, int y)
+{
+    return x >= c->sc_left && x <= c->sc_right &&
+           y >= c->sc_top && y <= c->sc_bottom;
+}
+
+static bool ctx_init(Mach64VGAState *s, Mach64Ctx *c)
+{
+    memset(c, 0, sizeof(*c));
+    c->s = s;
+    c->vram = s->vga.vram_ptr;
+    c->vram_size = s->vga.vram_size;
+    c->bypp = mach64_dst_bpp(s) / 8;
+    if (c->bypp == 0) {
+        return false;
+    }
+    c->dst_pitch = mach64_dst_pitch_bytes(s);
+    c->dst_base = mach64_dst_base(s);
+
+    int src_pitch_px = ((s->regs[SRC_OFF_PITCH] >> 22) & 0x3ff) * 8;
+    c->src_pitch = src_pitch_px * c->bypp;
+    c->src_base = (s->regs[SRC_OFF_PITCH] & 0x000fffff) * 8;
+    if (c->src_pitch == 0) {
+        c->src_pitch = c->dst_pitch;
+        c->src_base = c->dst_base;
+    }
+
+    c->frgd_mix = (s->regs[DP_MIX] & DP_FRGD_MIX) >> DP_FRGD_MIX_SHIFT;
+    c->bkgd_mix = s->regs[DP_MIX] & DP_BKGD_MIX;
+    c->frgd_clr = s->regs[DP_FRGD_CLR];
+    c->bkgd_clr = s->regs[DP_BKGD_CLR];
+    c->write_mask = s->regs[DP_WRITE_MASK] ? s->regs[DP_WRITE_MASK] : ~0u;
+
+    c->sc_left = s->regs[SC_LEFT] & 0x3fff;
+    c->sc_right = s->regs[SC_RIGHT] & 0x3fff;
+    c->sc_top = s->regs[SC_TOP] & 0x3fff;
+    c->sc_bottom = s->regs[SC_BOTTOM] & 0x3fff;
+    if (c->sc_right < c->sc_left) {
+        c->sc_right = 0x3fff;
+    }
+    if (c->sc_bottom < c->sc_top) {
+        c->sc_bottom = 0x3fff;
+    }
+
+    c->cmp_fn = s->regs[CLR_CMP_CNTL] & CLR_CMP_FN;
+    c->cmp_on_src = ((s->regs[CLR_CMP_CNTL] & CLR_CMP_SRC) >> 24) ==
+                    CLR_CMP_SRC_2D;
+    c->cmp_clr = s->regs[CLR_CMP_CLR];
+    c->cmp_msk = s->regs[CLR_CMP_MSK] ? s->regs[CLR_CMP_MSK] : ~0u;
+    return true;
+}
+
+static uint32_t dst_off(const Mach64Ctx *c, int x, int y)
+{
+    return c->dst_base + (uint32_t)y * c->dst_pitch + (uint32_t)x * c->bypp;
+}
+
+static bool off_ok(const Mach64Ctx *c, uint32_t off)
+{
+    return off + c->bypp <= c->vram_size;
+}
+
+/* ---- pattern (8x8) ---- */
+
+static bool pat_mono_bit(const Mach64VGAState *s, int x, int y)
+{
+    uint64_t pat = (uint64_t)s->regs[PAT_REG0] |
+                   ((uint64_t)s->regs[PAT_REG1] << 32);
+    int bit = (y & 7) * 8 + (x & 7);
+
+    return (pat >> bit) & 1;
+}
+
+/* ---- solid / pattern rectangle fill ---- */
+
+static void fill_rect(Mach64Ctx *c, int x0, int y0, int w, int h,
+                      bool pattern)
+{
+    Mach64VGAState *s = c->s;
+
+    for (int j = 0; j < h; j++) {
+        int y = y0 + j;
+        for (int i = 0; i < w; i++) {
+            int x = x0 + i;
+            uint32_t off;
+            unsigned mix;
+            uint32_t src;
+
+            if (!in_scissor(c, x, y)) {
+                continue;
+            }
+            off = dst_off(c, x, y);
+            if (!off_ok(c, off)) {
+                continue;
+            }
+            if (pattern) {
+                bool bit = pat_mono_bit(s, x, y);
+                mix = bit ? c->frgd_mix : c->bkgd_mix;
+                src = bit ? c->frgd_clr : c->bkgd_clr;
+            } else {
+                mix = c->frgd_mix;
+                src = c->frgd_clr;
+            }
+            blend_px(c, off, mix, src);
+        }
+    }
+}
+
+/* ---- screen-to-screen copy ---- */
+
+static void copy_rect(Mach64Ctx *c, int dx0, int dy0, int sx0, int sy0,
+                      int w, int h, bool x_l2r, bool y_t2b)
+{
+    for (int jj = 0; jj < h; jj++) {
+        int j = y_t2b ? jj : h - 1 - jj;
+        int dy = dy0 + j, sy = sy0 + j;
+        for (int ii = 0; ii < w; ii++) {
+            int i = x_l2r ? ii : w - 1 - ii;
+            int dx = dx0 + i, sx = sx0 + i;
+            uint32_t soff, doff, src;
+
+            if (!in_scissor(c, dx, dy)) {
+                continue;
+            }
+            soff = c->src_base + (uint32_t)sy * c->src_pitch +
+                   (uint32_t)sx * c->bypp;
+            doff = dst_off(c, dx, dy);
+            if (!off_ok(c, soff) || !off_ok(c, doff)) {
+                continue;
+            }
+            src = px_read(c, soff);
+            if (!cmp_pass(c, src)) {
+                continue;
+            }
+            blend_px(c, doff, c->frgd_mix, src);
+        }
+    }
+}
+
+/* ---- launch a rectangle trajectory ---- */
+
+void mach64_2d_dst_trigger(Mach64VGAState *s)
+{
+    Mach64Ctx c;
+    int x = (s->regs[DST_Y_X] >> 16) & 0x1fff;
+    int y = s->regs[DST_Y_X] & 0x1fff;
+    int w = (s->regs[DST_HEIGHT_WIDTH] >> 16) & 0x3fff;
+    int h = s->regs[DST_HEIGHT_WIDTH] & 0x3fff;
+    unsigned frgd_src = (s->regs[DP_SRC] >> DP_FRGD_SRC_SHIFT) & 7;
+    unsigned mono_src = (s->regs[DP_SRC] & DP_MONO_SRC) >> DP_MONO_SRC_SHIFT;
+    bool x_l2r = s->regs[DST_CNTL] & DST_X_DIR;
+    bool y_t2b = s->regs[DST_CNTL] & DST_Y_DIR;
+
+    s->host_data.active = false;
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    if (!ctx_init(s, &c)) {
+        return;
+    }
+
+    /* CPU-to-screen blit: defer drawing until HOST_DATA* arrives. */
+    if (frgd_src == SRC_HOST || mono_src == DP_MONO_SRC_HOST) {
+        s->host_data.active = true;
+        s->host_data.mono = (mono_src == DP_MONO_SRC_HOST);
+        s->host_data.x = 0;
+        s->host_data.y = 0;
+        return;
+    }
+
+    if (frgd_src == SRC_BLIT) {
+        int sx = (s->regs[SRC_Y_X] >> 16) & 0x1fff;
+        int sy = s->regs[SRC_Y_X] & 0x1fff;
+
+        copy_rect(&c, x, y, sx, sy, w, h, x_l2r, y_t2b);
+    } else if (frgd_src == SRC_PATTERN ||
+               (s->regs[SRC_CNTL] & SRC_PATT_EN)) {
+        fill_rect(&c, x, y, w, h, true);
+    } else {
+        fill_rect(&c, x, y, w, h, false);
+    }
+    mach64_2d_set_dirty(s, c.dst_base, x, y, w, h);
+}
+
+/* ---- host-data (CPU-to-screen) stream ---- */
+
+void mach64_2d_host_data(Mach64VGAState *s, uint32_t data)
+{
+    Mach64Ctx c;
+    int x0 = (s->regs[DST_Y_X] >> 16) & 0x1fff;
+    int y0 = s->regs[DST_Y_X] & 0x1fff;
+    int w = (s->regs[DST_HEIGHT_WIDTH] >> 16) & 0x3fff;
+    int h = s->regs[DST_HEIGHT_WIDTH] & 0x3fff;
+
+    if (!s->host_data.active || w <= 0 || h <= 0) {
+        return;
+    }
+    if (!ctx_init(s, &c)) {
+        return;
+    }
+
+    if (s->host_data.mono) {
+        /* 32 mono pixels per dword, MSB (bit 31) leftmost. */
+        for (int b = 31; b >= 0; b--) {
+            if (s->host_data.y >= (unsigned)h) {
+                break;
+            }
+            bool bit = (data >> b) & 1;
+            int x = x0 + s->host_data.x;
+            int y = y0 + s->host_data.y;
+            uint32_t off = dst_off(&c, x, y);
+            unsigned mix = bit ? c.frgd_mix : c.bkgd_mix;
+            uint32_t src = bit ? c.frgd_clr : c.bkgd_clr;
+
+            if (in_scissor(&c, x, y) && off_ok(&c, off)) {
+                blend_px(&c, off, mix, src);
+            }
+            if (++s->host_data.x >= (unsigned)w) {
+                s->host_data.x = 0;
+                s->host_data.y++;
+            }
+        }
+    } else {
+        /* colour pixels packed in the dword, low pixel first. */
+        int ppd = (c.bypp >= 4) ? 1 : (4 / c.bypp);
+        for (int k = 0; k < ppd; k++) {
+            if (s->host_data.y >= (unsigned)h) {
+                break;
+            }
+            uint32_t src;
+            switch (c.bypp) {
+            case 1:
+                src = (data >> (k * 8)) & 0xff;
+                break;
+            case 2:
+                src = (data >> (k * 16)) & 0xffff;
+                break;
+            default:
+                src = data;
+                break;
+            }
+            int x = x0 + s->host_data.x;
+            int y = y0 + s->host_data.y;
+            uint32_t off = dst_off(&c, x, y);
+
+            if (in_scissor(&c, x, y) && off_ok(&c, off) && cmp_pass(&c, src)) {
+                blend_px(&c, off, c.frgd_mix, src);
+            }
+            if (++s->host_data.x >= (unsigned)w) {
+                s->host_data.x = 0;
+                s->host_data.y++;
+            }
+        }
+    }
+
+    if (s->host_data.y >= (unsigned)h) {
+        s->host_data.active = false;
+        mach64_2d_set_dirty(s, c.dst_base, x0, y0, w, h);
+    }
+}
+
+/* ---- Bresenham line ---- */
+
+void mach64_2d_line_trigger(Mach64VGAState *s)
+{
+    Mach64Ctx c;
+    int x = (s->regs[DST_Y_X] >> 16) & 0x1fff;
+    int y = s->regs[DST_Y_X] & 0x1fff;
+    int len = s->regs[DST_BRES_LNTH] & 0x7fff;
+    int err = (int32_t)s->regs[DST_BRES_ERR];
+    int inc = (int32_t)s->regs[DST_BRES_INC];
+    int dec = (int32_t)s->regs[DST_BRES_DEC];
+    uint32_t cntl = s->regs[DST_CNTL];
+    bool x_dir = cntl & DST_X_DIR;
+    bool y_dir = cntl & DST_Y_DIR;
+    bool y_major = cntl & 0x00000004ul;    /* DST_Y_MAJOR */
+    int minx = x, miny = y, maxx = x, maxy = y;
+
+    if (len <= 0 || !ctx_init(s, &c)) {
+        return;
+    }
+
+    for (int i = 0; i < len; i++) {
+        uint32_t off = dst_off(&c, x, y);
+
+        if (in_scissor(&c, x, y) && off_ok(&c, off)) {
+            blend_px(&c, off, c.frgd_mix, c.frgd_clr);
+        }
+        minx = MIN(minx, x); miny = MIN(miny, y);
+        maxx = MAX(maxx, x); maxy = MAX(maxy, y);
+
+        /* Advance along the major axis; step the minor axis on error wrap. */
+        if (y_major) {
+            y += y_dir ? 1 : -1;
+        } else {
+            x += x_dir ? 1 : -1;
+        }
+        if (err >= 0) {
+            err += dec;   /* DEC is programmed negative (2*dmajor - 2*dminor) */
+            if (y_major) {
+                x += x_dir ? 1 : -1;
+            } else {
+                y += y_dir ? 1 : -1;
+            }
+        } else {
+            err += inc;
+        }
+    }
+
+    mach64_2d_set_dirty(s, c.dst_base,
+                        minx, miny, maxx - minx + 1, maxy - miny + 1);
+}

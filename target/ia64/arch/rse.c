@@ -46,6 +46,17 @@ static void ia64_rse_write_u64(CPUIA64State *env, uint64_t addr,
                            (env->ar_rsc & IA64_RSC_BE) != 0, mmu_idx, ra);
 }
 
+static uint64_t ia64_rse_write_collection(CPUIA64State *env, uint64_t addr,
+                                          uint64_t value, uint64_t defined,
+                                          uint64_t *previous, uintptr_t ra)
+{
+    int mmu_idx = ia64_rse_mmu_index(env);
+
+    return ia64_exec_rse_store_collection(
+        env, addr, value, defined, (env->ar_rsc & IA64_RSC_BE) != 0,
+        mmu_idx, previous, ra);
+}
+
 static uint64_t ia64_rse_read_u64(CPUIA64State *env, uint64_t addr,
                                   uintptr_t ra)
 {
@@ -223,24 +234,97 @@ ia64_rse_sync_frame_out_slow(CPUIA64State *env, uint64_t dirty0,
                              uint64_t dirty1)
 {
     uint64_t dirty[2] = { dirty0, dirty1 };
+    uint64_t nat[2] = { env->nat[0], env->nat[1] };
     uint32_t sof = env->cfm_sof;
+    uint32_t sor_regs = (uint32_t)env->cfm_sor << 3;
+    uint32_t rrb_gr = env->cfm_rrb_gr;
+    uint32_t bol = env->rse.rse_bol;
+    bool nat_files_clear =
+        ((nat[0] >> IA64_STACKED_GR_BASE) | nat[1] |
+         env->rse.rse_pgr_nat[0] | env->rse.rse_pgr_nat[1]) == 0;
     uint32_t word;
 
     env->rse.rse_gr_dirty[0] = 0;
     env->rse.rse_gr_dirty[1] = 0;
+    /*
+     * Dirty bits outside the current frame were ignored by the loops below.
+     * Mask them once so the hot loops need neither to visit nor test them.
+     */
+    if (sof < 64) {
+        dirty[0] &= sof == 0 ? 0 : (1ULL << sof) - 1;
+        dirty[1] = 0;
+    } else {
+        dirty[1] &= (1ULL << (sof - 64)) - 1;
+    }
+
+    /*
+     * Most frames neither rotate their GRs nor wrap around the physical
+     * register ring.  With no NaT state to update, their mapping is a simple
+     * base-plus-index copy; select that case once per frame instead of
+     * repeating rotation and wrap checks for every dirty register.
+     */
+    if (nat_files_clear && (sor_regs == 0 || rrb_gr == 0) &&
+        bol + sof <= IA64_STACKED_GR_COUNT) {
+        for (word = 0; word < 2; word++) {
+            while (dirty[word] != 0) {
+                uint32_t bit = ctz64(dirty[word]);
+                uint32_t v = word * 64 + bit;
+
+                dirty[word] &= dirty[word] - 1;
+                env->rse.rse_pgr[bol + v] =
+                    env->gr[IA64_STACKED_GR_BASE + v];
+            }
+        }
+        return;
+    }
+
+    if (nat_files_clear) {
+        for (word = 0; word < 2; word++) {
+            while (dirty[word] != 0) {
+                uint32_t bit = ctz64(dirty[word]);
+                uint32_t v = word * 64 + bit;
+                uint32_t p = v;
+
+                dirty[word] &= dirty[word] - 1;
+                if (v < sor_regs) {
+                    p += rrb_gr;
+                    if (p >= sor_regs) {
+                        p -= sor_regs;
+                    }
+                }
+                p += bol;
+                if (p >= IA64_STACKED_GR_COUNT) {
+                    p -= IA64_STACKED_GR_COUNT;
+                }
+                env->rse.rse_pgr[p] =
+                    env->gr[IA64_STACKED_GR_BASE + v];
+            }
+        }
+        return;
+    }
+
     for (word = 0; word < 2; word++) {
         while (dirty[word] != 0) {
             uint32_t bit = ctz64(dirty[word]);
             uint32_t v = word * 64 + bit;
+            uint32_t p = v;
+            uint32_t reg = IA64_STACKED_GR_BASE + v;
 
             dirty[word] &= dirty[word] - 1;
-            if (v < sof) {
-                uint32_t p = ia64_rse_virt_to_phys(env, v);
-                uint32_t reg = IA64_STACKED_GR_BASE + v;
-
-                env->rse.rse_pgr[p] = env->gr[reg];
-                ia64_rse_pgr_nat_set(env, p, ia64_gr_nat_get(env, reg));
+            if (v < sor_regs) {
+                p += rrb_gr;
+                if (p >= sor_regs) {
+                    p -= sor_regs;
+                }
             }
+            p += bol;
+            if (p >= IA64_STACKED_GR_COUNT) {
+                p -= IA64_STACKED_GR_COUNT;
+            }
+            env->rse.rse_pgr[p] = env->gr[reg];
+            ia64_rse_pgr_nat_set(env, p, v < 32 ?
+                                 (nat[0] >> (IA64_STACKED_GR_BASE + v)) & 1 :
+                                 (nat[1] >> (v - 32)) & 1);
         }
     }
 }
@@ -382,10 +466,9 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
          */
         uint64_t word = env->ar_rnat & INT64_MAX;
         uint64_t group_base = bspstore - 0x1f8;
+        uint64_t keep = 0;
 
         if (env->rse.rse_rnat_low > group_base) {
-            uint64_t keep;
-
             if (env->rse.rse_rnat_low > bspstore) {
                 /*
                  * The floor sits above this collection word -- possible
@@ -407,14 +490,27 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
                             env->rse.rse_rnat_low)) - 1;
             }
 
-            word = (ia64_rse_read_u64(env, bspstore, ra) & keep) |
-                   (word & ~keep);
+        }
+        if (keep != 0) {
+            /*
+             * Merge the committed lower bits from the word in memory
+             * without an architectural load: the RSE is only supposed to
+             * be *storing* here, so read permission checks and read
+             * watchpoints must not fire on the backing store page.
+             */
+            uint64_t previous;
+
+            word = ia64_rse_write_collection(env, bspstore,
+                                             word & ~keep & INT64_MAX,
+                                             INT64_MAX & ~keep,
+                                             &previous, ra);
             trace_ia64_rse_rnat_boundary_store(env_cpu(env)->cpu_index,
                                                bspstore, word & INT64_MAX,
                                                keep, env->ar_rnat,
                                                env->rse.rse_rnat_low);
+        } else {
+            ia64_rse_write_u64(env, bspstore, word & INT64_MAX, ra);
         }
-        ia64_rse_write_u64(env, bspstore, word & INT64_MAX, ra);
         env->ar_rnat = 0;
         trace_ia64_rse_rnat_floor(env_cpu(env)->cpu_index, "boundary-store",
                                   env->rse.rse_rnat_low, bspstore + 8,
@@ -553,7 +649,12 @@ static void ia64_rse_complete_frame_loads(CPUIA64State *env, uintptr_t ra)
 /* br.call/cover: the current frame joins the dirty partition. */
 static void ia64_rse_preserve_frame(CPUIA64State *env, uint32_t nregs)
 {
-    uint32_t nats = ia64_rse_nat_words_grow(env->ar_bsp, nregs);
+    uint32_t nats;
+
+    if (nregs == 0) {
+        return;
+    }
+    nats = ia64_rse_nat_words_grow(env->ar_bsp, nregs);
 
     env->rse.rse_bol = ia64_rse_wrap_phys(env->rse.rse_bol + nregs);
     env->ar_bsp += (uint64_t)(nregs + nats) * 8;
@@ -1148,10 +1249,14 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
 
 void ia64_rse_pop_return_frame(CPUIA64State *env, uint64_t pfs)
 {
+    /*
+     * Restore AR.EC before the mandatory RSE loads: return_to_frame may take a
+     * fill fault, and the handler must already see the restored epilog count.
+     */
+    env->ar_ec = (pfs & IA64_PFS_PEC_MASK) >> IA64_PFS_PEC_SHIFT;
     ia64_rse_return_to_frame(env, pfs & IA64_PFS_PFM_MASK,
                              (pfs & IA64_CFM_SOL_MASK) >>
                              IA64_CFM_SOL_SHIFT);
-    env->ar_ec = (pfs & IA64_PFS_PEC_MASK) >> IA64_PFS_PEC_SHIFT;
 }
 
 void ia64_rse_br_ret(CPUIA64State *env, uint32_t b_reg)

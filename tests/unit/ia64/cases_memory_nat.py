@@ -700,6 +700,20 @@ test_store_invalidates_advanced_load = require_registers(
          0),
     ], {"ip": 0x70, "r4": 0xfeedfacecafebeef}, entry=0x10)
 
+test_fc_invalidates_advanced_load = require_registers(
+    "fc_invalidates_advanced_load", [
+        (0x10, 0x00, addl(3, 0x100, 0), nop_i(), nop_i()),
+        (0x20, *movl_mlx(5, 0x123456789abcdef0)),
+        (0x30, 0x00, st8(3, 5), nop_i(), nop_i()),
+        (0x40, 0x00, ld8_a(4, 3), nop_i(), nop_i()),
+        (0x50, *movl_mlx(4, 0xaa)),
+        # fc removes the cache line holding [0x100] -> ALAT collision, so the
+        # outstanding advanced load must be invalidated and ld.c must reload.
+        (0x60, 0x00, fc_i(3), nop_i(), nop_i()),
+        (0x70, 0x00, ld8_c_nc(4, 3), nop_i(), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {"ip": 0x80, "r4": 0x123456789abcdef0}, entry=0x10)
+
 test_semaphore_ops_invalidate_advanced_loads = require_registers(
     "semaphore_ops_invalidate_advanced_loads", [
         (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x10, 0),
@@ -2256,6 +2270,76 @@ test_cloop_zero_st1_clears_cross_page_range = require_registers(
     }, entry=0x10)
 
 
+def test_speculative_stacked_nat_survives_backing_store_switch(qemu):
+    """A deferred speculative load's NaT must survive a software backing-store
+    switch.  Move to BSPSTORE makes AR.RNAT undefined and drops every internal
+    partial collection, so the architected save and restore of BSPSTORE and
+    RNAT around the switch is the only path back for a spilled NaT bit.  This
+    is the sequence an operating system runs on a kernel entry, and it is the
+    one case the call and interrupt variants above never reach.  Sweeping the
+    initial collection index covers both a bit that already reached the
+    backing store and a bit still held in a partial AR.RNAT collection."""
+    for collect_bit in range(63):
+        bspstore = 0x100000 + collect_bit * 8
+        run_program(qemu, [
+            (0x10, *movl_mlx(2, bspstore)),
+            (0x20, 0x01, mov_m_gr_ar(2, 18), nop_i(),
+             nop_i()),
+            (0x30, 0x00, alloc_m(43, 20, 13, 0, 0), nop_i(),
+             nop_i()),
+            (0x40, *movl_mlx(9, 1)),
+            (0x50, 0x00, mov_m_gr_ar(9, 36), addl(3, 0x300, 0),
+             nop_i()),
+            (0x60, 0x08, ld8_fill_postinc(40, 3, 0), nop_i(),
+             nop_i()),
+            (0x70, 0x00, ld8_s_postinc(32, 40, 8), nop_i(),
+             nop_i()),
+            (0x80, 0x10, nop_m(), nop_i(),
+             br_call(0, 0x80, 0x200)),
+            (0x90, 0x08, nop_m(), chk_s_m(32, 0x90, 0xb0),
+             nop_i()),
+            (0xa0, 0x10, nop_m(), adds(8, 1, 0),
+             br_cond(0xa0, 0xc0)),
+            (0xb0, 0x10, nop_m(), adds(10, 1, 0),
+             br_cond(0xb0, 0xc0)),
+            (0xc0, 0x10, nop_m(), nop_i(),
+             br_cond(0xc0, 0xc0)),
+            # Spill the caller frame into the original store, switch to a
+            # second store and drive the RSE against it, then restore the
+            # architected pointer pair before returning.
+            (0x200, 0x01, alloc_m(34, 96, 88, 0, 0), nop_i(),
+             nop_i()),
+            (0x210, 0x01, flushrs_enc(), nop_i(),
+             nop_i()),
+            (0x220, 0x00, mov_m_ar_gr(20, 18), nop_i(),
+             nop_i()),
+            (0x230, 0x00, mov_m_ar_gr(21, 19), nop_i(),
+             nop_i()),
+            (0x240, *movl_mlx(22, 0x200000)),
+            (0x250, 0x00, mov_m_gr_ar(22, 18), nop_i(),
+             nop_i()),
+            (0x260, 0x18, nop_m(), nop_m(),
+             cover_b()),
+            (0x270, 0x00, flushrs_enc(), nop_i(),
+             nop_i()),
+            (0x280, 0x00, mov_m_gr_ar(20, 18), nop_i(),
+             nop_i()),
+            (0x290, 0x00, mov_m_gr_ar(21, 19), nop_i(),
+             nop_i()),
+            (0x2a0, 0x10, nop_m(), nop_i(),
+             br_ret(0)),
+            (0x300, 0x00, 0x400, 0,
+             0),
+        ], entry=0x10, terminal_ip=0xc0, expected={
+            "exception": IA64_EXCP_NONE,
+            "r8": 0,
+            "r10": 1,
+            "r32_nat": 1,
+        }, name=(
+            "speculative_stacked_nat_survives_backing_store_switch_"
+            f"collect_bit_{collect_bit}"))
+
+
 def test_ld2_bias_st2_raw_large_frame_sequence(qemu):
     result = run_program(qemu, [
         (0x10, *movl_mlx(2, 0x8000)),
@@ -2753,6 +2837,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'cmpxchg4_uses_ar_ccv',
     'data_big_endian_cmpxchg4',
     'data_big_endian_load_store',
+    'fc_invalidates_advanced_load',
     'fc_nat_source_consumes_non_access',
     'fetchadd4_nat_base_sets_read_write_isr',
     'fetchadd4_result_base_alias_invalidates_alat',
@@ -2834,6 +2919,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'speculative_recovery_unaligned_defers',
     'speculative_unimplemented_physical_unaligned_defers',
     'speculative_unaligned_defers',
+    'speculative_stacked_nat_survives_backing_store_switch',
     'speculative_unaligned_no_recovery_faults',
     'st16_madison_illegal_operation',
     'st16_rel_stores_gr_and_csd',

@@ -28,8 +28,12 @@ from .encoding import (
     IA64_EXCP_PAGE_NOT_PRESENT,
     IA64_EXCP_RESERVED_REG_FIELD,
     IA64_EXCP_UNALIGNED,
+    IA64_EXCP_UNIMPL_DATA_ADDR,
     IA64_FIRMWARE_IVT_BASE,
     IA64_FW_IDENTITY_BASE,
+    IA64_GENERAL_VECTOR,
+    IA64_GENEX_UNIMPL_DATA_ADDR,
+    IA64_IMPL_PA_BITS,
     IA64_IMPL_VA_MSB,
     IA64_INST_ACCESS_BIT_VECTOR,
     IA64_INST_ACCESS_VECTOR,
@@ -1623,6 +1627,44 @@ test_it_only_keeps_data_physical = require_registers("it_only_keeps_data_physica
     IT_ONLY_DATA_BUNDLE,
 ], {"ip": 0x8450, "exception": IA64_EXCP_NONE, "r31": IT_ONLY_DATA_LOW}, entry=0x10)
 
+test_itlb_uses_instruction_translation_after_data_fill = require_registers(
+    "itlb_uses_instruction_translation_after_data_fill", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, *movl_mlx(19, DTR_PTE_WB | 0x5000000)),
+        (0x30, *movl_mlx(20, DTR_PTE_WB | 0x5010000)),
+        (0x40, *movl_mlx(21, 0x8000)),
+        (0x50, *movl_mlx(
+            23, IA64_PSR_IC | IA64_PSR_IT | IA64_PSR_DT)),
+        (0x60, 0x00, adds(7, LOW_VECTOR_ITIR, 0), adds(5, 5, 0),
+         nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
+         nop_i()),
+        (0x80, 0x00, itr_i(5, 18), adds(6, 6, 0),
+         nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(21, 20), nop_i(), nop_i()),
+        (0xa0, 0x00, itr_d(6, 19), nop_i(), nop_i()),
+        (0xb0, 0x00, itr_i(6, 20), nop_i(), nop_i()),
+        (0xc0, 0x00, srlz_i(), nop_i(), nop_i()),
+        (0xd0, 0x00, srlz_d(), adds(31, 0x430, 0), nop_i()),
+        *rfi_to_gr(0xe0, 23, 31),
+
+        # Populate the data soft-TLB at 0x8000 before fetching code there.
+        (0x4000430, 0x00, ld8(8, 21), mov_br_gr(1, 21), nop_i()),
+        (0x4000440, 0x10, nop_m(), nop_i(), br_indirect(1)),
+
+        # The DTR and ITR deliberately map the same VA to different pages.
+        (0x5000000, 0x10, nop_m(), adds(31, 0x11, 0),
+         br_cond(0x8000, 0x8010)),
+        (0x5000010, 0x10, nop_m(), nop_i(), br_cond(0x8010, 0x8010)),
+        (0x5010000, 0x10, nop_m(), adds(31, 0x22, 0),
+         br_cond(0x8000, 0x8010)),
+        (0x5010010, 0x10, nop_m(), nop_i(), br_cond(0x8010, 0x8010)),
+    ], {
+        "ip": 0x8010,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0x22,
+    }, entry=0x10)
+
 PHYSICAL_ALIAS_ADDR = 0x220000
 PHYSICAL_ALIAS_UC_ADDR = IA64_PHYS_UC_BIT | PHYSICAL_ALIAS_ADDR
 PHYSICAL_ALIAS_FIRST = 0x1122334455667788
@@ -2319,6 +2361,42 @@ test_tak_not_present_dtlb_returns_one = require_registers(
         "exception": IA64_EXCP_NONE,
         "r31": 1,
     }, entry=0x10)
+
+test_tak_unimplemented_va_does_not_alias_short_vhpt = require_registers(
+    "tak_unimplemented_va_does_not_alias_short_vhpt", [
+        (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
+        (0x20, *movl_mlx(17, 0xa000000000000000)),
+        (0x30, *movl_mlx(18, 0x539)),
+        (0x40, *movl_mlx(19, 0xbffc000000000000)),
+        (0x50, *movl_mlx(20, 0x0010000004009661)),
+        (0x60, *movl_mlx(21, 0x0010000004000661)),
+        (0x70, *movl_mlx(22, 0x4008000)),
+        (0x80, 0x00, st8(22, 21), nop_i(), nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(16, 8), adds(7, 0x38, 0), nop_i()),
+        (0xa0, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0xb0, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0xc0, 0x00, mov_m_gr_cr(7, 21), adds(5, 5, 0), nop_i()),
+        (0xd0, 0x00, itr_d(5, 20), nop_i(), nop_i()),
+        (0xe0, *movl_mlx(2, 0xa008000000000430)),
+        (0xf0, 0x00, ssm(1 << 17), nop_i(), nop_i()),
+        (0x100, 0x00, tak(31, 2), nop_i(), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0x110)),
+    ], {
+        "ip": 0x110,
+        "exception": IA64_EXCP_NONE,
+        "r31": 1,
+    }, entry=0x10, cpu="montecito")
+
+test_mov_cr_ifa_uda_merced = require_exception(
+    "mov_cr_ifa_uda_merced", [
+        # PSR.ic clear so the write reaches the IFA check, not the ic+16..25
+        # Illegal-Operation guard.  1<<51 is above Merced's implemented VA.
+        (0x10, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, *movl_mlx(16, 1 << 51)),
+        (0x40, 0x00, mov_m_gr_cr(16, 20), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], IA64_EXCP_UNIMPL_DATA_ADDR, fault_ip=0x40, cpu="merced")
 
 test_itr_d_not_present_raises_page_fault = require_registers(
     "itr_d_not_present_raises_page_fault", [
@@ -4723,6 +4801,14 @@ test_ptc_e_nat_addr_consumes = register_nat_consumption_test(
     "ptc_e_nat_addr_consumes",
     (0x00, ptc_e(16), nop_i(), nop_i()))
 
+test_ptc_e_skips_uda_on_merced = require_registers(
+    "ptc_e_skips_uda_on_merced", [
+        (0x10, *movl_mlx(16, 1 << 51)),
+        (0x20, 0x00, ptc_e(16), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE}, entry=0x10,
+    cpu="merced")
+
 test_short_vhpt_thash_decode = require_registers(
     "short_vhpt_thash_decode", [
         (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
@@ -4780,6 +4866,19 @@ test_short_vhpt_thash_uses_implemented_va_bits = require_registers(
         "r20": 0xfff7ffff80000ff8,
         "r21": 0x1fffff00001ff,
     }, entry=0x10)
+
+test_thash_same_reg_unimplemented_va_sets_nat = require_registers(
+    "thash_same_reg_unimplemented_va_sets_nat", [
+        # bit 55 is above Merced's implemented VA MSB (50) -> unimplemented VA.
+        (0x10, *movl_mlx(19, 1 << 55)),
+        (0x20, 0x00, thash(19, 19), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {
+        # The result NaT must come from the original (unimplemented) input,
+        # even though thash names the same GR for source and destination.
+        "ip": 0x30,
+        "r19_nat": 1,
+    }, entry=0x10, cpu="merced")
 
 # 245320-002 sec 5.4 and 5.5 publish the original Itanium's long-format VHPT
 # hash and tag exactly:
@@ -6168,6 +6267,73 @@ test_fc_i_invalidates_translated_cache_line = require_registers(
         "r31": 2,
     }, entry=0x10)
 
+test_fc_i_unimplemented_physical_address_faults = require_registers(
+    "fc_i_unimplemented_physical_address_faults", [
+        (0x10, *movl_mlx(16, 1 << IA64_IMPL_PA_BITS)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x01, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, fc_i(16), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00,
+         mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(10, 20), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x30,
+                 IA64_GENERAL_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x50,
+        "r9": (IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R |
+               IA64_ISR_NA),
+        "r10": 1 << IA64_IMPL_PA_BITS,
+    }, entry=0x10)
+
+
+FC_HIGH_RAM_TARGET = 0x80210000
+FC_ABOVE_4G_RAM_TARGET = 0x100100000
+
+
+def test_fc_i_high_ram_invalidates_translated_target(qemu):
+    stats, output = run_program_jit(qemu, [
+        (0x10, *movl_mlx(16, FC_HIGH_RAM_TARGET)),
+        (0x20, *movl_mlx(17, 0x60)),
+        (0x30, 0x00, nop_m(), mov_br_gr(1, 17),
+         mov_br_gr(2, 16)),
+        (0x40, 0x10, nop_m(), nop_i(), br_indirect(2)),
+        (0x60, 0x10, fc_i(16), nop_i(), br_cond(0x60, 0x70)),
+        (0x70, 0x01, sync_i(), nop_i(), nop_i()),
+        (0x80, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (FC_HIGH_RAM_TARGET, 0x10, nop_m(), adds(30, 1, 0),
+         br_indirect(1)),
+    ], entry=0x10, terminal_ip=0x90, memory="4G")
+    if stats.get("TB invalidate count", 0) < 1:
+        raise AssertionError(
+            "fc.i did not invalidate code in aliased high RAM:\n" + output)
+
+
+def test_fc_i_above_4g_ram_invalidates_translated_target(qemu):
+    stats, output = run_program_jit(qemu, [
+        (0x10, *movl_mlx(16, FC_ABOVE_4G_RAM_TARGET)),
+        (0x20, *movl_mlx(17, 0x60)),
+        (0x30, 0x00, nop_m(), mov_br_gr(1, 17),
+         mov_br_gr(2, 16)),
+        (0x40, 0x10, nop_m(), nop_i(), br_indirect(2)),
+        (0x60, 0x10, fc_i(16), nop_i(), br_cond(0x60, 0x70)),
+        (0x70, 0x01, sync_i(), nop_i(), nop_i()),
+        (0x80, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (FC_ABOVE_4G_RAM_TARGET, 0x10, nop_m(), adds(30, 1, 0),
+         br_indirect(1)),
+    ], entry=0x10, terminal_ip=0x90, memory="8G")
+    if stats.get("TB invalidate count", 0) < 1:
+        raise AssertionError(
+            "fc.i did not invalidate code above 4 GiB RAM:\n" + output)
+
 test_no_ic_data_access_enters_vector_with_ni = require_registers(
     "no_ic_data_access_enters_vector_with_ni",
     [
@@ -6273,8 +6439,11 @@ CASE_NAMES = (
     'dtlb_miss_slot1_resumes_without_replaying_slot0',
     'dtr_match_ignores_vrn',
     'exception_preserves_translation_bits',
+    'fc_i_above_4g_ram_invalidates_translated_target',
+    'fc_i_high_ram_invalidates_translated_target',
     'fc_i_invalidates_translated_cache_line',
     'fc_i_invalidates_translated_target',
+    'fc_i_unimplemented_physical_address_faults',
     'fetchadd4_alt_dtlb_sets_read_write_isr',
     'firmware_identity_ends_after_iva_handoff',
     'firmware_identity_does_not_override_user_mapping',
@@ -6285,6 +6454,7 @@ CASE_NAMES = (
     'ifetch_page_not_present_fallthrough_records_faulting_iip',
     'interruption_serializes_pending_ptr_d',
     'it_only_keeps_data_physical',
+    'itlb_uses_instruction_translation_after_data_fill',
     'itc_d_4g_page_size_is_insertable',
     'itc_d_clean_page_read_fill_store_raises_dirty_bit',
     'itc_d_clear_accessed_raises_data_access_bit',
@@ -6356,6 +6526,7 @@ CASE_NAMES = (
     'natpage_unaligned_store_outranks_unaligned',
     'natpage_xchg_raises_nat_consumption',
     'unaligned_store_reports_unaligned_when_mapped',
+    'mov_cr_ifa_uda_merced',
     'mov_pkr_duplicate_key_invalidates_old_slot',
     'mov_pkr_indexed_decode',
     'mov_rr_indexed_decode',
@@ -6393,6 +6564,7 @@ CASE_NAMES = (
     'probe_w_register_level_nat_consumption',
     'ptc_e_nat_addr_consumes',
     'ptc_e_purges_data_tc_on_srlz_i',
+    'ptc_e_skips_uda_on_merced',
     'ptc_l_4g_page_size_is_purgeable',
     'ptc_l_does_not_clear_local_alat',
     'ptc_l_keeps_nonoverlapping_tc',
@@ -6449,7 +6621,9 @@ CASE_NAMES = (
     'ssm_pk_invalidates_cached_keyless_access',
     'tak_nat_source_consumes_non_access',
     'tak_not_present_dtlb_returns_one',
+    'tak_unimplemented_va_does_not_alias_short_vhpt',
     'tak_uses_short_vhpt_walk',
+    'thash_same_reg_unimplemented_va_sets_nat',
     'thash_uses_pta_with_walker_disabled',
     'tpa_dt_disabled_miss_raises_alt_dtlb',
     'tpa_dt_disabled_uses_dtlb_entry',

@@ -7,8 +7,20 @@
  */
 
     .section .text._start, "ax"
-    .equ FW_BOOTSTRAP_STACK_TOP, 0x08000000
-    .equ FW_AP_BOOTSTRAP_STACK_TOP, 0x00100000
+    /*
+     * The boot memory stacks live at the top of installed low RAM (see
+     * hw/ia64/ia64_vpc_abi.h).  This file is assembled without the C
+     * preprocessor, so the ABI values are repeated here and must match:
+     * IA64_FW_HANDOFF_ADDR/MAGIC, IA64_PCI_MMIO_BASE, IA64_FW_LOW_RAM_MIN,
+     * IA64_FW_LOW_RAM_ALIGN, and the per-CPU stride below (shl 17 = 128 KiB)
+     * must equal IA64_FW_CPU_STACK_SIZE.
+     */
+    .equ FW_HANDOFF_ADDR, 0x000ff000
+    .equ FW_HANDOFF_MAGIC, 0x4d41523436414951
+    .equ FW_HANDOFF_RAMSIZE_OFFSET, 16
+    .equ FW_PCI_MMIO_BASE, 0xee000000
+    .equ FW_LOW_RAM_MIN, 0x08000000
+    .equ FW_LOW_RAM_ALIGN_MASK, 0x1fff
     .global _start
     .type _start, @function
     .proc _start
@@ -22,14 +34,7 @@ _start:
 (p6) br.cond.sptk.few start_secondary
     ;;
 
-    /*
-     * Use the minimum-memory stack until the machine handoff has been
-     * validated.  start_after_pal moves to the selected RAM-top stack before
-     * entering the C firmware.
-     */
-    movl r12 = (FW_BOOTSTRAP_STACK_TOP - 16)
-    ;;
-
+    /* start_after_pal derives the RAM-top boot stack from the handoff. */
     br.cond.sptk.few start_after_pal
     ;;
     .org 0x60
@@ -175,6 +180,35 @@ fw_debug_exception_entry:
 start_after_pal:
 
     /*
+     * Derive the RAM-top boot stack from the machine handoff block (falling
+     * back to the minimum machine when the handoff is absent).  The C side
+     * (fw_boot_stack_top) recomputes the same value once it is running.
+     */
+    movl r14 = FW_HANDOFF_ADDR
+    ;;
+    ld8 r15 = [r14]
+    adds r16 = FW_HANDOFF_RAMSIZE_OFFSET, r14
+    ;;
+    ld8 r17 = [r16]
+    movl r18 = FW_HANDOFF_MAGIC
+    ;;
+    cmp.eq p6, p7 = r15, r18
+    movl r19 = FW_PCI_MMIO_BASE
+    ;;
+(p7) movl r17 = FW_LOW_RAM_MIN
+    movl r20 = FW_LOW_RAM_ALIGN_MASK
+    ;;
+    cmp.ltu p8, p9 = r19, r17
+    ;;
+(p8) mov r17 = r19
+    ;;
+    andcm r17 = r17, r20
+    ;;
+    adds r12 = -16, r17
+    ;;
+
+
+    /*
      * QEMU reloads the firmware image on reset, but the raw binary does not
      * contain the trailing NOBITS .bss.  Clear it here so guest-requested and
      * monitor-requested resets start with the same firmware state as a fresh
@@ -248,10 +282,30 @@ start_secondary:
     ;;
     extr.u r14 = r14, 24, 8
     ;;
-    shl r15 = r14, 16
-    movl r12 = (FW_AP_BOOTSTRAP_STACK_TOP - 16)
+    shl r15 = r14, 17
+    movl r16 = FW_HANDOFF_ADDR
     ;;
-    sub r12 = r12, r15
+    ld8 r17 = [r16]
+    adds r18 = FW_HANDOFF_RAMSIZE_OFFSET, r16
+    ;;
+    ld8 r19 = [r18]
+    movl r20 = FW_HANDOFF_MAGIC
+    ;;
+    cmp.eq p6, p7 = r17, r20
+    movl r21 = FW_PCI_MMIO_BASE
+    ;;
+(p7) movl r19 = FW_LOW_RAM_MIN
+    movl r22 = FW_LOW_RAM_ALIGN_MASK
+    ;;
+    cmp.ltu p8, p9 = r21, r19
+    ;;
+(p8) mov r19 = r21
+    ;;
+    andcm r19 = r19, r22
+    ;;
+    sub r12 = r19, r15
+    ;;
+    adds r12 = -16, r12
     ;;
     alloc r2 = ar.pfs, 0, 3, 1, 0
     ;;

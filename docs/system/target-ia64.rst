@@ -10,15 +10,16 @@ IA-64 user-mode emulation are not provided.
 Machine profile
 ---------------
 
-``ia64-vpc`` defaults to one Montecito-class CPU, 2 GiB of RAM, an
+``ia64-vpc`` defaults to one Madison-class CPU, 2 GiB of RAM, an
 ATI-compatible PCI display, an e1000 network adapter, LSI53C895A SCSI storage,
-ICH9 AHCI, OHCI/UHCI USB, and PS/2 input.  One to four CPUs are supported, and
+ICH9 AHCI, OHCI/UHCI USB, and PS/2 input.  One to eight CPUs are supported, and
 MTTCG can be selected with ``-accel tcg,thread=multi``.  The machine also
 provides local SAPIC and I/O SAPIC interrupt controllers, ACPI tables, RTC,
 watchdog, NVRAM, serial I/O, and the firmware debug port.
 
-The available CPU generation names are ``madison`` and ``montecito``.
-Montecito is the default.
+The available CPU generation names are ``merced``, ``madison`` and
+``montecito``.  Madison is the default: an Itanium 2 has the widest
+operating-system compatibility across Itanium's lifespan.
 
 Building and running
 --------------------

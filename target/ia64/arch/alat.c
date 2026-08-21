@@ -64,8 +64,8 @@ static bool ia64_ranges_overlap(uint64_t start, uint64_t size,
     return start <= other_end && other_start <= end;
 }
 
-static void ia64_invalidate_alat_phys_range(CPUIA64State *env,
-                                            uint64_t pa, uint64_t size)
+void ia64_invalidate_alat_phys_range(CPUIA64State *env,
+                                     uint64_t pa, uint64_t size)
 {
     uint32_t i;
 

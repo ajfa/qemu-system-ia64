@@ -55,9 +55,26 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
             {
                 WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
                     PosDecode, 0, 0, 0x00FF, 0, 0x0100)
+                // PCI I/O space is 16 bits wide, so the producer window must
+                // stop at 0xFFFF.  Declaring 16 MB here let Windows' PnP I/O
+                // arbiter believe it owned 0x000000-0xFFFFFF and rebalance the
+                // display adapter's I/O BAR to 0x00FFFF00 - a port number no
+                // PCI device can decode and that does not exist in the IA-64
+                // 64 KB I/O port space either.  The miniport then fails to map
+                // its access ranges and the device stops with Code 10.
+                //
+                // The window is declared the way every real IA-64 root bridge
+                // declares it: ports are reached through a sparse memory-
+                // mapped window (4 KB page per 4 ports, SDM vol 2 10.7), so
+                // the translation offset carries the window's physical base
+                // (= the EfiMemoryMappedIoPortSpace descriptor, see
+                // LEGACY_IO_BASE) and the type is Translation + Sparse.
+                // Windows' acpi.sys builds its bridge translator windows and
+                // the HAL port-range handles ((RangeId << 16) | port) from
+                // exactly these fields; Linux fills io_space[] from them.
                 QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                    EntireRange, 0, 0, 0x00FFFFFF, 0, 0x01000000,
-                    , , , TypeStatic, DenseTranslation)
+                    EntireRange, 0, 0, 0x0000FFFF, 0x800010000000,
+                    0x00010000, , , , TypeTranslation, SparseTranslation)
                 // The legacy VGA aperture is decoded to the PCI bus and must
                 // be declared, or the root bridge claims no producer window
                 // covering the range its VGA child reports in _CRS/BARs.
@@ -66,9 +83,22 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 DWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, Cacheable, ReadWrite,
                     0, 0x000A0000, 0x000BFFFF, 0, 0x00020000)
+                // The option-ROM segment must be a producer window too.
+                // Windows' pci.sys validates every HalTranslateBusAddress
+                // against the complement of the root bridge windows
+                // (busdrv/pci/hookhal.c PciTranslateBusAddress: an address
+                // intersecting an Owner==NULL arbiter range "is not on our
+                // bus"), and the inbox ATI miniport's VGA-enabled path maps
+                // its video BIOS at 0xC0000 through exactly that call.
+                // Without this window the translation is refused,
+                // VideoPortGetDeviceBase returns NULL (ati2mpaa event
+                // 0xC1010002 UniqueId 25) and the adapter stops with Code 10.
+                DWordMemory (ResourceProducer, PosDecode, MinFixed,
+                    MaxFixed, Cacheable, ReadWrite,
+                    0, 0x000C0000, 0x000DFFFF, 0, 0x00020000)
                 QWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, NonCacheable, ReadWrite,
-                    0, 0xC1000000, 0xD0FFFFFF, 0, 0x10000000)
+                    0, 0xEE000000, 0xFDFFFFFF, 0, 0x10000000)
             })
             Name (_PRT, Package ()
             {

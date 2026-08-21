@@ -62,14 +62,15 @@
 #define SAL_PTA_DISABLED_VALUE       (15ULL << 2)
 #define SAL_RR_VALUE(Rid) \
     (((UINT64)(Rid) << 8) | ((UINT64)SAL_RR_PREFERRED_PAGE_SHIFT << 2))
-#define SAL_BACKING_STORE_BASE       0x0000000000080000ULL
-#define SAL_BACKING_STORE_END        0x00000000000a0000ULL
+/* Per-CPU initial RSE backing stores live in the RAM-top CPU-assist region. */
+#define SAL_BACKING_STORE_BASE       (mCpuAssistBase + IA64_FW_EARLY_RSE_OFFSET)
+#define SAL_BACKING_STORE_END        (mCpuAssistBase + IA64_FW_EARLY_RSE_END_OFFSET)
 
-#define PCI_OHCI_MMIO_BAR             0xc1010000U
-#define PCI_AHCI_MMIO_BAR             0xc1020000U
-#define PCI_LSI_MMIO_BAR              0xc1030000U
-#define PCI_VGA_FB_BAR                0xc4000000U
-#define PCI_VGA_MMIO_BAR              0xc8000000U
+#define PCI_OHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00010000ULL)
+#define PCI_AHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00020000ULL)
+#define PCI_LSI_MMIO_BAR              (IA64_PCI_MMIO_BASE + 0x00030000ULL)
+#define PCI_VGA_FB_BAR                (IA64_PCI_MMIO_BASE + 0x02000000ULL)
+#define PCI_VGA_MMIO_BAR              (IA64_PCI_MMIO_BASE + 0x07000000ULL)
 #define PCI_VGA_ATI_ID                0x50461002U
 #define PCI_VGA_STD_ID                0x11111234U
 #define PCI_VGA_ATI_FB_SIZE           0x04000000ULL
@@ -80,7 +81,8 @@
 #define ACPI_RECLAIM_TABLE_BASE \
     (ACPI_RECLAIM_BASE + IA64_EFI_MEMORY_ALIGN)
 #define ACPI_RECLAIM_END 0x0000000000820000ULL
-#define IOSAPIC_BASE     0x0000000080110000ULL
+/* 460GX/i2000 SDV SAPIC message block, just below the local SAPIC. */
+#define IOSAPIC_BASE     0x00000000fec00000ULL
 #define IOSAPIC_SIZE     0x0000000000002000ULL
 #define ACPI_PM_IO_BASE  0x00002000U
 #define ACPI_PM1_EVT_OFFSET 0x0U
@@ -121,12 +123,13 @@
 #define FW_LOW_IMAGE_ALIGNED_END (FW_LOW_IMAGE_BASE + FW_LOW_IMAGE_ALIGN)
 #define FW_LOW_IMAGE_END  0x0000000005000000ULL
 /*
- * SAL-style reserved guard page(s) placed exactly at the loader's 80 MB
- * TR-staging line (FW_LOW_IMAGE_END).  This bounds the Windows IA-64 setup
- * loader's [16MB,48MB)-confined heap free-block at 80 MB so its carve-from-end
- * heap stays inside the 16-64 MB loader-TR window (else NTOSKRNL 0x1A).  Real
- * SAL similarly reserves boot structures above the first 64 MB.  Conventional
- * RAM handed to the OS begins just above the guard.
+ * FW_LOW_IMAGE_END (80 MB) is the Windows setup loader's TR-staging line.  It
+ * is a conventional-memory DESCRIPTOR boundary (XP-era sumain.c:760 must not
+ * see a descriptor straddling it), but no longer a reserved guard page: the
+ * heap-carve bound that page provided is the job of the 32 MB split page, and
+ * all RAM from 32 MB up to the RAM-top CPU-assist region is free so loaders
+ * that map with large TRs (Server 2003 SP1 setupldr: one 64 MB page at
+ * [64 MB, 128 MB)) find their region.  See efi_init_memory_map().
  */
 /*
  * Firmware-owned physical stack + RSE backing store used while a virtual-
@@ -134,8 +137,15 @@
  * entry.S).  Lives in the firmware-permanent low RAM below the image base;
  * SAL calls are not re-entrant (SAL spec 3.1, the OS serializes them).
  */
-#define FW_SAL_PHYS_BSTORE_BASE 0x0000000000040000ULL
-#define FW_SAL_PHYS_STACK_TOP   0x000000000005FFF0ULL
+/*
+ * Per-CPU SAL_PROC physical re-entry slots in the CPU-assist area: the
+ * lower half of each slot is the RSE backing store, the upper half the
+ * memory stack.  The dispatch block publishes CPU 0's values; the
+ * emulator-side bridge adds cpu_index * IA64_FW_SAL_RUNTIME_SLOT_SIZE.
+ */
+#define FW_SAL_PHYS_BSTORE_BASE (mCpuAssistBase + IA64_FW_SAL_RUNTIME_OFFSET)
+#define FW_SAL_PHYS_STACK_TOP \
+    (FW_SAL_PHYS_BSTORE_BASE + IA64_FW_SAL_RUNTIME_SLOT_SIZE - 0x10ULL)
 #define FW_LOADER_STAGING_GUARD_SIZE 0x0000000000002000ULL
 #define FW_LOW_RAM_STAGING_BASE (FW_LOW_IMAGE_END + FW_LOADER_STAGING_GUARD_SIZE)
 /*
@@ -161,15 +171,47 @@
  */
 #define FW_LOADER_HEAP_SPLIT_BASE \
     (FW_LOW_IMAGE_BASE - FW_LOADER_HEAP_SPLIT_SIZE)
-#define FW_BOOTSTRAP_STACK_TOP 0x0000000008000000ULL
-#define FW_BOOT_STACK_SIZE     0x0000000000400000ULL
-#define IA64_EFI_MEMORY_ALIGN 0x0000000000002000ULL
+#define FW_BOOT_STACK_SIZE     IA64_FW_BOOT_STACK_SIZE
+#define IA64_EFI_MEMORY_ALIGN IA64_FW_LOW_RAM_ALIGN
 #define IA64_EFI_MIN_STACK_BYTES   0x0000000000020000ULL
 #define IA64_EFI_MIN_BACKING_BYTES 0x0000000000004000ULL
-#define FW_LOW_RUNTIME_IMAGE_BASE 0x0000000008000000ULL
-#define FW_LOW_RAM_LIMIT  0x0000000080000000ULL
-#define FW_HIGH_RAM_BASE  0x0000000080200000ULL
-#define FW_HIGH_RAM_BELOW_PCI_END IA64_PCI_MMIO_BASE
+/*
+ * 8 KiB reserved "SAL boot-structure" anchor at 128 MB (FW_LOW_ANCHOR_BASE).
+ * XP-era kernels (2002/2462/2600) place their Phase-0 allocations and the
+ * PFN database in the largest free descriptor below 256 MB; with low RAM one
+ * unbroken run from the kernel image to the RAM top that descriptor starts
+ * right behind the kernel, inside the loader's 16-80 MB TR window, and
+ * MiInitMachineDependent then VHPT-faults writing the KSEG0 PTEs for it
+ * (bugcheck 0x50, measured on installed XP 2600 UP/SMP and the XP 2002
+ * installer).  A non-free page at 128 MB makes the descriptor above it the
+ * largest low one again, exactly as the old [126 MB, 128 MB) CPU-assist
+ * region did, while leaving [64 MB, 128 MB) free for Server 2003 SP1's 64 MB
+ * kernel large page.  Below a 130 MB machine it falls back to the historical
+ * 80 MB line.  Runtime images load above the anchor.
+ *
+ * The anchor and the Server 2003 loaders are mutually exclusive: the SP1
+ * loader (setupldr/ia64ldr 5.2.3790.1830+) maps the kernel with a 64 MB large
+ * page at [64 MB, 128 MB) and its heap with another at [128 MB, 192 MB), and
+ * it derives the heap base from the first free descriptor at or above 128 MB
+ * - with the anchor there it silently takes 0x8002000, maps it with a 64 MB
+ * identity TR and every KSEG0 address is then off by one page (bugcheck 0xD1
+ * on SharedUserData, measured).  The XP-era kernels need the anchor (see
+ * efi_init_memory_map); the 2003 kernels (RTM measured both ways) do not.  So
+ * the firmware's PE loader drops the anchor when the EFI application it is
+ * about to start carries a VS_FIXEDFILEINFO file version 5.2.3790.0 (Server
+ * 2003 RTM, whose rewritten Mm has no such descriptor-reset path and which
+ * was measured fine without the anchor) or later
+ * (pe_image_wants_contiguous_low_ram); 5.1.x loaders (XP, 2462) keep it.
+ */
+#define FW_LOW_ANCHOR_BASE       0x0000000008000000ULL
+#define FW_LOW_ANCHOR_SIZE       0x0000000000002000ULL
+#define FW_LOW_RUNTIME_IMAGE_BASE 0x0000000008010000ULL
+/*
+ * Low (sub-aperture) DRAM ends at the PCI/MMIO aperture: it runs contiguously
+ * from 0 to here, matching real 460GX, and any RAM beyond it is remapped above
+ * 4 GiB.  There is no sub-4 GiB DRAM island above the aperture.
+ */
+#define FW_LOW_RAM_LIMIT  IA64_PCI_MMIO_BASE
 #define FW_HIGH_RAM_AFTER_PCI_BASE (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE)
 #define FW_LOCAL_SAPIC_BASE 0x00000000fee00000ULL
 #define FW_LOCAL_SAPIC_SIZE 0x0000000000200000ULL
@@ -190,7 +232,7 @@
 #define FW_NVRAM_COMMIT_MAGIC 0x54494d4d4f43564eULL /* "NVCOMMIT" */
 #define FW_HIGH_RAM_RANGE_MAX 3U
 #define FW_MEMORY_AFFINITY_MAX (1U + FW_HIGH_RAM_RANGE_MAX)
-#define FW_AP_STACK_SIZE  (FW_BOOT_STACK_SIZE / FW_MAX_CPUS)
+#define FW_AP_STACK_SIZE  IA64_FW_CPU_STACK_SIZE
 #define FW_SYSTEM_TABLE_POINTER_ALIGN 0x0000000000400000ULL
 #define FW_SYSTEM_TABLE_POINTER_SIZE  0x0000000000001000ULL
 #define EFI_MEMORY_UC     0x0000000000000001ULL
@@ -1158,12 +1200,12 @@ typedef struct {
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[623];
+    UINT8 Aml[649];
 } __attribute__((packed)) ACPI_DSDT;
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[368];
+    UINT8 Aml[496];
 } __attribute__((packed)) ACPI_SSDT;
 
 typedef struct {
@@ -1710,31 +1752,54 @@ FW_STATIC_ASSERT(FW_BOOT_STACK_SIZE >=
 FW_STATIC_ASSERT(FW_AP_STACK_SIZE >=
                  IA64_EFI_MIN_STACK_BYTES,
                  efi_ap_stack_capacity);
-FW_STATIC_ASSERT((SAL_BACKING_STORE_BASE & 7U) == 0,
+FW_STATIC_ASSERT(IA64_FW_SAL_RUNTIME_END_OFFSET <=
+                 IA64_FW_DEBUG_CONTEXT_OFFSET,
+                 sal_debug_context_disjoint);
+FW_STATIC_ASSERT(IA64_FW_DEBUG_CONTEXT_SIZE <=
+                 IA64_FW_DEBUG_CONTEXT_STRIDE,
+                 debug_context_stride_capacity);
+FW_STATIC_ASSERT(IA64_FW_DEBUG_CONTEXT_END_OFFSET <=
+                 IA64_FW_DEBUG_STACK_OFFSET,
+                 debug_context_stack_disjoint);
+FW_STATIC_ASSERT(IA64_FW_DEBUG_STACK_END_OFFSET <= IA64_FW_EARLY_RSE_OFFSET,
+                 debug_stack_rse_disjoint);
+FW_STATIC_ASSERT(IA64_FW_EARLY_RSE_END_OFFSET <= IA64_FW_BOOT_STACK_OFFSET,
+                 early_rse_boot_stack_disjoint);
+FW_STATIC_ASSERT(IA64_FW_BOOT_STACK_OFFSET + IA64_FW_BOOT_STACK_SIZE ==
+                 IA64_FW_CPU_ASSIST_SIZE,
+                 boot_stack_tops_cpu_assist);
+FW_STATIC_ASSERT((IA64_FW_CPU_ASSIST_SIZE & (IA64_FW_LOW_RAM_ALIGN - 1U)) == 0,
+                 cpu_assist_alignment);
+FW_STATIC_ASSERT(IA64_FW_LOW_RAM_MIN >= IA64_FW_CPU_ASSIST_SIZE,
+                 cpu_assist_fits_minimum_ram);
+FW_STATIC_ASSERT(IA64_FW_SAL_RUNTIME_SLOT_SIZE / 2U >=
+                 IA64_EFI_MIN_BACKING_BYTES,
+                 sal_runtime_slot_capacity);
+FW_STATIC_ASSERT((IA64_FW_EARLY_RSE_OFFSET & 7U) == 0,
                  sal_backing_store_alignment);
-FW_STATIC_ASSERT(SAL_BACKING_STORE_END > SAL_BACKING_STORE_BASE,
+FW_STATIC_ASSERT(IA64_FW_EARLY_RSE_END_OFFSET > IA64_FW_EARLY_RSE_OFFSET,
                  sal_backing_store_order);
-FW_STATIC_ASSERT((SAL_BACKING_STORE_END - SAL_BACKING_STORE_BASE) /
+FW_STATIC_ASSERT((IA64_FW_EARLY_RSE_END_OFFSET - IA64_FW_EARLY_RSE_OFFSET) /
                  FW_MAX_CPUS >= IA64_EFI_MIN_BACKING_BYTES,
-                 sal_ap_backing_store_capacity);
+                 sal_backing_store_capacity);
 FW_STATIC_ASSERT(sizeof(ACPI_FADT) == 244, acpi_fadt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 100, acpi_xsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 68, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
-FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 659, acpi_dsdt_size);
-FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 404, acpi_ssdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 685, acpi_dsdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 532, acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG) == 60, acpi_mcfg_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MADT_LSAPIC) == 12, acpi_madt_lsapic_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MADT_IOSAPIC) == 16, acpi_madt_iosapic_size);
-FW_STATIC_ASSERT(sizeof(ACPI_MADT) == 108, acpi_madt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_MADT) == 156, acpi_madt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_SRAT_PROCESSOR_AFFINITY) == 16,
                  acpi_srat_processor_affinity_size);
 FW_STATIC_ASSERT(sizeof(ACPI_SRAT_MEMORY_AFFINITY) == 40,
                  acpi_srat_memory_affinity_size);
-FW_STATIC_ASSERT(sizeof(ACPI_SRAT) == 272, acpi_srat_size);
+FW_STATIC_ASSERT(sizeof(ACPI_SRAT) == 336, acpi_srat_size);
 FW_STATIC_ASSERT(sizeof(ACPI_SLIT) == 45, acpi_slit_size);
 FW_STATIC_ASSERT(sizeof(ACPI_GENERIC_ADDRESS) == 12, acpi_gas_size);
 FW_STATIC_ASSERT(sizeof(HCDP_UART_DESCRIPTOR) == 48, acpi_hcdp_uart_size);
@@ -1819,12 +1884,18 @@ FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE127_END_OF_TABLE) == 4,
 #define PLATFORM_TABLE_INITIAL       6
 #define PLATFORM_TABLE_MAX           16
 #define LOADED_IMAGE_MAX             8
-#define SMBIOS_TABLE_MAX_SIZE        1024U
+#define SMBIOS_TABLE_MAX_SIZE        4096U
 static EFI_CONFIGURATION_TABLE mConfigTables[PLATFORM_TABLE_MAX];
 static EFI_SYSTEM_TABLE_POINTER *mSystemTablePointer;
 static UINT64                   mSystemTablePointerBase;
 static UINT64                   mBootStackBase;
 static UINT64                   mBootStackTop;
+/* Base of the 2 MiB RAM-top CPU-assist region (IA64_FW_CPU_ASSIST_BASE_FOR). */
+static UINT64                   mCpuAssistBase;
+
+static UINT64 fw_low_anchor_base(void);
+/* The anchor is a soft reservation: see efi_release_low_anchor_if_claimed(). */
+static BOOLEAN                  mLowAnchorArmed;
 static EFI_DEBUG_IMAGE_INFO_TABLE_HEADER mDebugImageInfoHeader;
 static EFI_DEBUG_IMAGE_INFO mDebugImageInfoTable[LOADED_IMAGE_MAX + 1U];
 static EFI_DEBUG_IMAGE_INFO_NORMAL mDebugImageInfoNormal[LOADED_IMAGE_MAX + 1U];
@@ -1855,117 +1926,171 @@ static ACPI_FACS               mFacs __attribute__((aligned(64)));
  */
 static ACPI_DSDT               mDsdt = {
     .Aml = {
-    /* Name (_S5, Package (0x04) { 0x00, 0x00, 0x00, 0x00 }) */
     0x08, 0x5f, 0x53, 0x35, 0x5f, 0x12, 0x0a, 0x04, 0x0a, 0x00, 0x0a, 0x00,
-    0x0a, 0x00, 0x0a, 0x00, 0x10, 0x4e, 0x25, 0x5c, 0x5f, 0x53, 0x42, 0x5f,
-    0x5b, 0x82, 0x45, 0x25, 0x50, 0x43, 0x49, 0x30, 0x08, 0x5f, 0x48, 0x49,
+    0x0a, 0x00, 0x0a, 0x00, 0x10, 0x48, 0x27, 0x5c, 0x5f, 0x53, 0x42, 0x5f,
+    0x5b, 0x82, 0x4f, 0x26, 0x50, 0x43, 0x49, 0x30, 0x08, 0x5f, 0x48, 0x49,
     0x44, 0x0d, 0x50, 0x4e, 0x50, 0x30, 0x41, 0x30, 0x33, 0x00, 0x08, 0x5f,
     0x43, 0x49, 0x44, 0x0d, 0x50, 0x4e, 0x50, 0x30, 0x41, 0x30, 0x33, 0x00,
     0x08, 0x5f, 0x53, 0x45, 0x47, 0x00, 0x08, 0x5f, 0x42, 0x42, 0x4e, 0x00,
     0x08, 0x5f, 0x55, 0x49, 0x44, 0x00, 0x08, 0x5f, 0x43, 0x43, 0x41, 0x01,
-    0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x4c, 0x08, 0x0a, 0x88, 0x88, 0x0d,
+    0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x46, 0x0a, 0x0a, 0xa2, 0x88, 0x0d,
     0x00, 0x02, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
-    0x00, 0x01, 0x8a, 0x2b, 0x00, 0x01, 0x0c, 0x03, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x8a, 0x2b, 0x00, 0x01, 0x0c, 0x33, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+    0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+    0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x87, 0x17, 0x00, 0x00, 0x0c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x0a, 0x00, 0xff, 0xff, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x02, 0x00, 0x8a, 0x2b, 0x00, 0x00, 0x0c, 0x01, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc1, 0x00, 0x00, 0x00, 0x00,
-    0xff, 0xff, 0xff, 0xd0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
-    0x79, 0x00, 0x08, 0x5f, 0x50, 0x52, 0x54, 0x12, 0x43, 0x18, 0x1c, 0x12,
-    0x0b, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x00, 0x0a, 0x00, 0x0a, 0x10, 0x12,
-    0x0b, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x01, 0x0a, 0x00, 0x0a, 0x11, 0x12,
-    0x0b, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x02, 0x0a, 0x00, 0x0a, 0x12, 0x12,
-    0x0b, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x03, 0x0a, 0x00, 0x0a, 0x13, 0x12,
-    0x0d, 0x04, 0x0c, 0xff, 0xff, 0x01, 0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0a,
-    0x11, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x01, 0x00, 0x0a, 0x01, 0x0a,
-    0x00, 0x0a, 0x12, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x01, 0x00, 0x0a,
-    0x02, 0x0a, 0x00, 0x0a, 0x13, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x01,
-    0x00, 0x0a, 0x03, 0x0a, 0x00, 0x0a, 0x10, 0x12, 0x0d, 0x04, 0x0c, 0xff,
-    0xff, 0x02, 0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0a, 0x12, 0x12, 0x0d, 0x04,
-    0x0c, 0xff, 0xff, 0x02, 0x00, 0x0a, 0x01, 0x0a, 0x00, 0x0a, 0x13, 0x12,
-    0x0d, 0x04, 0x0c, 0xff, 0xff, 0x02, 0x00, 0x0a, 0x02, 0x0a, 0x00, 0x0a,
-    0x10, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x02, 0x00, 0x0a, 0x03, 0x0a,
-    0x00, 0x0a, 0x11, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x03, 0x00, 0x0a,
-    0x00, 0x0a, 0x00, 0x0a, 0x13, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x03,
-    0x00, 0x0a, 0x01, 0x0a, 0x00, 0x0a, 0x10, 0x12, 0x0d, 0x04, 0x0c, 0xff,
-    0xff, 0x03, 0x00, 0x0a, 0x02, 0x0a, 0x00, 0x0a, 0x11, 0x12, 0x0d, 0x04,
-    0x0c, 0xff, 0xff, 0x03, 0x00, 0x0a, 0x03, 0x0a, 0x00, 0x0a, 0x12, 0x12,
-    0x0d, 0x04, 0x0c, 0xff, 0xff, 0x04, 0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0a,
-    0x10, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x04, 0x00, 0x0a, 0x01, 0x0a,
-    0x00, 0x0a, 0x11, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x04, 0x00, 0x0a,
-    0x02, 0x0a, 0x00, 0x0a, 0x12, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x04,
-    0x00, 0x0a, 0x03, 0x0a, 0x00, 0x0a, 0x13, 0x12, 0x0d, 0x04, 0x0c, 0xff,
-    0xff, 0x05, 0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0a, 0x11, 0x12, 0x0d, 0x04,
-    0x0c, 0xff, 0xff, 0x05, 0x00, 0x0a, 0x01, 0x0a, 0x00, 0x0a, 0x12, 0x12,
-    0x0d, 0x04, 0x0c, 0xff, 0xff, 0x05, 0x00, 0x0a, 0x02, 0x0a, 0x00, 0x0a,
-    0x13, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x05, 0x00, 0x0a, 0x03, 0x0a,
-    0x00, 0x0a, 0x10, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x06, 0x00, 0x0a,
-    0x00, 0x0a, 0x00, 0x0a, 0x12, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x06,
-    0x00, 0x0a, 0x01, 0x0a, 0x00, 0x0a, 0x13, 0x12, 0x0d, 0x04, 0x0c, 0xff,
-    0xff, 0x06, 0x00, 0x0a, 0x02, 0x0a, 0x00, 0x0a, 0x10, 0x12, 0x0d, 0x04,
-    0x0c, 0xff, 0xff, 0x06, 0x00, 0x0a, 0x03, 0x0a, 0x00, 0x0a, 0x11,
+    0x02, 0x00, 0x87, 0x17, 0x00, 0x00, 0x0c, 0x03, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x0c, 0x00, 0xff, 0xff, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x02, 0x00, 0x8a, 0x2b, 0x00, 0x00, 0x0c, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xee, 0x00, 0x00,
+    0x00, 0x00, 0xff, 0xff, 0xff, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
+    0x00, 0x00, 0x79, 0x00, 0x08, 0x5f, 0x50, 0x52, 0x54, 0x12, 0x43, 0x18,
+    0x1c, 0x12, 0x0b, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x00, 0x0a, 0x00, 0x0a,
+    0x10, 0x12, 0x0b, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x01, 0x0a, 0x00, 0x0a,
+    0x11, 0x12, 0x0b, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x02, 0x0a, 0x00, 0x0a,
+    0x12, 0x12, 0x0b, 0x04, 0x0b, 0xff, 0xff, 0x0a, 0x03, 0x0a, 0x00, 0x0a,
+    0x13, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x01, 0x00, 0x0a, 0x00, 0x0a,
+    0x00, 0x0a, 0x11, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x01, 0x00, 0x0a,
+    0x01, 0x0a, 0x00, 0x0a, 0x12, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x01,
+    0x00, 0x0a, 0x02, 0x0a, 0x00, 0x0a, 0x13, 0x12, 0x0d, 0x04, 0x0c, 0xff,
+    0xff, 0x01, 0x00, 0x0a, 0x03, 0x0a, 0x00, 0x0a, 0x10, 0x12, 0x0d, 0x04,
+    0x0c, 0xff, 0xff, 0x02, 0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0a, 0x12, 0x12,
+    0x0d, 0x04, 0x0c, 0xff, 0xff, 0x02, 0x00, 0x0a, 0x01, 0x0a, 0x00, 0x0a,
+    0x13, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x02, 0x00, 0x0a, 0x02, 0x0a,
+    0x00, 0x0a, 0x10, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x02, 0x00, 0x0a,
+    0x03, 0x0a, 0x00, 0x0a, 0x11, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x03,
+    0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0a, 0x13, 0x12, 0x0d, 0x04, 0x0c, 0xff,
+    0xff, 0x03, 0x00, 0x0a, 0x01, 0x0a, 0x00, 0x0a, 0x10, 0x12, 0x0d, 0x04,
+    0x0c, 0xff, 0xff, 0x03, 0x00, 0x0a, 0x02, 0x0a, 0x00, 0x0a, 0x11, 0x12,
+    0x0d, 0x04, 0x0c, 0xff, 0xff, 0x03, 0x00, 0x0a, 0x03, 0x0a, 0x00, 0x0a,
+    0x12, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x04, 0x00, 0x0a, 0x00, 0x0a,
+    0x00, 0x0a, 0x10, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x04, 0x00, 0x0a,
+    0x01, 0x0a, 0x00, 0x0a, 0x11, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x04,
+    0x00, 0x0a, 0x02, 0x0a, 0x00, 0x0a, 0x12, 0x12, 0x0d, 0x04, 0x0c, 0xff,
+    0xff, 0x04, 0x00, 0x0a, 0x03, 0x0a, 0x00, 0x0a, 0x13, 0x12, 0x0d, 0x04,
+    0x0c, 0xff, 0xff, 0x05, 0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0a, 0x11, 0x12,
+    0x0d, 0x04, 0x0c, 0xff, 0xff, 0x05, 0x00, 0x0a, 0x01, 0x0a, 0x00, 0x0a,
+    0x12, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x05, 0x00, 0x0a, 0x02, 0x0a,
+    0x00, 0x0a, 0x13, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x05, 0x00, 0x0a,
+    0x03, 0x0a, 0x00, 0x0a, 0x10, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x06,
+    0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0a, 0x12, 0x12, 0x0d, 0x04, 0x0c, 0xff,
+    0xff, 0x06, 0x00, 0x0a, 0x01, 0x0a, 0x00, 0x0a, 0x13, 0x12, 0x0d, 0x04,
+    0x0c, 0xff, 0xff, 0x06, 0x00, 0x0a, 0x02, 0x0a, 0x00, 0x0a, 0x10, 0x12,
+    0x0d, 0x04, 0x0c, 0xff, 0xff, 0x06, 0x00, 0x0a, 0x03, 0x0a, 0x00, 0x0a,
+    0x11,
     },
 };
 static ACPI_SSDT               mSsdt = {
     .Aml = {
         /*
-         * Source: ssdt-platform-devices.asl
+         * Source: ssdt-platform-devices.asl (compile with iasl -on so the
+         * encoding stays byte-identical; every patchable value must remain
+         * an AML BytePrefix object).
          *
-         * Scope (\_SB) contains CPU0..CPU3 and patchable _STA values.
-         * Scope (\_SB.PCI0) {
-         *   Name (P2EN, 0x0F)
-         *   Device (UAR0) { _HID PNP0501;
-         *     _CRS { QWordMemory UART; level/active-low/shared GSI 4 } }
-         *   Device (PS2K) { _HID PNP0303; _STA { Return (P2EN) };
-         *                   _CRS { IO 0x60; IO 0x64; IRQ 1 } }
-         *   Device (PS2M) { _HID PNP0F13; _STA { Return (P2EN) };
-         *                   _CRS { IRQ 12 } }
-         * }
+         * Scope (\_SB) contains CPU0..CPU7 with patchable CxEN _STA values.
+         * Scope (\_SB.PCI0) carries P2EN, UAR0 (PNP0501, GSI 4), PS2K and
+         * PS2M gated on P2EN.
          */
         0xa0, 0x0f, 0x00, 0x15, 0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x50, 0x43,
-        0x49, 0x30, 0x06, 0x00, 0x10, 0x47, 0x08, 0x5c, 0x5f, 0x53, 0x42, 0x5f,
+        0x49, 0x30, 0x06, 0x00, 0x10, 0x47, 0x10, 0x5c, 0x5f, 0x53, 0x42, 0x5f,
         0x08, 0x43, 0x30, 0x45, 0x4e, 0x0a, 0x0f, 0x08, 0x43, 0x31, 0x45, 0x4e,
         0x0a, 0x0f, 0x08, 0x43, 0x32, 0x45, 0x4e, 0x0a, 0x0f, 0x08, 0x43, 0x33,
-        0x45, 0x4e, 0x0a, 0x0f, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x30, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x43, 0x30,
-        0x45, 0x4e, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x31, 0x01, 0x00, 0x00,
+        0x45, 0x4e, 0x0a, 0x0f, 0x08, 0x43, 0x34, 0x45, 0x4e, 0x0a, 0x0f, 0x08,
+        0x43, 0x35, 0x45, 0x4e, 0x0a, 0x0f, 0x08, 0x43, 0x36, 0x45, 0x4e, 0x0a,
+        0x0f, 0x08, 0x43, 0x37, 0x45, 0x4e, 0x0a, 0x0f, 0x5b, 0x83, 0x17, 0x43,
+        0x50, 0x55, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x0b, 0x5f,
+        0x53, 0x54, 0x41, 0x00, 0xa4, 0x43, 0x30, 0x45, 0x4e, 0x5b, 0x83, 0x17,
+        0x43, 0x50, 0x55, 0x31, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x0b,
+        0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x43, 0x31, 0x45, 0x4e, 0x5b, 0x83,
+        0x17, 0x43, 0x50, 0x55, 0x32, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14,
+        0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x43, 0x32, 0x45, 0x4e, 0x5b,
+        0x83, 0x17, 0x43, 0x50, 0x55, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x43, 0x33, 0x45, 0x4e,
+        0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x34, 0x04, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x43, 0x34, 0x45,
+        0x4e, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x35, 0x05, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x43, 0x35,
+        0x45, 0x4e, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x36, 0x06, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x43,
-        0x31, 0x45, 0x4e, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x32, 0x02, 0x00,
+        0x36, 0x45, 0x4e, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x37, 0x07, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4,
-        0x43, 0x32, 0x45, 0x4e, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x33, 0x03,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00,
-        0xa4, 0x43, 0x33, 0x45, 0x4e,
-        0x10, 0x47, 0x0d, 0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x50, 0x43, 0x49,
-        0x30, 0x08, 0x50, 0x32, 0x45, 0x4e, 0x0a, 0x0f,
-        0x5b, 0x82, 0x4c, 0x05, 0x55, 0x41, 0x52, 0x30, 0x08, 0x5f, 0x48,
-        0x49, 0x44, 0x0d, 0x50, 0x4e, 0x50, 0x30, 0x35, 0x30, 0x31, 0x00, 0x08,
-        0x5f, 0x55, 0x49, 0x44, 0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x3c,
-        0x0a, 0x39, 0x8a, 0x2b, 0x00, 0x00, 0x0d, 0x01, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00,
-        0x07, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x89, 0x06, 0x00, 0x0d, 0x01, 0x04, 0x00, 0x00, 0x00, 0x79, 0x00,
-        0x5b, 0x82, 0x39, 0x50, 0x53, 0x32, 0x4b,
-        0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x03, 0x03, 0x14, 0x0b,
-        0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x50, 0x32, 0x45, 0x4e, 0x08, 0x5f,
-        0x43, 0x52, 0x53, 0x11, 0x18, 0x0a, 0x15, 0x47, 0x01, 0x60, 0x00, 0x60,
-        0x00, 0x01, 0x01, 0x47, 0x01, 0x64, 0x00, 0x64, 0x00, 0x01, 0x01, 0x22,
-        0x02, 0x00, 0x79, 0x00, 0x5b, 0x82, 0x29, 0x50, 0x53, 0x32, 0x4d, 0x08,
-        0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0f, 0x13, 0x14, 0x0b, 0x5f,
-        0x53, 0x54, 0x41, 0x00, 0xa4, 0x50, 0x32, 0x45, 0x4e, 0x08, 0x5f, 0x43,
-        0x52, 0x53, 0x11, 0x08, 0x0a, 0x05, 0x22, 0x00, 0x10, 0x79, 0x00,
+        0x43, 0x37, 0x45, 0x4e, 0x10, 0x47, 0x0d, 0x5c, 0x2e, 0x5f, 0x53, 0x42,
+        0x5f, 0x50, 0x43, 0x49, 0x30, 0x08, 0x50, 0x32, 0x45, 0x4e, 0x0a, 0x0f,
+        0x5b, 0x82, 0x4c, 0x05, 0x55, 0x41, 0x52, 0x30, 0x08, 0x5f, 0x48, 0x49,
+        0x44, 0x0d, 0x50, 0x4e, 0x50, 0x30, 0x35, 0x30, 0x31, 0x00, 0x08, 0x5f,
+        0x55, 0x49, 0x44, 0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x3c, 0x0a,
+        0x39, 0x8a, 0x2b, 0x00, 0x00, 0x0d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00, 0x07,
+        0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x89,
+        0x06, 0x00, 0x0d, 0x01, 0x04, 0x00, 0x00, 0x00, 0x79, 0x00, 0x5b, 0x82,
+        0x39, 0x50, 0x53, 0x32, 0x4b, 0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41,
+        0xd0, 0x03, 0x03, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x50,
+        0x32, 0x45, 0x4e, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x18, 0x0a, 0x15,
+        0x47, 0x01, 0x60, 0x00, 0x60, 0x00, 0x01, 0x01, 0x47, 0x01, 0x64, 0x00,
+        0x64, 0x00, 0x01, 0x01, 0x22, 0x02, 0x00, 0x79, 0x00, 0x5b, 0x82, 0x29,
+        0x50, 0x53, 0x32, 0x4d, 0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0,
+        0x0f, 0x13, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x50, 0x32,
+        0x45, 0x4e, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x08, 0x0a, 0x05, 0x22,
+        0x00, 0x10, 0x79, 0x00,
     },
 };
-#define SSDT_CPU0_ENABLED_OFFSET 30U
-#define SSDT_CPU1_ENABLED_OFFSET 37U
-#define SSDT_CPU2_ENABLED_OFFSET 44U
-#define SSDT_CPU3_ENABLED_OFFSET 51U
-#define SSDT_PS2_ENABLED_OFFSET 171U
+/*
+ * The patchable SSDT bytes are byte-encoded Name objects (NameOp, 4-char
+ * name, BytePrefix, value).  Locate them by name instead of by raw offset
+ * so an AML edit cannot silently shift the patch targets.
+ */
+static const UINT8 mSsdtCpuEnabledNames[IA64_VPC_MAX_CPUS][4] = {
+    { 'C', '0', 'E', 'N' },
+    { 'C', '1', 'E', 'N' },
+    { 'C', '2', 'E', 'N' },
+    { 'C', '3', 'E', 'N' },
+    { 'C', '4', 'E', 'N' },
+    { 'C', '5', 'E', 'N' },
+    { 'C', '6', 'E', 'N' },
+    { 'C', '7', 'E', 'N' },
+};
+static const UINT8 mSsdtPs2EnabledName[4] = { 'P', '2', 'E', 'N' };
+
+static UINT8 *acpi_ssdt_named_byte(ACPI_SSDT *Ssdt, const UINT8 Name[4])
+{
+    UINTN i;
+
+    for (i = 0; i + 6U < sizeof(Ssdt->Aml); i++) {
+        if (Ssdt->Aml[i] == 0x08U &&
+            Ssdt->Aml[i + 1U] == Name[0] &&
+            Ssdt->Aml[i + 2U] == Name[1] &&
+            Ssdt->Aml[i + 3U] == Name[2] &&
+            Ssdt->Aml[i + 4U] == Name[3] &&
+            Ssdt->Aml[i + 5U] == 0x0aU) {
+            return &Ssdt->Aml[i + 6U];
+        }
+    }
+    return NULL;
+}
+
+static BOOLEAN acpi_ssdt_set_named_byte(ACPI_SSDT *Ssdt,
+                                        const UINT8 Name[4], UINT8 Value)
+{
+    UINT8 *value = acpi_ssdt_named_byte(Ssdt, Name);
+
+    if (value == NULL) {
+        return 0;
+    }
+    *value = Value;
+    return 1;
+}
+
+static BOOLEAN acpi_ssdt_named_byte_is(ACPI_SSDT *Ssdt,
+                                       const UINT8 Name[4], UINT8 Value)
+{
+    const UINT8 *value = acpi_ssdt_named_byte(Ssdt, Name);
+
+    return value != NULL && *value == Value;
+}
 static ACPI_MCFG               mMcfg;
 static ACPI_MADT               mMadt;
 static ACPI_SRAT               mSrat;
@@ -2164,14 +2289,14 @@ static void fw_init_guest_high_ram_ranges(UINT64 RamSize)
         mGuestHighRam[i].End = 0;
     }
 
-    /* Consume installed RAM across the same platform holes used by QEMU. */
+    /*
+     * Match real 460GX: low DRAM is contiguous from 0 to the PCI/MMIO aperture
+     * (mGuestLowRamEnd), and anything displaced by the top-of-memory gap is
+     * remapped ABOVE 4 GiB.  There is no sub-4 GiB DRAM island above the
+     * aperture.  (Keep this in lockstep with ia64_vpc_map_ram() in
+     * hw/ia64/ia64_vpc.c.)
+     */
     remaining = RamSize > mGuestLowRamEnd ? RamSize - mGuestLowRamEnd : 0;
-    fw_add_guest_high_ram_range(FW_HIGH_RAM_BASE,
-                                FW_HIGH_RAM_BELOW_PCI_END,
-                                &remaining);
-    fw_add_guest_high_ram_range(FW_HIGH_RAM_AFTER_PCI_BASE,
-                                FW_LOCAL_SAPIC_BASE,
-                                &remaining);
     fw_add_guest_high_ram_range(FW_FIRMWARE_ADDRESS_SPACE_END,
                                 ~0ULL, &remaining);
 }
@@ -2197,8 +2322,8 @@ UINT64 fw_boot_stack_top(void)
      * itself called on that bootstrap stack.
      */
     if (!fw_handoff_low_ram_end(&low_ram_end) ||
-        low_ram_end < FW_BOOTSTRAP_STACK_TOP) {
-        return FW_BOOTSTRAP_STACK_TOP;
+        low_ram_end < IA64_FW_LOW_RAM_MIN) {
+        return IA64_FW_LOW_RAM_MIN;
     }
     return low_ram_end & ~(IA64_EFI_MEMORY_ALIGN - 1U);
 }
@@ -2362,7 +2487,7 @@ BOOLEAN fw_handoff_nvram_persistent(void)
 UINT64 fw_ap_stack_top(UINT64 ProcessorId)
 {
     if (ProcessorId == 0 || ProcessorId >= FW_MAX_CPUS) {
-        return FW_BOOTSTRAP_STACK_TOP;
+        return fw_boot_stack_top();
     }
     return fw_boot_stack_top() - ProcessorId * FW_AP_STACK_SIZE;
 }
@@ -2381,6 +2506,11 @@ static UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
     if (base < BootStackTop &&
         base + FW_SYSTEM_TABLE_POINTER_SIZE > BootStackBase) {
         base = (BootStackBase - FW_SYSTEM_TABLE_POINTER_SIZE) &
+               ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
+    }
+    if (base < mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE &&
+        base + FW_SYSTEM_TABLE_POINTER_SIZE > mCpuAssistBase) {
+        base = (mCpuAssistBase - FW_SYSTEM_TABLE_POINTER_SIZE) &
                ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
     }
     if (base <= FW_LOW_IMAGE_END ||
@@ -2859,6 +2989,7 @@ static EFI_STATUS fw_loaded_image_source_paths(
 static BOOLEAN fw_iso_init(void);
 static BOOLEAN fw_udf_init(void);
 static BOOLEAN fw_boot_fat_available(void);
+static BOOLEAN fw_boot_optical_fs_available(void);
 static void ahci_stop_all_ports(void);
 static EFI_STATUS fw_load_image_source_from_device_path(
     BOOLEAN BootPolicy, void *DevicePath, VOID **SourceBuffer,
@@ -7726,6 +7857,23 @@ static BOOLEAN efi_find_max_pages(UINT64 MaxAddress, UINT64 Size,
     return 0;
 }
 
+static void efi_coalesce_memory_map(void);
+
+/* See FW_LOW_ANCHOR_BASE: give the anchor page back to conventional memory. */
+static void efi_release_low_anchor(void)
+{
+    UINT64 anchor = fw_low_anchor_base();
+
+    if (!mLowAnchorArmed) {
+        return;
+    }
+    if (efi_mark_memory_range(EfiConventionalMemory, anchor,
+                              anchor + FW_LOW_ANCHOR_SIZE, EFI_MEMORY_WB)) {
+        mLowAnchorArmed = 0;
+        efi_coalesce_memory_map();
+    }
+}
+
 EFI_STATUS bs_allocate_pages(EFI_ALLOCATE_TYPE Type, EFI_MEMORY_TYPE MemoryType,
                                      UINTN Pages, EFI_PHYSICAL_ADDRESS *Memory)
 {
@@ -10739,13 +10887,14 @@ EFI_STATUS bs_protocols_per_handle(EFI_HANDLE Handle, void ***ProtocolBuffer,
 
     if (Handle == mRawBlockIoHandle) {
         count += 3;
-        if (fw_udf_init() || fw_iso_init()) {
+        if ((fw_udf_init() || fw_iso_init()) &&
+            !fw_boot_optical_fs_available()) {
             count++;
         }
     }
     if (Handle == mBlockIoHandle) {
         count += 3;
-        if (fw_boot_fat_available()) {
+        if (fw_boot_fat_available() || fw_boot_optical_fs_available()) {
             count++;
         }
     }
@@ -10797,7 +10946,8 @@ EFI_STATUS bs_protocols_per_handle(EFI_HANDLE Handle, void ***ProtocolBuffer,
     if (Handle == mRawBlockIoHandle) {
         buffer[count++] = (void *)mBlockIoProtocolGuid;
         buffer[count++] = (void *)mDiskIoProtocolGuid;
-        if (fw_udf_init() || fw_iso_init()) {
+        if ((fw_udf_init() || fw_iso_init()) &&
+            !fw_boot_optical_fs_available()) {
             buffer[count++] = (void *)mSimpleFileSystemProtocolGuid;
         }
         buffer[count++] = (void *)mDevicePathProtocolGuid;
@@ -10805,7 +10955,7 @@ EFI_STATUS bs_protocols_per_handle(EFI_HANDLE Handle, void ***ProtocolBuffer,
     if (Handle == mBlockIoHandle) {
         buffer[count++] = (void *)mBlockIoProtocolGuid;
         buffer[count++] = (void *)mDiskIoProtocolGuid;
-        if (fw_boot_fat_available()) {
+        if (fw_boot_fat_available() || fw_boot_optical_fs_available()) {
             buffer[count++] = (void *)mSimpleFileSystemProtocolGuid;
         }
         buffer[count++] = (void *)mDevicePathProtocolGuid;
@@ -12569,62 +12719,25 @@ static BOOLEAN efi_memory_map_covers_range(EFI_MEMORY_TYPE Type,
     return 0;
 }
 
-static BOOLEAN efi_memory_map_has_range_or_empty(EFI_MEMORY_TYPE Type,
-                                                 UINT64 Start, UINT64 End,
-                                                 UINT64 Attribute)
-{
-    return Start >= End ||
-           efi_memory_map_has_descriptor(Type, Start, End, Attribute);
-}
-
 static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
 {
     UINT64 pointer_start = mSystemTablePointerBase;
     UINT64 pointer_end = pointer_start + FW_SYSTEM_TABLE_POINTER_SIZE;
 
-    if (!efi_memory_map_has_descriptor(EfiRuntimeServicesData,
-                                       mBootStackBase,
-                                       mBootStackTop,
-                                       EFI_MEMORY_WB | EFI_MEMORY_RUNTIME)) {
+    if (!efi_memory_map_has_descriptor(
+            EfiRuntimeServicesData,
+            mCpuAssistBase, mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE,
+            EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
+        !efi_memory_map_covers_range(
+            EfiRuntimeServicesData, mBootStackBase, mBootStackTop,
+            EFI_MEMORY_WB | EFI_MEMORY_RUNTIME)) {
         return 0;
     }
 
-    if (pointer_start == 0) {
-        return efi_memory_map_has_descriptor(
-                   EfiConventionalMemory, FW_LOW_RAM_STAGING_BASE,
-                   mBootStackBase, EFI_MEMORY_WB) &&
-               efi_memory_map_has_range_or_empty(
-                   EfiConventionalMemory, mBootStackTop,
-                   mGuestLowRamEnd, EFI_MEMORY_WB);
-    }
-
-    if (!efi_memory_map_has_descriptor(EfiReservedMemoryType,
-                                       pointer_start, pointer_end,
-                                       EFI_MEMORY_WB)) {
-        return 0;
-    }
-
-    if (pointer_start < mBootStackBase) {
-        return efi_memory_map_has_range_or_empty(
-                   EfiConventionalMemory, FW_LOW_RAM_STAGING_BASE,
-                   pointer_start, EFI_MEMORY_WB) &&
-               efi_memory_map_has_range_or_empty(
-                   EfiConventionalMemory, pointer_end,
-                   mBootStackBase, EFI_MEMORY_WB) &&
-               efi_memory_map_has_range_or_empty(
-                   EfiConventionalMemory, mBootStackTop,
-                   mGuestLowRamEnd, EFI_MEMORY_WB);
-    }
-
-    return efi_memory_map_has_descriptor(
-               EfiConventionalMemory, FW_LOW_RAM_STAGING_BASE,
-               mBootStackBase, EFI_MEMORY_WB) &&
-           efi_memory_map_has_range_or_empty(
-               EfiConventionalMemory, mBootStackTop,
-               pointer_start, EFI_MEMORY_WB) &&
-           efi_memory_map_has_range_or_empty(
-               EfiConventionalMemory, pointer_end,
-               mGuestLowRamEnd, EFI_MEMORY_WB);
+    return pointer_start == 0 ||
+           efi_memory_map_has_descriptor(EfiReservedMemoryType,
+                                         pointer_start, pointer_end,
+                                         EFI_MEMORY_WB);
 }
 
 static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
@@ -12782,16 +12895,23 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                        FW_LOADER_HEAP_SPLIT_BASE,
                                        FW_LOW_IMAGE_BASE,
                                        EFI_MEMORY_WB) ||
-        /* [32MB,80MB) is deliberately left as a SINGLE free run (d30791f). */
+        /* [32MB,80MB) is a single free descriptor ending exactly at the 80 MB
+         * line (XP-era sumain straddle rule), and conventional RAM continues
+         * right above it with no reserved guard page (Server 2003 SP1's 64 MB
+         * kernel large page at [64MB,128MB)). */
         !efi_memory_map_has_descriptor(EfiConventionalMemory,
                                        FW_LOW_IMAGE_BASE,
                                        FW_LOW_IMAGE_END, EFI_MEMORY_WB) ||
-        /* The SAL-style loader-staging guard sits at the 80 MB line; usable
-         * conventional RAM begins just above it. */
         !efi_memory_map_has_descriptor(EfiReservedMemoryType,
-                                       FW_LOW_IMAGE_END,
-                                       FW_LOW_RAM_STAGING_BASE,
+                                       fw_low_anchor_base(),
+                                       fw_low_anchor_base() +
+                                           FW_LOW_ANCHOR_SIZE,
                                        EFI_MEMORY_WB) ||
+        (fw_low_anchor_base() == FW_LOW_ANCHOR_BASE &&
+         !efi_memory_map_covers_range(EfiConventionalMemory,
+                                      FW_LOW_IMAGE_END,
+                                      FW_LOW_ANCHOR_BASE,
+                                      EFI_MEMORY_WB)) ||
         !efi_memory_map_has_boot_stack_layout() ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIO, IOSAPIC_BASE,
                                        IOSAPIC_BASE + IOSAPIC_SIZE,
@@ -13267,41 +13387,57 @@ out:
     return ok;
 }
 
-static void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 StartRam,
-                                       UINT64 LowRamEnd)
+static void efi_add_conventional_with_system_pointer(UINTN *Index,
+                                                     UINT64 Start,
+                                                     UINT64 End)
 {
     UINT64 pointer_start = mSystemTablePointerBase;
     UINT64 pointer_end = pointer_start + FW_SYSTEM_TABLE_POINTER_SIZE;
 
-    if (pointer_start != 0 && pointer_start < mBootStackBase) {
+    if (Start >= End) {
+        return;
+    }
+    if (pointer_start != 0 && pointer_start >= Start &&
+        pointer_end <= End) {
         efi_add_memory_range(Index, EfiConventionalMemory,
-                             StartRam, pointer_start, EFI_MEMORY_WB);
+                             Start, pointer_start, EFI_MEMORY_WB);
         efi_add_memory_range(Index, EfiReservedMemoryType,
                              pointer_start, pointer_end, EFI_MEMORY_WB);
         efi_add_memory_range(Index, EfiConventionalMemory,
-                             pointer_end, mBootStackBase, EFI_MEMORY_WB);
+                             pointer_end, End, EFI_MEMORY_WB);
     } else {
         efi_add_memory_range(Index, EfiConventionalMemory,
-                             StartRam, mBootStackBase,
-                             EFI_MEMORY_WB);
+                             Start, End, EFI_MEMORY_WB);
     }
+}
 
-    efi_add_memory_range(Index, EfiRuntimeServicesData,
-                         mBootStackBase, mBootStackTop,
-                         efi_memory_attribute(EfiRuntimeServicesData,
-                                              EFI_MEMORY_WB));
+/* See FW_LOW_ANCHOR_BASE: 128 MB when it lies below the CPU-assist region. */
+static UINT64 fw_low_anchor_base(void)
+{
+    return mCpuAssistBase >= FW_LOW_ANCHOR_BASE + FW_LOW_ANCHOR_SIZE ?
+           FW_LOW_ANCHOR_BASE : FW_LOW_IMAGE_END;
+}
 
-    if (pointer_start >= mBootStackTop) {
-        efi_add_memory_range(Index, EfiConventionalMemory,
-                             mBootStackTop, pointer_start, EFI_MEMORY_WB);
-        efi_add_memory_range(Index, EfiReservedMemoryType,
-                             pointer_start, pointer_end, EFI_MEMORY_WB);
-        efi_add_memory_range(Index, EfiConventionalMemory,
-                             pointer_end, LowRamEnd, EFI_MEMORY_WB);
-    } else {
-        efi_add_memory_range(Index, EfiConventionalMemory,
-                             mBootStackTop, LowRamEnd, EFI_MEMORY_WB);
-    }
+static void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 StartRam,
+                                       UINT64 LowRamEnd)
+{
+    /*
+     * Real IA-64 firmware carves its SAL/boot scratch from the top of
+     * installed RAM and leaves the DRAM below it contiguous (460GX SDV and
+     * E8870 SR870BH2 alike).  The CPU-assist region - SAL re-entry slots,
+     * debug contexts/stacks, initial RSE backing stores and the boot memory
+     * stacks that SAL reuses after ExitBootServices() - is published as one
+     * runtime-data descriptor ending exactly at the low-RAM end.
+     */
+    efi_add_conventional_with_system_pointer(Index, StartRam,
+                                             mCpuAssistBase);
+    efi_add_memory_range(
+        Index, EfiRuntimeServicesData,
+        mCpuAssistBase, mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE,
+        efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
+    /* Any sub-alignment tail of installed RAM stays ordinary memory. */
+    efi_add_conventional_with_system_pointer(
+        Index, mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE, LowRamEnd);
 }
 
 static void efi_init_memory_map(void)
@@ -13337,15 +13473,36 @@ static void efi_init_memory_map(void)
         mNextPageAddr = firmware_end;
     }
 
-    /* Legacy low memory, with the VGA aperture decoded as UC MMIO. */
+    /*
+     * Legacy low memory, with the VGA aperture decoded as UC MMIO.
+     *
+     * The C0000h-FFFFFFh option-ROM/BIOS segment must be UC as well: Windows'
+     * videoprt maps the video BIOS shadow at C0000h uncached
+     * (VideoPortGetDeviceBase), and the IA-64 kernel refuses to create a UC
+     * mapping over memory the EFI map declares WB (attribute aliasing is
+     * architecturally forbidden, SDM vol 2).  With this range declared WB,
+     * that mapping returns NULL and the inbox ATI miniport fails its
+     * HwFindAdapter with event 0xC1010002 UniqueId 25 -> Code 10.
+     *
+     * NOTE: this range and the 0xA0000 VGA aperture now share a type and
+     * attribute, so efi_add_memory_range() coalesces them into a single
+     * descriptor covering 0xA0000-0xFFFFF (verified by dumping the map from
+     * the firmware).  That changes the sub-1MB descriptor count, which the
+     * Whistler 2462 regression showed the Windows loader is sensitive to -
+     * revalidate build 2462 when touching this.
+     *
+     * This alone does NOT make VideoPortGetDeviceBase(0xC0000) succeed:
+     * measured, the descriptor is correct and MmMapIoSpace still returns
+     * NULL, so a further cause remains open.
+     */
     efi_add_memory_range(&index, EfiReservedMemoryType, 0x00000000,
                          VGA_LEGACY_FB_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiMemoryMappedIO, VGA_LEGACY_FB_BASE,
                          VGA_LEGACY_FB_BASE + VGA_LEGACY_FB_SIZE,
                          EFI_MEMORY_UC);
-    efi_add_memory_range(&index, EfiReservedMemoryType,
+    efi_add_memory_range(&index, EfiMemoryMappedIO,
                          VGA_LEGACY_FB_BASE + VGA_LEGACY_FB_SIZE,
-                         0x00100000, EFI_MEMORY_WB);
+                         0x00100000, EFI_MEMORY_UC);
 
     /*
      * Keep the resident firmware image out of loader allocations.  Linux
@@ -13417,37 +13574,51 @@ static void efi_init_memory_map(void)
     efi_add_memory_range(&index, EfiReservedMemoryType,
                          FW_LOADER_HEAP_SPLIT_BASE,
                          FW_LOW_IMAGE_BASE, EFI_MEMORY_WB);
+    /*
+     * [32 MB, CPU-assist base) is all conventional RAM, as on real 460GX /
+     * E8870 platforms where low DRAM is contiguous up to the firmware's
+     * RAM-top scratch.  The historical reserved guard PAGE at the 80 MB
+     * staging line is gone (the setup loader's heap carve is bounded by the
+     * 32 MB split page), but the 80 MB DESCRIPTOR boundary stays: the XP-era
+     * sumain.c:760 (WXPSP1 base/boot/efi/sumain.c) turns the sub-80 MB part
+     * of any conventional descriptor that straddles 80 MB into
+     * MemoryFirmwareTemporary, after which the kernel carve finds no free
+     * block ("ntoskrnl.exe is missing or corrupt" on an installed XP 2002 -
+     * measured).  Two adjacent free descriptors cost the Server 2003 SP1
+     * loader nothing: its ARC list merges adjacent MemoryFree runs, so the
+     * 64 MB-aligned 64 MB large page it maps the kernel with at
+     * [64 MB, 128 MB) still fits (previously ENOMEM, load error 16).
+     * efi_preserve_memory_map_boundary() keeps the two from coalescing.
+     */
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_BASE,
                          FW_LOW_IMAGE_END, EFI_MEMORY_WB);
-    /*
-     * SAL-style reserved guard at the 80 MB TR-staging line.  The Windows
-     * IA-64 setup loader (XP build 2002) allocates its heap by selecting a
-     * MemoryFree descriptor with BasePage in [16MB,48MB) and carving the new
-     * heap from that descriptor's END; because the loader also merges adjacent
-     * free descriptors, without a non-free boundary the [16MB..] free block
-     * extends to the top of RAM and the carve escapes the 16-64MB loader-TR
-     * window, tripping NTOSKRNL bugcheck 0x1A (MiConvertToLoaderVirtual).  A
-     * reserved page just above the loader's 80 MB staging line (matching how
-     * real SAL reserves boot structures above the first 64 MB) bounds that
-     * free block at 80 MB so the heap stays TR-mapped.  It sits ABOVE the
-     * loader's [48MB,80MB) systemblock split range, so the split still finds
-     * its container; bulk RAM above the guard stays conventional for OSes
-     * (e.g. Server 2003) whose loaders use the full range.
-     */
-    efi_add_memory_range(&index, EfiReservedMemoryType, FW_LOW_IMAGE_END,
-                         FW_LOW_RAM_STAGING_BASE, EFI_MEMORY_WB);
+    {
+        UINT64 anchor = fw_low_anchor_base();
+
+        efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_END,
+                             anchor, EFI_MEMORY_WB);
+        efi_add_memory_range(&index, EfiReservedMemoryType, anchor,
+                             anchor + FW_LOW_ANCHOR_SIZE, EFI_MEMORY_WB);
+        mLowAnchorArmed = 1;
+        efi_add_boot_stack_low_ram(&index, anchor + FW_LOW_ANCHOR_SIZE,
+                                   low_ram_end);
+    }
 
     /*
-     * SAL reuses each processor's RAM-top stack after ExitBootServices(), so
-     * keep the entire stack pool as runtime data.  AllocatePool() uses only
-     * the surrounding conventional-memory ranges.
+     * XP RTM (build 2600) SMP bring-up requires the 2 GiB firmware scratch
+     * page to appear as a reserved descriptor: without it the two processors
+     * deadlock spinning during kernel init (measured -- the IOSAPIC relocation
+     * is harmless, this descriptor is what XP needs).  The page only fits as a
+     * reserved hole while it lies above installed low RAM; once low DRAM runs
+     * past 2 GiB (contiguous to the aperture, as real 460GX provides) the page
+     * is ordinary WB DRAM and must not be carved out, so gate on the low-RAM
+     * end.  Guests that run past 2 GiB here are the ones that specifically
+     * need the unbroken contiguous DRAM (Linux), so this costs them nothing.
      */
-    efi_add_boot_stack_low_ram(&index, FW_LOW_RAM_STAGING_BASE,
-                               low_ram_end);
-
-    /* Keep the high firmware scratch page unavailable to loaders. */
-    efi_add_memory_range(&index, EfiReservedMemoryType, 0x80000000,
-                         0x80100000, EFI_MEMORY_WB);
+    if (low_ram_end <= 0x80000000ULL) {
+        efi_add_memory_range(&index, EfiReservedMemoryType, 0x80000000,
+                             0x80100000, EFI_MEMORY_WB);
+    }
 
     efi_add_memory_range(&index, EfiMemoryMappedIO, IOSAPIC_BASE,
                          IOSAPIC_BASE + IOSAPIC_SIZE, EFI_MEMORY_UC);
@@ -13476,6 +13647,20 @@ static void efi_init_memory_map(void)
     efi_add_memory_range(&index, EfiMemoryMappedIO, IA64_PCI_MMIO_BASE,
                          IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE,
                          EFI_MEMORY_UC);
+
+    /*
+     * The 460GX chipset-specific area [4G-32M, 4G-20M) carries the GART SRAM
+     * programming window at 0xFE200000, which the SSDM (248704-001 sec 7.1.2)
+     * requires the processor to map UC.  We deliberately do NOT add an EFI
+     * memory-map descriptor for it: Linux's i460-agp reaches the GATT through
+     * ioremap(), which maps the physical window UC via the region-6 identity
+     * area on its own, independent of the EFI map -- and adding a descriptor
+     * here perturbs the descriptor layout the XP build-2600 SMP loader is
+     * exquisitely sensitive to (see plans/status.md 2.2 and the
+     * platform-map-460gx-realign notes), deadlocking that guest at kernel
+     * bring-up.  The GART window is left an undescribed chipset gap, exactly
+     * as it was before AGP support.
+     */
 
     efi_add_memory_range(&index, EfiMemoryMappedIO,
                          FW_FIRMWARE_ADDRESS_SPACE_BASE,
@@ -14516,15 +14701,16 @@ static void efi_init_platform_tables(void)
     mFadt.XGpe1Block = acpi_system_memory_gas(0, 0);
     mFadt.Hdr.Checksum = table_checksum8(&mFadt, sizeof(mFadt));
 
-    mSsdt.Aml[SSDT_CPU0_ENABLED_OFFSET] = 0x0fU;
-    mSsdt.Aml[SSDT_CPU1_ENABLED_OFFSET] =
-        mProcessorCount > 1 ? 0x0fU : 0;
-    mSsdt.Aml[SSDT_CPU2_ENABLED_OFFSET] =
-        mProcessorCount > 2 ? 0x0fU : 0;
-    mSsdt.Aml[SSDT_CPU3_ENABLED_OFFSET] =
-        mProcessorCount > 3 ? 0x0fU : 0;
-    mSsdt.Aml[SSDT_PS2_ENABLED_OFFSET] =
-        fw_handoff_i8042_enabled() ? 0x0fU : 0;
+    {
+        UINTN cpu;
+
+        for (cpu = 0; cpu < FW_ARRAY_SIZE(mSsdtCpuEnabledNames); cpu++) {
+            acpi_ssdt_set_named_byte(&mSsdt, mSsdtCpuEnabledNames[cpu],
+                                     mProcessorCount > cpu ? 0x0fU : 0);
+        }
+    }
+    acpi_ssdt_set_named_byte(&mSsdt, mSsdtPs2EnabledName,
+                             fw_handoff_i8042_enabled() ? 0x0fU : 0);
     init_sdt_header(&mSsdt.Hdr, EFI_SIGNATURE_32('S', 'S', 'D', 'T'),
                     sizeof(mSsdt));
     mSsdt.Hdr.Revision = 2;
@@ -14821,10 +15007,6 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
 {
     static const UINT8 pci0_name[] = { 'P', 'C', 'I', '0' };
     static const UINT8 s5_name[] = { '_', 'S', '5', '_' };
-    static const UINT8 cpu0_name[] = { 'C', 'P', 'U', '0' };
-    static const UINT8 cpu1_name[] = { 'C', 'P', 'U', '1' };
-    static const UINT8 cpu2_name[] = { 'C', 'P', 'U', '2' };
-    static const UINT8 cpu3_name[] = { 'C', 'P', 'U', '3' };
     static const UINT8 uar0_name[] = { 'U', 'A', 'R', '0' };
     static const UINT8 hid_pci_root[] = "PNP0A03";
     static const UINT8 cid_pci[] = "PNP0A03";
@@ -14962,30 +15144,23 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         return 0;
     }
 
-    if (!acpi_ssdt_has_bytes(cpu0_name, sizeof(cpu0_name)) ||
-        !acpi_ssdt_has_bytes(cpu1_name, sizeof(cpu1_name)) ||
-        !acpi_ssdt_has_bytes(cpu2_name, sizeof(cpu2_name)) ||
-        !acpi_ssdt_has_bytes(cpu3_name, sizeof(cpu3_name)) ||
-        !acpi_ssdt_has_bytes(uar0_name, sizeof(uar0_name)) ||
+    if (!acpi_ssdt_has_bytes(uar0_name, sizeof(uar0_name)) ||
         !acpi_ssdt_has_bytes(hid_uart, sizeof(hid_uart) - 1) ||
         !acpi_ssdt_has_bytes(ps2_enabled, sizeof(ps2_enabled)) ||
         !acpi_ssdt_has_bytes(sta_name, sizeof(sta_name)) ||
-        mAcpiSsdt->Aml[SSDT_CPU0_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_CPU1_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_CPU2_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_CPU3_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_PS2_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_CPU0_ENABLED_OFFSET] != 0x0fU ||
-        mAcpiSsdt->Aml[SSDT_CPU1_ENABLED_OFFSET] !=
-            (mProcessorCount > 1 ? 0x0fU : 0) ||
-        mAcpiSsdt->Aml[SSDT_CPU2_ENABLED_OFFSET] !=
-            (mProcessorCount > 2 ? 0x0fU : 0) ||
-        mAcpiSsdt->Aml[SSDT_CPU3_ENABLED_OFFSET] !=
-            (mProcessorCount > 3 ? 0x0fU : 0) ||
-        mAcpiSsdt->Aml[SSDT_PS2_ENABLED_OFFSET] !=
-            (fw_handoff_i8042_enabled() ? 0x0fU : 0) ||
+        !acpi_ssdt_named_byte_is(mAcpiSsdt, mSsdtPs2EnabledName,
+                                 fw_handoff_i8042_enabled() ? 0x0fU : 0) ||
         !acpi_ssdt_has_bytes(crs_name, sizeof(crs_name))) {
         return 0;
+    }
+    for (i = 0; i < FW_MAX_CPUS; i++) {
+        UINT8 cpu_name[4] = { 'C', 'P', 'U', (UINT8)('0' + i) };
+
+        if (!acpi_ssdt_has_bytes(cpu_name, sizeof(cpu_name)) ||
+            !acpi_ssdt_named_byte_is(mAcpiSsdt, mSsdtCpuEnabledNames[i],
+                                     i < mProcessorCount ? 0x0fU : 0)) {
+            return 0;
+        }
     }
 
     if (mAcpiFacs->Signature != EFI_SIGNATURE_32('F', 'A', 'C', 'S') ||
@@ -16383,6 +16558,113 @@ static UINT64 pe_image_base_alignment(BOOLEAN RuntimeImage)
 }
 
 /* Whether an image of Size bytes physically fits at base, ignoring policy. */
+static BOOLEAN pe_find_loaded_image_overlap(UINT64 Start, UINT64 End,
+                                            UINT64 *FirstEnd,
+                                            UINT64 *LastStart)
+{
+    UINT64 first_end = ~0ULL;
+    UINT64 last_start = 0;
+    BOOLEAN found = 0;
+    UINTN i;
+
+    if (End <= Start) {
+        return 0;
+    }
+
+    for (i = 0; i < LOADED_IMAGE_MAX; i++) {
+        EFI_LOADED_IMAGE_RECORD *rec = &mLoadedImages[i];
+        UINT64 base;
+        UINT64 size;
+        UINT64 end;
+
+        if (!rec->in_use) {
+            continue;
+        }
+        base = (UINT64)(UINTN)rec->loaded_image.ImageBase;
+        size = pe_loaded_image_allocation_size(
+            rec->loaded_image.ImageSize, rec->loaded_image.ImageCodeType);
+        if (size == 0 || base > ~0ULL - size) {
+            continue;
+        }
+        end = base + size;
+        if (Start >= end || base >= End) {
+            continue;
+        }
+        if (!found || end < first_end) {
+            first_end = end;
+        }
+        if (!found || base > last_start) {
+            last_start = base;
+        }
+        found = 1;
+    }
+
+    if (found) {
+        if (FirstEnd != NULL) {
+            *FirstEnd = first_end;
+        }
+        if (LastStart != NULL) {
+            *LastStart = last_start;
+        }
+    }
+    return found;
+}
+
+/*
+ * First fit inside one conventional descriptor, jumping straight past the
+ * allocation, loaded-image or source-buffer blocker instead of advancing
+ * one IA64_EFI_IMAGE_ALIGN step at a time.
+ */
+static BOOLEAN pe_find_image_base_forward(UINT64 Start, UINT64 End,
+                                          UINT64 Size,
+                                          UINT64 SourceBase,
+                                          UINT64 SourceSize,
+                                          UINT64 *ImageBase)
+{
+    UINT64 base;
+    UINT64 source_end;
+
+    if (Size == 0 || End <= Start || End - Start < Size ||
+        !efi_align_up_u64(Start, IA64_EFI_IMAGE_ALIGN, &base)) {
+        return 0;
+    }
+    source_end = SourceSize > ~0ULL - SourceBase ?
+                 ~0ULL : SourceBase + SourceSize;
+
+    while (base <= End - Size) {
+        UINT64 blocker_end = 0;
+        UINT64 overlap_end;
+        BOOLEAN blocked = 0;
+
+        if (SourceSize != 0 && base < source_end &&
+            SourceBase < base + Size) {
+            blocker_end = source_end;
+            blocked = 1;
+        }
+        if (efi_find_allocation_overlap(base, base + Size, &overlap_end,
+                                        NULL) &&
+            (!blocked || overlap_end < blocker_end)) {
+            blocker_end = overlap_end;
+            blocked = 1;
+        }
+        if (pe_find_loaded_image_overlap(base, base + Size, &overlap_end,
+                                         NULL) &&
+            (!blocked || overlap_end < blocker_end)) {
+            blocker_end = overlap_end;
+            blocked = 1;
+        }
+        if (!blocked) {
+            *ImageBase = base;
+            return 1;
+        }
+        if (blocker_end <= base ||
+            !efi_align_up_u64(blocker_end, IA64_EFI_IMAGE_ALIGN, &base)) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
 static BOOLEAN pe_image_base_usable(UINT64 base, UINT64 size, UINT64 alignment)
 {
     if (alignment == 0 || (base & (alignment - 1U)) != 0) {
@@ -16495,21 +16777,21 @@ static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size,
                 continue;
             }
 
-            for (base = desc_start; base <= desc_end - aligned_size;) {
+            /*
+             * The forward search returns the lowest usable base in the
+             * descriptor at or above desc_start; if that already sits at
+             * or past the cursor on the wrap-around pass, no base below
+             * the cursor exists in this descriptor either.
+             */
+            if (pe_find_image_base_forward(desc_start, desc_end,
+                                           aligned_size,
+                                           SourceBase, SourceSize,
+                                           &base)) {
                 if (pass != 0 && cursor_valid && base >= cursor) {
-                    break;
+                    continue;
                 }
-                if (!ranges_overlap(base, aligned_size,
-                                    SourceBase, SourceSize) &&
-                    pe_image_base_available(base, aligned_size,
-                                            RuntimeImage)) {
-                    mNextPeImageBase = base + aligned_size;
-                    return base;
-                }
-                if (base > ~0ULL - IA64_EFI_IMAGE_ALIGN) {
-                    break;
-                }
-                base += IA64_EFI_IMAGE_ALIGN;
+                mNextPeImageBase = base + aligned_size;
+                return base;
             }
         }
     }
@@ -16747,6 +17029,40 @@ static BOOLEAN pe_mark_loaded_image_memory(UINT64 ImageBase,
         }
     }
     return 1;
+}
+
+/*
+ * Windows loaders 5.2.3790.1000+ (Server 2003 SP1/SP2/R2) map the kernel and
+ * their heap with 64 MB large pages at [64 MB, 192 MB) and need that span to
+ * be one free run, and no 5.2 kernel needs the anchor (see FW_LOW_ANCHOR_BASE),
+ * so everything from 5.2.3790.0 up runs without it.  Recognised from the image's
+ * VS_FIXEDFILEINFO (signature 0xFEEF04BD, then dwStrucVersion,
+ * dwFileVersionMS, dwFileVersionLS) - the retail loaders carry no other
+ * version marker in their PE headers.
+ */
+static BOOLEAN pe_image_wants_contiguous_low_ram(const UINT8 *Image,
+                                                 UINTN ImageSize)
+{
+    UINTN i;
+
+    if (Image == NULL || ImageSize < 20U) {
+        return 0;
+    }
+    for (i = 0; i + 20U <= ImageSize; i += 4U) {
+        UINT32 ms;
+        UINT32 ls;
+
+        if (Image[i] != 0xBDU || Image[i + 1] != 0x04U ||
+            Image[i + 2] != 0xEFU || Image[i + 3] != 0xFEU) {
+            continue;
+        }
+        fw_copy_mem(&ms, Image + i + 8U, sizeof(ms));
+        fw_copy_mem(&ls, Image + i + 12U, sizeof(ls));
+        /* 5.2.3790.0 (Server 2003 RTM) and later; 5.1.x (XP, 2462) keep it. */
+        return ms > 0x00050002U ||
+               (ms == 0x00050002U && (ls >> 16) >= 3790U);
+    }
+    return 0;
 }
 
 static BOOLEAN pe_rva_range_valid(UINT32 Rva, UINT32 Size, UINT32 ImageSize)
@@ -17419,6 +17735,10 @@ static void *load_pe_image(uint8_t *image_base, UINTN image_size,
         (file_hdr->Characteristics & IMAGE_FILE_RELOCS_STRIPPED) != 0 ||
         number_of_rva_and_sizes < 6 || data_dir == NULL ||
         data_dir[11] == 0;
+    if (subsystem == IMAGE_SUBSYSTEM_EFI_APPLICATION &&
+        pe_image_wants_contiguous_low_ram(image_base, image_size)) {
+        efi_release_low_anchor();
+    }
     image_base_addr = pe_choose_image_base(
         linked_image_base_addr, size_of_image,
         subsystem == IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER,
@@ -17528,36 +17848,69 @@ static void *load_pe_image(uint8_t *image_base, UINTN image_size,
 /* --- ATA PIO Block I/O driver --------------------------------------------- */
 
 typedef struct {
-    UINT8  unit;         /* 0=master, 1=slave on the primary channel */
+    UINT8  unit;         /* 0=master, 1=slave on this channel */
+    UINT8  channel;      /* 0=primary channel, 1=secondary channel */
     UINT8  present;      /* 0=no device, 1=device responds */
     UINT8  media_present;
     UINT8  is_atapi;     /* 0=ATA disk, 1=ATAPI CD-ROM */
     UINT64 last_lba;
 } IDE_DEVICE;
 
-/* IDE primary-channel controller configuration. */
+/* IDE channel controller configuration (one per ATA channel). */
 typedef struct {
-    UINT64 data_base;    /* primary data port base (8-byte range) */
-    UINT64 ctrl_base;    /* primary alt-status/control port */
-    UINT64 bmdma_base;   /* PCI IDE bus-master base */
+    UINT64 data_base;    /* data port base (8-byte range) */
+    UINT64 ctrl_base;    /* alt-status/control port */
+    UINT64 bmdma_base;   /* PCI IDE bus-master base for this channel */
     UINT8  has_bmdma;    /* 1=PCI bus-master IDE registers available */
+    UINT8  present;      /* 1=channel I/O bases configured */
 } IDE_CONFIG;
 
+#define IDE_CHANNEL_COUNT 2U
+
+/*
+ * Active-channel scratch register set.  Every IDE operation loads this from
+ * the target device's channel via ide_activate() before touching ports, so
+ * the many existing gIde.<port> sites stay channel-agnostic and unchanged.
+ */
 static IDE_CONFIG gIde = {
     .data_base  = LEGACY_IO_BASE + 0x1F0U,
     .ctrl_base  = LEGACY_IO_BASE + 0x3F6U,
     .bmdma_base = 0,
     .has_bmdma  = 0,
 };
-static IDE_DEVICE mIdeDevices[2] = {
-    { .unit = 0, .present = 0, .media_present = 0,
-      .is_atapi = 0, .last_lba = 0 },
-    { .unit = 1, .present = 0, .media_present = 0,
-      .is_atapi = 0, .last_lba = 0 },
+
+/* Per-channel controller state, defaulting to the legacy primary/secondary
+ * ISA port bases until ide_configure_channels_from_pci() reprograms them. */
+static IDE_CONFIG gIdeChannels[IDE_CHANNEL_COUNT] = {
+    { .data_base = LEGACY_IO_BASE + 0x1F0U,
+      .ctrl_base = LEGACY_IO_BASE + 0x3F6U, .present = 0 },
+    { .data_base = LEGACY_IO_BASE + 0x170U,
+      .ctrl_base = LEGACY_IO_BASE + 0x376U, .present = 0 },
+};
+
+/* Primary master/slave then secondary master/slave. */
+static IDE_DEVICE mIdeDevices[4] = {
+    { .unit = 0, .channel = 0 },
+    { .unit = 1, .channel = 0 },
+    { .unit = 0, .channel = 1 },
+    { .unit = 1, .channel = 1 },
 };
 static IDE_DEVICE *mBootIdeDevice = &mIdeDevices[0];
 static IDE_DEVICE *mHardDiskIdeDevice;
 static UINT32 mCdromBlocks;
+
+/*
+ * Load a device's channel port bases into the active gIde scratch.  IDE
+ * access in this firmware is strictly serial, so switching the active
+ * channel immediately before an operation is sufficient (and idempotent for
+ * nested calls that re-select the same device's channel).
+ */
+static void ide_activate(const IDE_DEVICE *dev)
+{
+    if (dev != NULL && dev->channel < IDE_CHANNEL_COUNT) {
+        gIde = gIdeChannels[dev->channel];
+    }
+}
 
 #define PCI_CLASS_REVISION_OFFSET     0x08U
 #define PCI_CFG_COMMAND_OFFSET        0x04U
@@ -17794,92 +18147,110 @@ static BOOLEAN ide_find_pci_controller(PCI_DEVICE_LOCATION *Location)
     return 0;
 }
 
-static BOOLEAN ide_configure_primary_from_pci(void)
+static BOOLEAN ide_configure_channels_from_pci(void)
 {
+    static const UINT8 bar_offset[5] = {
+        PCI_IDE_BAR0_OFFSET, PCI_IDE_BAR1_OFFSET, PCI_IDE_BAR2_OFFSET,
+        PCI_IDE_BAR3_OFFSET, PCI_IDE_BAR4_OFFSET,
+    };
     PCI_DEVICE_LOCATION location;
-    UINT32 data_bar;
-    UINT32 ctrl_bar;
-    UINT32 bmdma_bar;
-    UINT64 data_base;
-    UINT64 ctrl_base;
-    UINT64 bmdma_base;
+    UINT32 bar[5];
+    UINT64 base;
+    UINT64 bmdma_base = 0;
     UINT16 command;
+    BOOLEAN dma_ok;
+    UINTN i;
+    UINTN ch;
+
+    for (ch = 0; ch < IDE_CHANNEL_COUNT; ch++) {
+        gIdeChannels[ch].bmdma_base = 0;
+        gIdeChannels[ch].has_bmdma = 0;
+        gIdeChannels[ch].present = 0;
+    }
 
     if (!ide_find_pci_controller(&location)) {
         return 0;
     }
 
-    data_bar = (UINT32)pci_config_read_value(0, location.Bus,
-                                             location.Device,
-                                             location.Function,
-                                             PCI_IDE_BAR0_OFFSET, 4);
-    ctrl_bar = (UINT32)pci_config_read_value(0, location.Bus,
-                                             location.Device,
-                                             location.Function,
-                                             PCI_IDE_BAR1_OFFSET, 4);
-    bmdma_bar = (UINT32)pci_config_read_value(0, location.Bus,
-                                              location.Device,
-                                              location.Function,
-                                              PCI_IDE_BAR4_OFFSET, 4);
-    if (!ide_io_bar_address(data_bar, &data_base) ||
-        !ide_io_bar_address(ctrl_bar, &ctrl_base) ||
-        data_base + 7U >= LEGACY_IO_LIMIT ||
-        ctrl_base + 2U >= LEGACY_IO_LIMIT) {
-        /*
-         * Command-line PCI devices arrive with unassigned BARs.  Allocate the
-         * platform's reserved IDE I/O ranges only after an IDE controller has
-         * actually been requested.
-         */
-        data_bar = PCI_IDE_DATA0_BAR;
-        ctrl_bar = PCI_IDE_CTRL0_BAR;
-        bmdma_bar = PCI_IDE_BMDMA_BAR;
-        pci_config_write_value(0, location.Bus, location.Device,
-                               location.Function, PCI_IDE_BAR0_OFFSET, 4,
-                               data_bar);
-        pci_config_write_value(0, location.Bus, location.Device,
-                               location.Function, PCI_IDE_BAR1_OFFSET, 4,
-                               ctrl_bar);
-        pci_config_write_value(0, location.Bus, location.Device,
-                               location.Function, PCI_IDE_BAR2_OFFSET, 4,
-                               PCI_IDE_DATA1_BAR);
-        pci_config_write_value(0, location.Bus, location.Device,
-                               location.Function, PCI_IDE_BAR3_OFFSET, 4,
-                               PCI_IDE_CTRL1_BAR);
-        pci_config_write_value(0, location.Bus, location.Device,
-                               location.Function, PCI_IDE_BAR4_OFFSET, 4,
-                               bmdma_bar);
-        if (!ide_io_bar_address(data_bar, &data_base) ||
-            !ide_io_bar_address(ctrl_bar, &ctrl_base)) {
-            return 0;
+    for (i = 0; i < 5; i++) {
+        bar[i] = (UINT32)pci_config_read_value(0, location.Bus, location.Device,
+                                               location.Function,
+                                               bar_offset[i], 4);
+    }
+
+    /*
+     * Command-line and synthetic PCI controllers arrive with unassigned BARs.
+     * Allocate the platform's reserved legacy-style IDE I/O ranges -- both
+     * channels plus the 16-byte bus-master register file -- on demand, only
+     * once an IDE controller has actually been requested.
+     */
+    if (!ide_io_bar_address(bar[0], &base) || base + 7U >= LEGACY_IO_LIMIT ||
+        !ide_io_bar_address(bar[1], &base) || base + 2U >= LEGACY_IO_LIMIT) {
+        bar[0] = PCI_IDE_DATA0_BAR;
+        bar[1] = PCI_IDE_CTRL0_BAR;
+        bar[2] = PCI_IDE_DATA1_BAR;
+        bar[3] = PCI_IDE_CTRL1_BAR;
+        bar[4] = PCI_IDE_BMDMA_BAR;
+        for (i = 0; i < 5; i++) {
+            pci_config_write_value(0, location.Bus, location.Device,
+                                   location.Function, bar_offset[i], 4, bar[i]);
         }
     }
 
-    gIde.data_base = data_base;
-    gIde.ctrl_base = ctrl_base + 2U;
-    gIde.has_bmdma = 0;
-    command = (UINT16)pci_config_read_value(0, location.Bus,
-                                            location.Device,
+    command = (UINT16)pci_config_read_value(0, location.Bus, location.Device,
                                             location.Function,
                                             PCI_CFG_COMMAND_OFFSET, 2);
     command |= PCI_CFG_COMMAND_IO_SPACE;
-    if (fw_handoff_ide_dma_enabled() &&
-        ide_io_bar_address(bmdma_bar, &bmdma_base) &&
-        bmdma_base + 7U < LEGACY_IO_LIMIT) {
-        gIde.bmdma_base = bmdma_base;
-        gIde.has_bmdma = 1;
-        command |= PCI_CFG_COMMAND_BUS_MASTER;
+
+    /* The bus-master register file spans 16 bytes: primary channel at +0,
+     * secondary at +8 (PCI IDE / cmd646). */
+    dma_ok = fw_handoff_ide_dma_enabled() &&
+             ide_io_bar_address(bar[4], &bmdma_base) &&
+             bmdma_base + 15U < LEGACY_IO_LIMIT;
+
+    for (ch = 0; ch < IDE_CHANNEL_COUNT; ch++) {
+        UINT64 data_base;
+        UINT64 ctrl_base;
+
+        if (!ide_io_bar_address(bar[ch * 2], &data_base) ||
+            !ide_io_bar_address(bar[ch * 2 + 1], &ctrl_base) ||
+            data_base + 7U >= LEGACY_IO_LIMIT ||
+            ctrl_base + 2U >= LEGACY_IO_LIMIT) {
+            continue;   /* channel BAR unassigned or out of range */
+        }
+        gIdeChannels[ch].data_base = data_base;
+        gIdeChannels[ch].ctrl_base = ctrl_base + 2U;
+        gIdeChannels[ch].present = 1;
+        if (dma_ok) {
+            gIdeChannels[ch].bmdma_base = bmdma_base + ch * 8U;
+            gIdeChannels[ch].has_bmdma = 1;
+            command |= PCI_CFG_COMMAND_BUS_MASTER;
+        }
     }
+
+    if (!gIdeChannels[0].present) {
+        return 0;
+    }
+
     pci_config_write_value(0, location.Bus, location.Device,
                            location.Function, PCI_CFG_COMMAND_OFFSET, 2,
                            command);
 
+    gIde = gIdeChannels[0];   /* default active channel = primary */
+
     uart_puts("IDE controller:       PCI BAR primary data=0x");
-    uart_put_hex64(gIde.data_base);
+    uart_put_hex64(gIdeChannels[0].data_base);
     uart_puts(" ctrl=0x");
-    uart_put_hex64(gIde.ctrl_base);
-    if (gIde.has_bmdma) {
+    uart_put_hex64(gIdeChannels[0].ctrl_base);
+    if (gIdeChannels[0].has_bmdma) {
         uart_puts(" bmdma=0x");
-        uart_put_hex64(gIde.bmdma_base);
+        uart_put_hex64(gIdeChannels[0].bmdma_base);
+    }
+    if (gIdeChannels[1].present) {
+        uart_puts(" | secondary data=0x");
+        uart_put_hex64(gIdeChannels[1].data_base);
+        uart_puts(" ctrl=0x");
+        uart_put_hex64(gIdeChannels[1].ctrl_base);
     }
     uart_puts("\r\n");
     return 1;
@@ -17908,6 +18279,9 @@ static BOOLEAN ata_pio_wait_ready(UINT64 cmd_port)
 
 static const char *ide_unit_name(const IDE_DEVICE *dev)
 {
+    if (dev != NULL && dev->channel != 0) {
+        return dev->unit != 0 ? "secondary slave" : "secondary master";
+    }
     return (dev != NULL && dev->unit != 0) ? "primary slave" : "primary master";
 }
 
@@ -17936,6 +18310,7 @@ static BOOLEAN ata_pio_identify(IDE_DEVICE *dev, UINT8 command,
         return 0;
     }
 
+    ide_activate(dev);
     ide_select_device(ide_packet_drive_select(dev));
     ata_pio_write8(gIde.data_base + IDE_NSEC_OFF, 0);
     ata_pio_write8(gIde.data_base + IDE_LBALO_OFF, 0);
@@ -17958,7 +18333,7 @@ static void ide_probe_primary_devices(void)
     UINT16 identify[256];
     UINTN i;
 
-    if (!ide_configure_primary_from_pci()) {
+    if (!ide_configure_channels_from_pci()) {
         uart_puts("IDE controller:       not present\r\n");
         mHardDiskIdeDevice = NULL;
         for (i = 0; i < FW_ARRAY_SIZE(mIdeDevices); i++) {
@@ -17978,6 +18353,14 @@ static void ide_probe_primary_devices(void)
         dev->media_present = 0;
         dev->is_atapi = 0;
         dev->last_lba = 0;
+
+        /* Skip a channel whose I/O ports were never assigned (e.g. a
+         * single-channel controller, or the secondary disabled). */
+        if (dev->channel >= IDE_CHANNEL_COUNT ||
+            !gIdeChannels[dev->channel].present) {
+            continue;
+        }
+        ide_activate(dev);
 
         if (ata_pio_identify(dev, ATA_CMD_IDENTIFY_PACKET, identify)) {
             dev->present = 1;
@@ -18014,11 +18397,35 @@ static void ide_probe_primary_devices(void)
     }
 }
 
+/*
+ * Choose the IDE device to expose as the optical/boot candidate.  Prefer any
+ * present ATAPI CD-ROM -- on either channel, master or slave -- so that a data
+ * disk on the primary master does not shadow a bootable CD elsewhere on the
+ * IDE bus; fall back to the first present device for plain fixed-disk boot.
+ */
+static IDE_DEVICE *ide_pick_boot_device(void)
+{
+    UINTN i;
+
+    for (i = 0; i < FW_ARRAY_SIZE(mIdeDevices); i++) {
+        if (mIdeDevices[i].present && mIdeDevices[i].is_atapi) {
+            return &mIdeDevices[i];
+        }
+    }
+    for (i = 0; i < FW_ARRAY_SIZE(mIdeDevices); i++) {
+        if (mIdeDevices[i].present) {
+            return &mIdeDevices[i];
+        }
+    }
+    return NULL;
+}
+
 static BOOLEAN ata_pio_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
                                     UINTN count)
 {
     UINTN sector;
 
+    ide_activate(dev);
     if (dev == NULL || !dev->present || dev->is_atapi ||
         count == 0 || count > 255) {
         return 0;
@@ -18062,6 +18469,7 @@ static BOOLEAN ata_pio_write_sectors(IDE_DEVICE *dev, const UINT8 *buf,
 {
     UINTN sector;
 
+    ide_activate(dev);
     if (dev == NULL || !dev->present || dev->is_atapi ||
         count == 0 || count > 255) {
         return 0;
@@ -18102,6 +18510,7 @@ static BOOLEAN ata_dma_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
     UINT32 done = 0;
     UINT32 prd_addr;
 
+    ide_activate(dev);
     if (dev == NULL || !dev->present || dev->is_atapi || !gIde.has_bmdma ||
         count == 0 || count > 255) {
         return 0;
@@ -18149,6 +18558,7 @@ static BOOLEAN ata_dma_write_sectors(IDE_DEVICE *dev, const UINT8 *buf,
     UINT32 done = 0;
     UINT32 prd_addr;
 
+    ide_activate(dev);
     if (dev == NULL || !dev->present || dev->is_atapi || !gIde.has_bmdma ||
         count == 0 || count > 255) {
         return 0;
@@ -18197,6 +18607,7 @@ static BOOLEAN ata_dma_write_sectors(IDE_DEVICE *dev, const UINT8 *buf,
 static BOOLEAN ata_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
                                 UINTN count)
 {
+    ide_activate(dev);
     if (gIde.has_bmdma && ata_dma_read_sectors(dev, buf, lba, count)) {
         return 1;
     }
@@ -18206,6 +18617,7 @@ static BOOLEAN ata_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
 static BOOLEAN ata_write_sectors(IDE_DEVICE *dev, const UINT8 *buf, UINT32 lba,
                                  UINTN count)
 {
+    ide_activate(dev);
     if (gIde.has_bmdma && ata_dma_write_sectors(dev, buf, lba, count)) {
         return 1;
     }
@@ -18350,6 +18762,7 @@ static BOOLEAN atapi_packet_data_in(IDE_DEVICE *Dev, const UINT8 *Cdb,
     UINTN remaining = BufferSize;
     UINTN offset = 0;
 
+    ide_activate(Dev);
     if (Dev == NULL || !Dev->present || !Dev->is_atapi || Cdb == NULL ||
         CdbSize != 12U || Buffer == NULL || BufferSize == 0 ||
         BufferSize > 0xffffU || (BufferSize & 1U) != 0) {
@@ -18423,6 +18836,7 @@ static BOOLEAN atapi_pio_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
 {
     UINT32 done = 0;
 
+    ide_activate(dev);
     if (dev == NULL || !dev->present || !dev->is_atapi) {
         return 0;
     }
@@ -18580,6 +18994,7 @@ static BOOLEAN atapi_dma_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
     UINT32 done = 0;
     UINT32 prd_addr;
 
+    ide_activate(dev);
     if (dev == NULL || !dev->present || !dev->is_atapi || !gIde.has_bmdma) {
         return 0;
     }
@@ -18634,6 +19049,7 @@ static BOOLEAN atapi_dma_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
 static BOOLEAN atapi_read_sectors_uncached(IDE_DEVICE *dev, UINT8 *buf,
                                            UINT32 lba, UINT32 count)
 {
+    ide_activate(dev);
     if (gIde.has_bmdma) {
         if (atapi_dma_read_sectors(dev, buf, lba, count)) {
             return 1;
@@ -20420,6 +20836,7 @@ static BOOLEAN storage_flush(const FW_STORAGE_DEVICE *Device)
         return 1;
     }
     if (Device->Kind == FW_STORAGE_IDE) {
+        ide_activate(Device->Ide);
         ide_select_device(ide_lba_drive_select(Device->Ide, 0));
         if (!ata_pio_wait_not_busy()) {
             return 0;
@@ -20472,6 +20889,7 @@ static BOOLEAN storage_reset(const FW_STORAGE_DEVICE *Device,
         UINT8 command = Device->Ide->is_atapi ?
                         ATA_CMD_IDENTIFY_PACKET : ATA_CMD_IDENTIFY;
 
+        ide_activate(Device->Ide);
         /* ATA Device Control: assert and then release software reset. */
         ata_pio_write8(gIde.ctrl_base, 0x04U);
         (void)bs_stall(5U);
@@ -20819,6 +21237,17 @@ static BOOLEAN atapi_configure_el_torito(void)
     use_uefi_sector_count = platform_id == 0xef;
     if (!use_uefi_sector_count && have_bpb) {
         partition_blocks = filesystem_blocks;
+    } else if (!use_uefi_sector_count) {
+        /*
+         * No EFI Platform ID and no FAT BPB at the boot image: this El Torito
+         * entry is not an EFI System Partition.  Combo IA-64 discs (early
+         * Server 2003 / .NET Server betas) carry only a legacy x86 CDBOOT
+         * no-emulation loader here -- real-mode boot code, not a filesystem.
+         * Do not map it as a bogus FAT volume; the disc's IA-64 loader
+         * (\IA64\SETUPLDR.EFI) is reached through the raw ISO-9660 file system
+         * instead, launched by hand from the EFI shell.
+         */
+        return 0;
     } else if (catalog_sector_count <= 1U) {
         if (mCdromBlocks <= boot_lba ||
             (UINT64)(mCdromBlocks - boot_lba) > (0xffffffffULL / 4U)) {
@@ -21568,6 +21997,10 @@ typedef struct FW_FAT_VOLUME {
     UINT32  total_sectors;
     UINT32  cluster_count;
     UINT32  lba_offset;
+    BOOLEAN fat_cache_valid;
+    UINT32  fat_cache_media_id;
+    UINT32  fat_cache_lba;
+    UINT8   fat_cache[512];
     EFI_HANDLE handle;
     EFI_BLOCK_IO_PROTOCOL *block_io;
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL simple_fs;
@@ -21635,6 +22068,9 @@ typedef struct {
     FW_FS_KIND fs_kind;
     FW_FAT_VOLUME *fat_volume;
     UINT32  first_cluster;
+    BOOLEAN fat_cursor_valid;
+    UINT32  fat_cursor_cluster;
+    UINT32  fat_cursor_index;
     UINT32  extent;
     UINT16  partition_reference;
     UINT64  size;
@@ -24759,6 +25195,30 @@ static BOOLEAN fw_boot_fat_available(void)
     return fw_fat_init() && mBootFatVolume.valid;
 }
 
+/*
+ * True when the disc's ISO-9660/UDF file system should be presented on the
+ * boot Block I/O handle (mBlockIoHandle) rather than the raw optical handle.
+ *
+ * This holds for optical media with no mappable EFI El Torito boot image -- a
+ * combo IA-64 install disc whose only boot catalog entry is the legacy x86
+ * CDBOOT loader, so there is no EFI System Partition and no FAT volume.  In
+ * that case mBlockIoHandle carries the whole-media MEDIA_CDROM_DP device path
+ * (see fw_update_storage_device_paths / handle_supports_protocol), so a loader
+ * launched from this file system -- e.g. \IA64\SETUPLDR.EFI run by hand from
+ * the EFI shell -- receives a CD-ROM device path.  Microsoft's setupldr needs
+ * that to take its El Torito CD boot path (WSRV03 base/boot/efi/sumain.c), and
+ * it matches the device path the reference firmware exposes from its El Torito
+ * partition child handle (EFI 1.10 EDK/Drivers/Partition/ElTorito.c).
+ *
+ * When an EFI El Torito FAT volume *is* mapped, mBlockIoHandle carries that FAT
+ * file system and the ISO/UDF file system stays on the raw optical handle.
+ */
+static BOOLEAN fw_boot_optical_fs_available(void)
+{
+    return storage_is_cd(&mBootStorageDevice) && !mBootImageMapped &&
+           !fw_boot_fat_available() && (fw_udf_init() || fw_iso_init());
+}
+
 static BOOLEAN fw_fat_read_512(FW_FAT_VOLUME *Volume, UINT8 *buf, UINT32 lba)
 {
     if (Volume == NULL || !Volume->valid || Volume->block_io == NULL ||
@@ -24790,6 +25250,32 @@ static BOOLEAN fw_fat_read_512s(FW_FAT_VOLUME *Volume, UINT8 *buf,
                buf) == EFI_SUCCESS;
 }
 
+static const UINT8 *fw_fat_read_table_sector(FW_FAT_VOLUME *Volume,
+                                             UINT32 lba)
+{
+    UINT32 media_id;
+
+    if (Volume == NULL || !Volume->valid || Volume->block_io == NULL ||
+        Volume->block_io->Media == NULL) {
+        return NULL;
+    }
+    media_id = Volume->block_io->Media->MediaId;
+    if (Volume->fat_cache_valid &&
+        Volume->fat_cache_media_id == media_id &&
+        Volume->fat_cache_lba == lba) {
+        return Volume->fat_cache;
+    }
+
+    Volume->fat_cache_valid = 0;
+    if (!fw_fat_read_512(Volume, Volume->fat_cache, lba)) {
+        return NULL;
+    }
+    Volume->fat_cache_media_id = media_id;
+    Volume->fat_cache_lba = lba;
+    Volume->fat_cache_valid = 1;
+    return Volume->fat_cache;
+}
+
 static BOOLEAN fw_fat_is_data_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
 {
     return Volume != NULL && cluster >= 2U &&
@@ -24799,7 +25285,7 @@ static BOOLEAN fw_fat_is_data_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
 
 static UINT32 fw_fat_next_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
 {
-    UINT8 sec[512];
+    const UINT8 *sec;
     UINT32 offset;
     UINT32 lba;
     UINT32 pos;
@@ -24815,12 +25301,14 @@ static UINT32 fw_fat_next_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
         offset = cluster + (cluster >> 1);
         lba = Volume->reserved_secs + (offset / 512U);
         pos = offset & 511U;
-        if (!fw_fat_read_512(Volume, sec, lba)) {
+        sec = fw_fat_read_table_sector(Volume, lba);
+        if (sec == NULL) {
             return 0xffffffffU;
         }
         b0 = sec[pos];
         if (pos == 511U) {
-            if (!fw_fat_read_512(Volume, sec, lba + 1U)) {
+            sec = fw_fat_read_table_sector(Volume, lba + 1U);
+            if (sec == NULL) {
                 return 0xffffffffU;
             }
             b1 = sec[0];
@@ -24833,7 +25321,8 @@ static UINT32 fw_fat_next_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
 
     offset = cluster * (Volume->fat_type == 16U ? 2U : 4U);
     lba = Volume->reserved_secs + offset / 512U;
-    if (!fw_fat_read_512(Volume, sec, lba)) {
+    sec = fw_fat_read_table_sector(Volume, lba);
+    if (sec == NULL) {
         return 0xffffffffU;
     }
     if (Volume->fat_type == 16U) {
@@ -26677,6 +27166,134 @@ static EFI_STATUS fat_file_open(EFI_FILE_PROTOCOL *This,
     return EFI_SUCCESS;
 }
 
+static UINT32 fat_file_cluster_at(FW_FILE *File, UINT32 Position,
+                                  UINT32 *ClusterPosition,
+                                  UINT32 *ClusterIndex)
+{
+    FW_FAT_VOLUME *volume = File != NULL ? File->fat_volume : NULL;
+    UINT32 target_index;
+    UINT32 current_index;
+    UINT32 cluster;
+
+    if (volume == NULL || !volume->valid || volume->cluster_size == 0) {
+        return 0xffffffffU;
+    }
+
+    target_index = Position / volume->cluster_size;
+    if (File->fat_cursor_valid &&
+        File->fat_cursor_index <= target_index &&
+        fw_fat_is_data_cluster(volume, File->fat_cursor_cluster)) {
+        cluster = File->fat_cursor_cluster;
+        current_index = File->fat_cursor_index;
+    } else {
+        cluster = File->first_cluster;
+        current_index = 0;
+    }
+
+    while (current_index < target_index &&
+           fw_fat_is_data_cluster(volume, cluster)) {
+        cluster = fw_fat_next_cluster(volume, cluster);
+        current_index++;
+    }
+    if (!fw_fat_is_data_cluster(volume, cluster)) {
+        return 0xffffffffU;
+    }
+
+    File->fat_cursor_valid = 1;
+    File->fat_cursor_cluster = cluster;
+    File->fat_cursor_index = current_index;
+    if (ClusterPosition != NULL) {
+        *ClusterPosition = Position % volume->cluster_size;
+    }
+    if (ClusterIndex != NULL) {
+        *ClusterIndex = current_index;
+    }
+    return cluster;
+}
+
+typedef struct {
+    EFI_BLOCK_IO_PROTOCOL protocol;
+    EFI_BLOCK_IO_MEDIA media;
+    UINT8 fat_sector[512];
+    UINT32 read_count;
+} FW_FAT_CACHE_TEST;
+
+static EFI_STATUS fat_cache_test_read(EFI_BLOCK_IO_PROTOCOL *This,
+                                      UINT32 MediaId, UINT64 Lba,
+                                      UINTN BufferSize, VOID *Buffer)
+{
+    FW_FAT_CACHE_TEST *test = (FW_FAT_CACHE_TEST *)This;
+
+    if (MediaId != test->media.MediaId) {
+        return EFI_MEDIA_CHANGED;
+    }
+    if (Lba != 1U || BufferSize != sizeof(test->fat_sector) ||
+        Buffer == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+    fw_copy_mem(Buffer, test->fat_sector, sizeof(test->fat_sector));
+    test->read_count++;
+    return EFI_SUCCESS;
+}
+
+static BOOLEAN fat_cursor_cache_selftest(VOID)
+{
+    FW_FAT_CACHE_TEST test;
+    FW_FAT_VOLUME volume;
+    FW_FILE file;
+    UINT32 cluster_position;
+    UINT32 cluster_index;
+
+    fw_set_mem(&test, sizeof(test), 0);
+    fw_set_mem(&volume, sizeof(volume), 0);
+    fw_set_mem(&file, sizeof(file), 0);
+
+    test.media.MediaId = 7U;
+    test.media.MediaPresent = 1;
+    test.media.BlockSize = 512U;
+    test.media.LastBlock = 31U;
+    test.protocol.Media = &test.media;
+    test.protocol.ReadBlocks = fat_cache_test_read;
+    test.fat_sector[4] = 3U;  /* cluster 2 -> 3 */
+    test.fat_sector[6] = 4U;  /* cluster 3 -> 4 */
+    test.fat_sector[8] = 5U;  /* cluster 4 -> 5 */
+    test.fat_sector[10] = 0xf8U; /* cluster 5 -> end of chain */
+    test.fat_sector[11] = 0xffU;
+
+    volume.valid = 1;
+    volume.fat_type = 16U;
+    volume.sec_per_cluster = 1U;
+    volume.reserved_secs = 1U;
+    volume.eoc_cluster = 0xfff8U;
+    volume.cluster_size = 512U;
+    volume.total_sectors = 32U;
+    volume.cluster_count = 16U;
+    volume.block_io = &test.protocol;
+
+    file.fs_kind = FW_FS_FAT;
+    file.fat_volume = &volume;
+    file.first_cluster = 2U;
+
+    if (fat_file_cluster_at(&file, 2U * 512U, &cluster_position,
+                            &cluster_index) != 4U ||
+        cluster_position != 0U || cluster_index != 2U ||
+        test.read_count != 1U ||
+        fat_file_cluster_at(&file, 3U * 512U, &cluster_position,
+                            &cluster_index) != 5U ||
+        cluster_index != 3U || test.read_count != 1U ||
+        fat_file_cluster_at(&file, 512U, &cluster_position,
+                            &cluster_index) != 3U ||
+        cluster_index != 1U || test.read_count != 1U) {
+        return 0;
+    }
+
+    test.fat_sector[6] = 6U;  /* changed medium: cluster 3 -> 6 */
+    test.media.MediaId++;
+    return fat_file_cluster_at(&file, 2U * 512U, &cluster_position,
+                               &cluster_index) == 6U &&
+           cluster_index == 2U && test.read_count == 2U;
+}
+
 static EFI_STATUS iso_file_open(EFI_FILE_PROTOCOL *This,
                                 EFI_FILE_HANDLE *NewHandle,
                                 CHAR16 *FileName, UINT64 OpenMode,
@@ -26855,19 +27472,14 @@ static BOOLEAN fat_dir_read_raw_at(FW_FILE *file, UINT32 pos,
         }
         lba = volume->root_dir_start + (pos >> 9);
     } else {
-        UINT32 cluster = file->is_root ? volume->root_cluster :
-                         file->first_cluster;
-        UINT32 skip = pos / volume->cluster_size;
+        UINT32 cluster;
         UINT32 cluster_pos;
 
-        while (skip-- > 0 && fw_fat_is_data_cluster(volume, cluster)) {
-            cluster = fw_fat_next_cluster(volume, cluster);
-        }
+        cluster = fat_file_cluster_at(file, pos, &cluster_pos, NULL);
         if (!fw_fat_is_data_cluster(volume, cluster)) {
             return 0;
         }
 
-        cluster_pos = pos % volume->cluster_size;
         lba = volume->data_start +
               (cluster - 2U) * volume->sec_per_cluster +
               (cluster_pos >> 9);
@@ -26954,6 +27566,7 @@ static EFI_STATUS fat_file_read(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
     UINT32 done = 0;
     UINT32 pos;
     UINT32 cluster;
+    UINT32 cluster_index;
 
     if (BufferSize == NULL || file == NULL || volume == NULL ||
         !volume->valid ||
@@ -26973,13 +27586,8 @@ static EFI_STATUS fat_file_read(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
         want = file->size - file->position;
     }
 
-    pos = (UINT32)file->position;
-    cluster = file->first_cluster;
-    while (pos >= volume->cluster_size &&
-           fw_fat_is_data_cluster(volume, cluster)) {
-        pos -= volume->cluster_size;
-        cluster = fw_fat_next_cluster(volume, cluster);
-    }
+    cluster = fat_file_cluster_at(file, (UINT32)file->position,
+                                  &pos, &cluster_index);
 
     while (done < want && fw_fat_is_data_cluster(volume, cluster)) {
         UINT32 cluster_off = pos;
@@ -27026,6 +27634,12 @@ static EFI_STATUS fat_file_read(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
         pos = 0;
         if (done < want) {
             cluster = fw_fat_next_cluster(volume, cluster);
+            cluster_index++;
+            if (fw_fat_is_data_cluster(volume, cluster)) {
+                file->fat_cursor_valid = 1;
+                file->fat_cursor_cluster = cluster;
+                file->fat_cursor_index = cluster_index;
+            }
         }
     }
 
@@ -29286,6 +29900,18 @@ static UINT64 fw_pci_io_expected_bar_length(const FW_PCI_IO_DEVICE *Dev)
     return Dev->ExpectedBarLength;
 }
 
+/*
+ * The IDE (ide=on) and AHCI (ahci=on) storage controllers are opt-in and may
+ * be absent from the default machine configuration, in which case their PCI
+ * config space reads back all-ones.  Every other device in mPciIoDevices is
+ * always present and must self-test.
+ */
+static BOOLEAN fw_pci_io_device_optional(const FW_PCI_IO_DEVICE *Dev)
+{
+    return Dev->Protocol == &mPciIdeIoProto ||
+           Dev->Protocol == &mPciAhciIoProto;
+}
+
 static BOOLEAN fw_pci_io_device_present(const FW_PCI_IO_DEVICE *Dev)
 {
     UINT32 id;
@@ -30388,9 +31014,15 @@ static BOOLEAN __attribute__((noinline)) pci_root_bridge_io_selftest(void)
         return 0;
     }
 
+    /*
+     * The AHCI controller is opt-in (ahci=on); on the default machine slot 1
+     * is empty and reads back all-ones.  Still exercise the root-bridge
+     * config-read path either way, but only require the exact id when the
+     * controller is actually present.
+     */
     if (pci_root_cfg_read(&mPciRootBridgeIoProto, EfiPciWidthUint32,
                           1ULL << 16, 1, &ahci_id) != EFI_SUCCESS ||
-        ahci_id != 0x29228086U) {
+        (ahci_id != 0xffffffffU && ahci_id != 0x29228086U)) {
         return 0;
     }
 
@@ -30454,7 +31086,7 @@ static BOOLEAN __attribute__((noinline)) pci_io_protocol_selftest(void)
                             &id) != EFI_SUCCESS) {
             return 0;
         }
-        if (i == 0 && id == 0xffffffffU) {
+        if (id == 0xffffffffU && fw_pci_io_device_optional(dev)) {
             continue;
         }
         if (id != expected_id) {
@@ -30893,7 +31525,8 @@ static BOOLEAN handle_supports_protocol(EFI_HANDLE Handle, void *Protocol,
 
     if (Handle == mRawBlockIoHandle &&
         guid_matches(Protocol, mSimpleFileSystemProtocolGuid) &&
-        (fw_udf_init() || fw_iso_init())) {
+        (fw_udf_init() || fw_iso_init()) &&
+        !fw_boot_optical_fs_available()) {
         if (Interface != NULL) {
             *Interface = (VOID *)&mOpticalSimpleFsProto;
         }
@@ -30928,9 +31561,10 @@ static BOOLEAN handle_supports_protocol(EFI_HANDLE Handle, void *Protocol,
 
     if (Handle == mBlockIoHandle &&
         guid_matches(Protocol, mSimpleFileSystemProtocolGuid) &&
-        fw_fat_init() && mBootFatVolume.valid) {
+        (fw_boot_fat_available() || fw_boot_optical_fs_available())) {
         if (Interface != NULL) {
-            *Interface = (VOID *)&mSimpleFsProto;
+            *Interface = fw_boot_fat_available() ?
+                (VOID *)&mSimpleFsProto : (VOID *)&mOpticalSimpleFsProto;
         }
         return 1;
     }
@@ -30938,17 +31572,27 @@ static BOOLEAN handle_supports_protocol(EFI_HANDLE Handle, void *Protocol,
     if (Handle == mBlockIoHandle &&
         guid_matches(Protocol, mDevicePathProtocolGuid)) {
         if (Interface != NULL) {
+            /*
+             * Optical media keep the MEDIA_CDROM_DP node even when no El Torito
+             * EFI boot image was mapped (a combo disc whose only boot catalog
+             * entry is the legacy x86 CDBOOT loader): the node then spans the
+             * whole media, so an OS loader started from this handle still sees a
+             * CD-ROM device path.  Microsoft's setupldr requires that to take
+             * its El Torito CD boot path (WSRV03 base/boot/efi/sumain.c).
+             */
+            BOOLEAN keep_cdrom = mBootImageMapped ||
+                                 storage_is_cd(&mBootStorageDevice);
             if (mBootStorageDevice.Kind == FW_STORAGE_AHCI) {
-                *Interface = mBootImageMapped ?
+                *Interface = keep_cdrom ?
                     (VOID *)&mSataBlockDevicePath :
                     (VOID *)&mSataBootDevicePath;
+            } else if (keep_cdrom) {
+                *Interface = (VOID *)&mBlockDevicePath;
             } else {
-                *Interface = mBootImageMapped ?
-                    (VOID *)&mBlockDevicePath :
-                    (storage_same_device(&mBootStorageDevice,
-                                         &mDiskStorageDevice) ?
-                     (VOID *)&mDiskBlockDevicePath :
-                     (VOID *)&mRawBlockDevicePath);
+                *Interface = storage_same_device(&mBootStorageDevice,
+                                                 &mDiskStorageDevice) ?
+                    (VOID *)&mDiskBlockDevicePath :
+                    (VOID *)&mRawBlockDevicePath;
             }
         }
         return 1;
@@ -34061,6 +34705,7 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
      */
     mBootStackTop = stack_top;
     mBootStackBase = stack_top - FW_BOOT_STACK_SIZE;
+    mCpuAssistBase = stack_top - IA64_FW_CPU_ASSIST_SIZE;
     mProcessorCount = fw_handoff_processor_count();
     fw_handoff_processor_topology(mProcessorCount);
     mResetFloatingPointDisableBits =
@@ -34150,10 +34795,7 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 
     /* Install Block I/O protocol */
     ide_probe_primary_devices();
-    mBootIdeDevice = &mIdeDevices[0];
-    if (!mBootIdeDevice->present && mIdeDevices[1].present) {
-        mBootIdeDevice = &mIdeDevices[1];
-    }
+    mBootIdeDevice = ide_pick_boot_device();
     ahci_probe_devices();
     scsi_probe_devices();
 
@@ -34232,6 +34874,31 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
         mOpticalSetupLoaderDevicePath.Cdrom.PartitionSize =
             cdrom_partition_blocks;
         uart_puts("Block I/O: El Torito FAT image mapped\r\n");
+    } else if (storage_present(&mBootStorageDevice) &&
+               storage_is_cd(&mBootStorageDevice)) {
+        /*
+         * Optical media with no mappable EFI El Torito boot image (e.g. a combo
+         * disc whose only boot catalog entry is the legacy x86 CDBOOT loader).
+         * Describe the CD-ROM device path node as spanning the whole media, so
+         * the boot Block I/O handle -- which carries the disc's ISO-9660 file
+         * system -- presents a whole-media MEDIA_CDROM_DP path.  A loader
+         * launched from that file system (\IA64\SETUPLDR.EFI from the EFI shell)
+         * then receives a CD-ROM device path, matching what the reference
+         * firmware's El Torito partition child handle provides (EFI 1.10
+         * EDK/Drivers/Partition/ElTorito.c).
+         */
+        mBlockDevicePath.Cdrom.BootEntry = 0;
+        mBlockDevicePath.Cdrom.PartitionStart = 0;
+        mBlockDevicePath.Cdrom.PartitionSize = mCdromBlocks;
+        mSataBlockDevicePath.Cdrom.BootEntry = 0;
+        mSataBlockDevicePath.Cdrom.PartitionStart = 0;
+        mSataBlockDevicePath.Cdrom.PartitionSize = mCdromBlocks;
+        mBootFullDevicePath.Cdrom.BootEntry = 0;
+        mBootFullDevicePath.Cdrom.PartitionStart = 0;
+        mBootFullDevicePath.Cdrom.PartitionSize = mCdromBlocks;
+        mOpticalSetupLoaderDevicePath.Cdrom.BootEntry = 0;
+        mOpticalSetupLoaderDevicePath.Cdrom.PartitionStart = 0;
+        mOpticalSetupLoaderDevicePath.Cdrom.PartitionSize = mCdromBlocks;
     }
     mBlockIoMedia.MediaId = 1;
     mBlockIoMedia.RemovableMedia = storage_removable(&mBootStorageDevice);
@@ -34499,7 +35166,9 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
               "verification failed\r\n");
     uart_puts("Graphics Output:      GOP/UGA VGA BGRx "
               "640x400x32, 640x480x32, 800x600x32, 1024x768x32, "
-              "1280x1024x32 @ 0xc4000000\r\n");
+              "1280x1024x32 @ ");
+    uart_put_hex64(VGA_FB_BASE);
+    uart_puts("\r\n");
     uart_puts("UGA I/O Protocol:     ");
     uart_puts(fw_uga_io_selftest() ?
               "device tree and request dispatch verified\r\n" :
@@ -34534,8 +35203,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
             uart_puts(storage_is_cd(&mBootStorageDevice) ?
                       "SATA ATAPI" : "SATA AHCI disk");
         } else if (mBootStorageDevice.Ide->is_atapi) {
+            ide_activate(mBootStorageDevice.Ide);
             uart_puts(gIde.has_bmdma ? "ATAPI DMA-capable" : "ATAPI PIO");
         } else {
+            ide_activate(mBootStorageDevice.Ide);
             uart_puts(gIde.has_bmdma ? "ATA DMA-capable" : "ATA PIO");
         }
     } else {
@@ -34545,8 +35216,12 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
         uart_puts(", LSI53C895A)\r\n");
     } else if (mBootStorageDevice.Kind == FW_STORAGE_AHCI) {
         uart_puts(", AHCI)\r\n");
+    } else if (mBootStorageDevice.Kind == FW_STORAGE_IDE) {
+        uart_puts(mBootStorageDevice.Ide != NULL &&
+                  mBootStorageDevice.Ide->channel != 0 ?
+                  ", secondary IDE)\r\n" : ", primary IDE)\r\n");
     } else {
-        uart_puts(", primary IDE)\r\n");
+        uart_puts(")\r\n");
     }
     uart_puts("Block I/O Read Test:  ");
     uart_puts(block_io_read_selftest() ? "media ID/range/bulk reads verified\r\n" :
@@ -34554,6 +35229,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     uart_puts("File Protocol:        ");
     uart_puts(file_protocol_contract_selftest() ?
               "read-only positioning and information verified\r\n" :
+              "verification failed\r\n");
+    uart_puts("FAT File Reads:       ");
+    uart_puts(fat_cursor_cache_selftest() ?
+              "cursor and table cache verified\r\n" :
               "verification failed\r\n");
     uart_puts("Unicode Collation:    ");
     uart_puts(unicode_collation_selftest() ?
@@ -34703,19 +35382,21 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
             uart_puts(efi_status_name(st));
             uart_puts(", status=0x");
             uart_put_hex64(st);
-            uart_puts(").");
-            if (storage_is_cd(&mBootStorageDevice) && st == EFI_NOT_FOUND) {
-                uart_puts(" CD-ROM boot path stopped after disk image failure.\r\n");
-                while (1) {
-                }
-            }
-            uart_puts("\r\n");
+            uart_puts(").\r\n");
         }
     }
 
-    uart_puts("\r\nNo bootable image found.\r\n");
-    uart_puts("System halted.\r\n");
-    efi_conout_ascii("\r\n\r\nNo bootable image found. System halted.");
-    __asm__ volatile ("break 0" ::: "memory");
+    /*
+     * No bootable image was found.  Drop into the EFI shell rather than
+     * halting: a disc may still be startable by hand -- e.g. a combo IA-64
+     * install disc whose only El Torito boot entry is the legacy x86 CDBOOT
+     * loader carries its IA-64 loader at fs0:\IA64\SETUPLDR.EFI, which the
+     * user can launch from the shell.
+     */
+    uart_puts("\r\nNo bootable image found. Entering EFI shell.\r\n");
+    efi_conout_ascii("\r\nNo bootable image found. Entering EFI shell.\r\n");
+    while (!mBootServicesExited) {
+        fw_boot_shell_run();
+    }
     while (1) {}
 }

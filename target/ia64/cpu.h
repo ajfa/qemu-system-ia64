@@ -5,6 +5,7 @@
 #include "exec/cpu-common.h"
 #include "exec/cpu-interrupt.h"
 #include "fpu/softfloat.h"
+#include "hw/ia64/ia64_vpc_abi.h"
 #include "qemu/timer.h"
 
 #ifdef CONFIG_USER_ONLY
@@ -56,7 +57,15 @@
 #define IA64_CPUID4_SD   (1ULL << 1)  /* spontaneous deferral */
 #define IA64_CPUID4_AO   (1ULL << 2)  /* ld16/st16/cmp8xchg16 atomics */
 
-#define IA64_MICRO_TLB_SIZE 4
+/*
+ * Direct-mapped lookup for modeled TR/TC entries.  IA-64's minimum page is
+ * 4 KiB; hashing at that granularity lets separate softmmu pages covered by
+ * one large architected translation retain independent hints.  Four buckets
+ * per maximum modeled TR/TC entry keep collision misses low without adding
+ * another comparison to the hit path.
+ */
+#define IA64_MICRO_TLB_PAGE_SHIFT 12
+#define IA64_MICRO_TLB_SIZE 512
 #define IA64_SUPPRESSED_TLB_MAX 4
 
 #define IA64_REGION_BITS 3
@@ -167,6 +176,23 @@
  * fills otherwise-unmapped region-7 pages with the same bias.
  */
 #define IA64_FW_REGION7_DIRECTMAP_BASE 0x0000000080000000ULL
+/*
+ * The persistent alias only covers the Windows/2003 KSEG0 window, a *fixed*
+ * 512 MiB range [KSEG0_BASE, KSEG2_BASE) = region-7 offset
+ * [0x8000_0000, 0xA000_0000) (WXPSP1 base/ntos/mm/ia64/miia64.h: "The HAL,
+ * kernel, initial drivers, NLS data, and registry ... which physically
+ * addresses memory ... Initial NonPaged Pool is within KSEG0").  It must not
+ * scale with RAM: region-7 VAs at or above KSEG2_BASE are ordinary kernel
+ * system space (system cache, pools, PFN database, KI_USER_SHARED_DATA, the
+ * PCR) that the OS maps through the VHPT/self-map, so a wider alias would
+ * silently shadow those VAs with the wrong physical page once installed RAM
+ * pushes the window past 0xA000_0000 -- corrupting the kernel and bugchecking
+ * the guest (measured: XP RTM dies in KeBugCheck2 during MmInitSystem above
+ * ~1.75 GiB).  Loader-phase accesses to physical memory above KSEG0 arrive
+ * while the SAL boot environment still owns the IVT and are served by the
+ * boot-identity fallback below, not this persistent alias.
+ */
+#define IA64_FW_REGION7_DIRECTMAP_SIZE 0x0000000020000000ULL
 #define IA64_LOCAL_SAPIC_PA   0x00000000fee00000ULL
 #define IA64_LOCAL_SAPIC_SIZE 0x00200000ULL
 #define IA64_PAL_IO_BLOCK_PA  0x000080000c000000ULL
@@ -742,6 +768,11 @@ typedef struct IA64TlbEntry {
     uint32_t rid;
     uint32_t key;
     uint16_t slot;
+    /*
+     * Derived version for micro-TLB validation.  This occupies existing
+     * tail padding and is deliberately omitted from migration state.
+     */
+    uint32_t micro_generation;
 } IA64TlbEntry;
 
 typedef struct IA64MicroTlbEntry {
@@ -749,24 +780,29 @@ typedef struct IA64MicroTlbEntry {
     uint64_t page_mask;
     uint32_t rid;
     uint32_t generation;
+    uint32_t slot_generation;
     uint16_t slot;
     bool valid;
 } IA64MicroTlbEntry;
 
+typedef struct IA64CodeTlbEdCache {
+    uint64_t va;
+    uint64_t page_mask;
+    uint32_t rid;
+    uint32_t generation;
+    uint32_t slot_generation;
+    uint16_t slot;
+    bool ed;
+    bool valid;
+} IA64CodeTlbEdCache;
+
 /*
  * The EFI 1.10 native debug-support ABI uses a fixed 1192-byte IA-64
- * context record.  Firmware places one record per vCPU immediately after
- * the architected IVT.  The emulator retains only the RSE bookkeeping that
- * is needed while a registered callback runs; architected state is carried
- * in the guest-visible context record itself.
+ * context record.  Firmware places one record per vCPU in the fixed
+ * CPU-assist area (see hw/ia64/ia64_vpc_abi.h).  The emulator retains only
+ * the RSE bookkeeping that is needed while a registered callback runs;
+ * architected state is carried in the guest-visible context record itself.
  */
-#define IA64_FW_DEBUG_CONTEXT_BASE    0x0000000000018000ULL
-#define IA64_FW_DEBUG_CONTEXT_STRIDE  0x800ULL
-#define IA64_FW_DEBUG_CONTEXT_SIZE    1192U
-#define IA64_FW_DEBUG_MAX_CPUS        4U
-#define IA64_FW_DEBUG_STACK_BASE      0x0000000000020000ULL
-#define IA64_FW_DEBUG_STACK_SIZE      0x8000ULL
-
 typedef struct IA64FirmwareDebugRseState {
     uint64_t pgr[IA64_STACKED_GR_COUNT];
     uint64_t pgr_nat[2];
@@ -1032,6 +1068,8 @@ static inline uint64_t ia64_pkr_mask(const CPUIA64State *env)
 }
 
 void ia64_tlb_bump_generation(CPUIA64State *env, bool is_ifetch);
+void ia64_tlb_bump_slot_generation(CPUIA64State *env, bool is_ifetch,
+                                   uint16_t slot);
 const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
                                        uint32_t rid, bool is_ifetch);
 
@@ -1184,6 +1222,15 @@ static inline bool ia64_tlb_match(const IA64TlbEntry *entry, uint64_t va,
     return ((va ^ entry->va) & entry->page_mask) == 0;
 }
 
+static inline QEMU_ALWAYS_INLINE uint16_t
+ia64_micro_tlb_index(uint64_t va, uint32_t rid)
+{
+    uint64_t page = va >> IA64_MICRO_TLB_PAGE_SHIFT;
+
+    return (page ^ (page >> 17) ^ (page >> 32) ^ rid) &
+           (IA64_MICRO_TLB_SIZE - 1);
+}
+
 static inline QEMU_ALWAYS_INLINE const IA64TlbEntry *
 ia64_tlb_find_cached(CPUIA64State *env, uint64_t va, uint32_t rid,
                      bool is_ifetch)
@@ -1191,21 +1238,14 @@ ia64_tlb_find_cached(CPUIA64State *env, uint64_t va, uint32_t rid,
     IA64TlbEntry *tlb = is_ifetch ? env->mmu.tlb_inst : env->mmu.tlb_data;
     IA64MicroTlbEntry *micro = is_ifetch ? env->mmu.tlb_inst_micro :
                                            env->mmu.tlb_data_micro;
-    uint8_t next = is_ifetch ? env->mmu.tlb_inst_micro_next :
-                               env->mmu.tlb_data_micro_next;
+    IA64MicroTlbEntry *cached = &micro[ia64_micro_tlb_index(va, rid)];
     uint32_t generation = is_ifetch ? env->mmu.tlb_inst_generation :
                                       env->mmu.tlb_data_generation;
-    uint16_t i;
 
-    for (i = 0; i < IA64_MICRO_TLB_SIZE; i++) {
-        uint16_t slot = (next - 1 - i) & (IA64_MICRO_TLB_SIZE - 1);
-        IA64MicroTlbEntry *cached = &micro[slot];
-
-        if (!cached->valid || cached->generation != generation ||
-            cached->rid != rid ||
-            ((va ^ cached->va) & cached->page_mask) != 0) {
-            continue;
-        }
+    if (cached->valid && cached->generation == generation &&
+        cached->rid == rid &&
+        ((va ^ cached->va) & cached->page_mask) == 0 &&
+        cached->slot_generation == tlb[cached->slot].micro_generation) {
         return &tlb[cached->slot];
     }
 
@@ -1251,7 +1291,9 @@ static inline uint32_t ia64_region_rid(const CPUIA64State *env, uint64_t va)
 
 static inline bool ia64_current_code_tlb_ed(CPUIA64State *env)
 {
+    IA64CodeTlbEdCache *cached = &env->mmu.code_tlb_ed;
     const IA64TlbEntry *entry;
+    uint32_t generation;
     uint32_t rid;
 
     if (!(env->psr & IA64_PSR_IT)) {
@@ -1259,8 +1301,32 @@ static inline bool ia64_current_code_tlb_ed(CPUIA64State *env)
     }
 
     rid = ia64_region_rid(env, env->ip);
+    generation = env->mmu.tlb_inst_generation;
+    if (cached->valid && cached->generation == generation &&
+        cached->rid == rid &&
+        ((env->ip ^ cached->va) & cached->page_mask) == 0 &&
+        cached->slot_generation ==
+            env->mmu.tlb_inst[cached->slot].micro_generation) {
+        return cached->ed;
+    }
+
     entry = ia64_tlb_find_cached(env, env->ip, rid, true);
-    return entry && (entry->pte & IA64_PTE_ED);
+    if (!entry) {
+        cached->valid = false;
+        return false;
+    }
+
+    *cached = (IA64CodeTlbEdCache) {
+        .va = entry->va,
+        .page_mask = entry->page_mask,
+        .rid = entry->rid,
+        .generation = generation,
+        .slot_generation = entry->micro_generation,
+        .slot = entry->slot,
+        .ed = (entry->pte & IA64_PTE_ED) != 0,
+        .valid = true,
+    };
+    return cached->ed;
 }
 
 static inline uint64_t ia64_region_itir(const CPUIA64State *env, uint64_t va)
@@ -1276,6 +1342,29 @@ static inline bool ia64_sal_boot_environment_active(const CPUIA64State *env)
 {
     return env->cr_iva == IA64_FIRMWARE_IVT_BASE &&
            (env->psr & IA64_PSR_IC) != 0;
+}
+
+/*
+ * Distinguish an OS that manages region 7 as a *flat identity* map (region-7
+ * VA == physical, e.g. Linux's PAGE_OFFSET) from one that uses the loader's
+ * biased KSEG (region-7 VA == physical + 0x8000_0000, e.g. Windows/2003).  The
+ * two conventions collide for region-7 offsets in [0x8000_0000, KSEG2): under
+ * the Windows convention that window aliases low physical memory, but under the
+ * identity convention it *is* physical RAM at 2 GiB+, so the persistent KSEG
+ * alias must not shadow it -- doing so hands the identity OS the wrong page and
+ * crashes it once installed RAM exceeds 2 GiB (measured: Debian/Linux 2.4.17).
+ *
+ * The signal is where the OS placed its interruption vector table: Windows'
+ * IVT lives inside KSEG0 (region 7, offset >= 0x8000_0000); Linux's is at the
+ * identity-mapped KERNEL_START (region 7, offset well below KSEG0).  So a
+ * region-7 IVT below the KSEG base means the running OS owns region 7 as an
+ * identity map and services its own region-7 TLB misses -- suppress the alias.
+ * A non-region-7 IVT (SAL/firmware, or the microprogram harness) keeps it.
+ */
+static inline bool ia64_region7_is_identity_os(const CPUIA64State *env)
+{
+    return ia64_rr_index(env->cr_iva) == 7 &&
+           (env->cr_iva & IA64_REGION7_PHYS_MASK) < IA64_FW_REGION7_DIRECTMAP_BASE;
 }
 
 static inline bool ia64_data_nested_tlb_active(const CPUIA64State *env)
@@ -1308,7 +1397,44 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
                                                   uint64_t va, uint64_t *pa,
                                                   bool is_inst)
 {
-    uint64_t phys;
+    uint64_t phys = va & IA64_REGION7_PHYS_MASK;
+    bool region7_directmap;
+    bool boot_identity;
+
+    /*
+     * Persistent region-7 physical alias (the "KSEG" direct map): the IA-64
+     * OS loaders and the early kernel reach loader-built structures near the
+     * top of RAM through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE
+     * before the kernel's self-mapped page tables are active (e.g.
+     * KdInitSystem walks a loader debug-block list this way).  Model it as a
+     * last-resort translation that survives the loader -> kernel handoff,
+     * bounded to the fixed KSEG0 window (region7_directmap_limit = base +
+     * min(RAM, IA64_FW_REGION7_DIRECTMAP_SIZE)) so that kernel system space,
+     * KI_USER_SHARED_DATA/PCR, and the recursive page-table self-map window
+     * -- all region-7 VAs at or above KSEG2_BASE -- still take ordinary
+     * TLB-miss faults instead of being shadowed by a RAM-sized alias.
+     */
+    region7_directmap = ia64_rr_index(va) == 7 &&
+        phys >= IA64_FW_REGION7_DIRECTMAP_BASE &&
+        phys < env->mmu.region7_directmap_limit &&
+        !ia64_region7_is_identity_os(env);
+
+    /*
+     * The remaining identity behaviour models SAL's boot-time TLB miss handler
+     * and only applies while SAL still owns the IVT (until ExitBootServices()
+     * completes).  It is a miss fallback only.
+     */
+    boot_identity = ia64_sal_boot_environment_active(env) &&
+        phys < IA64_FW_BOOT_IDENTITY_LIMIT;
+
+    /*
+     * Neither identity path applies: reject cheaply.  This is the common case
+     * for ordinary kernel VAs and is reached on every fill and miss, so it is
+     * checked before the linear scan of the TR/TC table below.
+     */
+    if (!region7_directmap && !boot_identity) {
+        return false;
+    }
 
     /*
      * An explicit TR/TC for the same virtual range always wins: a RID
@@ -1336,37 +1462,10 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
         }
     }
 
-    phys = va & IA64_REGION7_PHYS_MASK;
-
-    /*
-     * Persistent region-7 physical alias (the "KSEG" direct map): the IA-64
-     * OS loaders and the early kernel reach loader-built structures near the
-     * top of RAM through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE
-     * before the kernel's self-mapped page tables are active (e.g.
-     * KdInitSystem walks a loader debug-block list this way).  Model it as a
-     * last-resort translation that survives the loader -> kernel handoff,
-     * bounded to backed RAM (region7_directmap_limit = base + guest RAM size)
-     * so that paged system space and the recursive page-table self-map window
-     * -- both above the alias -- still take ordinary TLB-miss faults.
-     */
-    if (ia64_rr_index(va) == 7 &&
-        phys >= IA64_FW_REGION7_DIRECTMAP_BASE &&
-        phys < env->mmu.region7_directmap_limit) {
+    /* region7_directmap wins over boot_identity when both apply. */
+    if (region7_directmap) {
         *pa = phys - IA64_FW_REGION7_DIRECTMAP_BASE;
         return true;
-    }
-
-    /*
-     * The remaining identity behaviour models SAL's boot-time TLB miss handler
-     * and only applies while SAL still owns the IVT (until ExitBootServices()
-     * completes).  It is a miss fallback only.
-     */
-    if (!ia64_sal_boot_environment_active(env)) {
-        return false;
-    }
-
-    if (phys >= IA64_FW_BOOT_IDENTITY_LIMIT) {
-        return false;
     }
 
     if (phys >= IA64_FW_REGION7_DIRECTMAP_BASE) {
@@ -1470,6 +1569,8 @@ void ia64_sapic_eoi(CPUIA64State *env);
 int  ia64_sapic_get_ivr(CPUIA64State *env);
 void ia64_itm_update(CPUIA64State *env, uint64_t itm_value);
 void ia64_itc_sync(CPUIA64State *env);
+
+extern const VMStateDescription vmstate_ia64_cpu;
 void ia64_itc_advance_pending_itm(CPUIA64State *env);
 void ia64_itc_check_timer(CPUIA64State *env);
 void ia64_itc_enter_halt(CPUIA64State *env);
@@ -1507,6 +1608,12 @@ typedef struct IA64BootInfo {
     uint64_t bsp;
     uint64_t stack_pointer;
     uint64_t rsc;
+    /*
+     * Base of the firmware's RAM-top CPU-assist region (per-CPU SAL re-entry
+     * slots, debug contexts/stacks, early RSE; IA64_FW_CPU_ASSIST_BASE_FOR).
+     * The machine derives it from installed RAM exactly as the firmware does.
+     */
+    uint64_t fw_cpu_assist_base;
     bool powered_off;
 } IA64BootInfo;
 
@@ -1673,9 +1780,20 @@ ia64_firmware_debug_state_const(const CPUIA64State *env)
             ->firmware_debug;
 }
 
+/* Base of the firmware's RAM-top CPU-assist region for this machine. */
+static inline uint64_t ia64_fw_cpu_assist_base(CPUIA64State *env)
+{
+    return ia64_cpu_from_cpu_state(env_cpu(env))->boot_info.fw_cpu_assist_base;
+}
+
 static inline IA64CPUClass *ia64_env_cpu_class(CPUIA64State *env)
 {
-    return IA64_CPU_GET_CLASS(ia64_cpu_from_cpu_state(env_cpu(env)));
+    /*
+     * CPUState caches CPUClass during its parent instance initialization
+     * specifically so hot paths do not repeat QOM's dynamic type lookup.
+     * That initialization precedes every IA64CPU instance callback.
+     */
+    return container_of(env_cpu(env)->cc, IA64CPUClass, parent_class);
 }
 
 #endif

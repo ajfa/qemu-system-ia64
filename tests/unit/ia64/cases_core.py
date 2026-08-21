@@ -249,6 +249,37 @@ test_br_call_ret_preserves_ec = require_registers(
          br_ret(6)),
     ], {"ip": 0x40, "r4": 25}, entry=0x10)
 
+test_mov_pr_rot_imm_sign_extends = require_registers(
+    "mov_pr_rot_imm_sign_extends", [
+        (0x10, 0x00, nop_m(), mov_pr_rot_imm(1 << 43), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "pr_mask": 1 | (((1 << 21) - 1) << 43),
+    }, entry=0x10)
+
+test_mov_cr_to_r0_ic_set_illegal = require_exception(
+    "mov_cr_to_r0_ic_set_illegal", [
+        (0x10, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        # Reading an interruption CR (IIP) with PSR.ic set is illegal, and the
+        # access check must run even though the result is discarded into r0.
+        (0x30, 0x00, mov_m_cr_gr(0, 19), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x30)
+
+test_mov_cr_lid_ignored_high_bits_read_zero = require_registers(
+    "mov_cr_lid_ignored_high_bits_read_zero", [
+        (0x10, *movl_mlx(2, 0xdeadbeef12340000)),
+        (0x20, 0x00, mov_m_gr_cr(2, 64), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_cr_gr(29, 64), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {
+        "ip": 0x40,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0x12340000,
+    }, entry=0x10)
+
 test_popcnt_decode = require_registers("popcnt_decode", [
     (0x10, *movl_mlx(3, 0xf0f0f0f0f0f0f0f0)),
     (0x20, 0x00, nop_m(), popcnt(4, 3),
@@ -2893,6 +2924,8 @@ CASE_NAMES = (
     'mov_br_hint_decode',
     'mov_cpuid_indexed_decode',
     'mov_cpuid_madison_model',
+    'mov_cr_lid_ignored_high_bits_read_zero',
+    'mov_cr_to_r0_ic_set_illegal',
     'mov_dahr_indexed_decode',
     'mov_dbr_ibr_indexed_decode',
     'mov_ip_current_bundle',
@@ -2904,6 +2937,7 @@ CASE_NAMES = (
     'mov_m_negative_imm_ar_sign_extends',
     'mov_m_psr_gr_decode',
     'mov_msr_indexed_decode',
+    'mov_pr_rot_imm_sign_extends',
     'mov_psr_um_reserved_bit_fault',
     'mpy4_decode',
     'mpyshl4_decode',

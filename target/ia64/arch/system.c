@@ -244,7 +244,18 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
         env->ar_rsc = (value & ~IA64_RSC_PL) |
                       ((uint64_t)pl << IA64_RSC_PL_SHIFT);
         if ((old_rsc ^ env->ar_rsc) & IA64_RSC_PL) {
-            tlb_flush_by_mmuidx(env_cpu(env), 1u << MMU_IDX_RSE);
+            /*
+             * The RSC privilege level feeds the permission check for RSE
+             * backing-store accesses, which are cached in the MMU_IDX_RSE
+             * softmmu entries, so those must be discarded when it changes.
+             * Windows writes ar.rsc=0 at every trap entry and restores the
+             * user RSC on exit, so this runs on every user<->kernel
+             * transition.  MMU_IDX_RSE is a data-only index (instruction
+             * fetch never uses it), so the invalidation cannot stale a
+             * translated block: keep the jump cache instead of wiping all
+             * 4096 hints on each transition.
+             */
+            tlb_flush_by_mmuidx_no_jmp_cache(env_cpu(env), 1u << MMU_IDX_RSE);
         }
         return;
     }
@@ -296,7 +307,8 @@ uint64_t ia64_system_read_cr(CPUIA64State *env, uint32_t cr_num)
     }
     switch (cr_num) {
     case IA64_CR_SAPIC_LID:
-        return qatomic_read(&env->cr[cr_num]);
+        return qatomic_read(&env->cr[cr_num]) &
+               (IA64_SAPIC_LID_ID_MASK | IA64_SAPIC_LID_EID_MASK);
     case IA64_CR_SAPIC_IVR:
         return (uint64_t)ia64_sapic_get_ivr(env) & 0xFF;
     case IA64_CR_SAPIC_IRR0:
@@ -392,6 +404,17 @@ uint64_t ia64_system_validate_cr_access(CPUIA64State *env, uint64_t value,
         env->cr_isr = 0x30;
         ia64_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
                                fault_ip, raw, slot);
+    }
+
+    if (write && cr_num == IA64_CR_IFA &&
+        !ia64_va_is_implemented(env, value)) {
+        /* Writing an unimplemented VA to CR.IFA raises Unimplemented Data
+         * Address (a non-access reference). */
+        env->cr_ifa = value;
+        env->cr_isr = IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_NA |
+                      (ia64_current_code_tlb_ed(env) ? IA64_ISR_ED : 0);
+        ia64_raise_exception(env, IA64_EXCP_UNIMPL_DATA_ADDR,
+                             fault_ip, raw, slot);
     }
 
     switch (cr_num) {
@@ -535,7 +558,8 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
         ia64_sapic_update_interrupt(env);
         break;
     case IA64_CR_SAPIC_LID:
-        qatomic_set(&env->cr[cr_num], value);
+        qatomic_set(&env->cr[cr_num],
+                    value & (IA64_SAPIC_LID_ID_MASK | IA64_SAPIC_LID_EID_MASK));
         break;
     case IA64_CR_SAPIC_EOI:
         ia64_sapic_eoi(env);
@@ -773,11 +797,12 @@ uint64_t ia64_system_mov_psrgr_read(CPUIA64State *env, uint32_t unused)
 /* ---- mov to PSR helper ---- */
 
 void ia64_system_mov_psr_write(CPUIA64State *env, uint64_t value,
-                               uint32_t unused)
+                               uint32_t psr_l)
 {
+    uint64_t old_psr = env->psr;
     uint64_t new_psr;
 
-    if (unused) {
+    if (psr_l) {
         new_psr = (env->psr & ~0xffffffffULL) | (value & 0xffffffffULL);
     } else {
         new_psr = value;
@@ -786,9 +811,19 @@ void ia64_system_mov_psr_write(CPUIA64State *env, uint64_t value,
         return;
     }
     ia64_set_psr(env, new_psr);
-    ia64_tlb_bump_generation(env, false);
-    ia64_tlb_bump_generation(env, true);
-    tlb_flush(env_cpu(env));
+    /*
+     * mov psr.l = r writes only PSR{31:0}.  The bits it can change that
+     * matter to address translation are DT/IT (which select the MMU index,
+     * recomputed per access), RT (consulted per RSE access) and PK.  Only PK
+     * is reflected in the cached softmmu TLB permissions, so discarding the
+     * whole softmmu TLB and jump cache on every write is wasteful -- Windows
+     * executes mov psr.l on every user->kernel system call.  Flush only when
+     * PK actually changes.  DA/IA live above bit 31 and cannot be reached by
+     * the psr.l form; the full-PSR path (psr_l == 0) is not produced by the
+     * decoder today, and would still be covered by the PK check for its
+     * translation-relevant bits.
+     */
+    ia64_flush_on_pk_change(env, old_psr);
 }
 
 /* ---- mov from Region Register helper ---- */
@@ -831,16 +866,25 @@ void ia64_system_mov_grrr_write(CPUIA64State *env, uint64_t rr_addr,
     }
 
     env->rr[rr_num] = value;
-    ia64_tlb_bump_generation(env, false);
-    ia64_tlb_bump_generation(env, true);
     /*
-     * The softmmu TLB and jump cache contain virtual-address state, so both
-     * must be discarded when the RID changes.  tlb_flush() does both.  The
-     * global TB hash is keyed by the translated physical page as well as the
-     * virtual PC, so its TBs remain valid and can be reused when this address
-     * space becomes current again.
+     * The virtual softmmu indices and the jump cache are VA-keyed, so both
+     * must be discarded when the RID changes: tlb_flush_by_mmuidx() of the
+     * translated indices does both (its async worker flushes the jump cache).
+     * Two things need not happen, though, and Windows/Linux run this on every
+     * process/mm switch:
+     *   - The PHYS index is physical-address-keyed and independent of the
+     *     region registers, so it is left intact (MMU_IDX_TRANSLATED_MASK
+     *     excludes it).
+     *   - The fork's micro-TLB entries are RID-tagged and validated on lookup
+     *     (cpu.h ia64_tlb_find_cached: cached->rid == rid), and the modeled TLB
+     *     that backs them is not purged by a region-register write, so a stale
+     *     entry simply never matches the new RID and a reused RID's entries are
+     *     still architecturally valid.  Bumping the micro-TLB generation to
+     *     wholesale-invalidate it is therefore unnecessary.
+     * The global TB hash is keyed by physical page as well as virtual PC, so
+     * its TBs remain valid and are reused when this address space is current.
      */
-    tlb_flush(env_cpu(env));
+    tlb_flush_by_mmuidx(env_cpu(env), MMU_IDX_TRANSLATED_MASK);
 }
 
 /* ---- mov from PKR helper ---- */

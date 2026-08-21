@@ -509,8 +509,7 @@ static void pal_copy_pal(CPUIA64State *env)
         }
         (void)ia64_exec_physical_rw(target_pa, le_words,
                                     sizeof(le_words), true);
-        tb_invalidate_phys_range(env_cpu(env), target_pa,
-                                 target_pa + PAL_COPY_CODE_SIZE - 1);
+        ia64_exec_invalidate_phys_range(env, target_pa, PAL_COPY_CODE_SIZE);
     }
 
     /*

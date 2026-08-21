@@ -93,20 +93,29 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
                             tcg_constant_i64(0xffffffffffff0000ULL));
         break;
     case IA64_OP_MOV_ARGR:
+        /*
+         * The application-register access check applies to the read itself, so
+         * it must run even when the destination is r0 (a discarded result).
+         */
+        if (!ia64_ar_is_simple(op->source)) {
+            ia64_gen_validate_ar_access(insn, tcg_constant_i64(0), false);
+        }
         if (op->destination != 0) {
             TCGv_i64 val = tcg_temp_new_i64();
 
             if (ia64_ar_is_simple(op->source)) {
                 ia64_gen_read_simple_ar(val, op->source);
             } else {
-                ia64_gen_validate_ar_access(insn, tcg_constant_i64(0),
-                                            false);
                 if (ia64_ar_access_reads_clock(op->source) &&
                     ia64_clock_access_needs_io(ctx)) {
                     translator_io_start(&ctx->base);
                 }
-                gen_helper_read_ar(val, tcg_env,
-                                   tcg_constant_i32(op->source));
+                if (op->source == IA64_AR_ITC) {
+                    gen_helper_itc_read(val, tcg_env);
+                } else {
+                    gen_helper_read_ar(val, tcg_env,
+                                       tcg_constant_i32(op->source));
+                }
             }
             ia64_gen_gr_write_nat_clear(op->destination, val);
         }
@@ -150,12 +159,15 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         }
         break;
     case IA64_OP_MOV_CRGR:
+    {
+        /* The CR access check applies even when the destination is r0. */
+        TCGv_i64 checked = tcg_temp_new_i64();
+
+        ia64_gen_validate_cr_access(checked, insn,
+                                    tcg_constant_i64(0), false);
         if (op->destination != 0) {
             TCGv_i64 val = tcg_temp_new_i64();
-            TCGv_i64 checked = tcg_temp_new_i64();
 
-            ia64_gen_validate_cr_access(checked, insn,
-                                        tcg_constant_i64(0), false);
             if (ia64_cr_read_is_plain_load(op->source)) {
                 tcg_gen_ld_i64(val, tcg_env,
                                offsetof(CPUIA64State, cr) +
@@ -167,6 +179,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             ia64_gen_gr_write_nat_clear(op->destination, val);
         }
         break;
+    }
     case IA64_OP_MOV_GRCR:
     {
         TCGv_i64 checked = tcg_temp_new_i64();
@@ -192,6 +205,15 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             tcg_gen_st_i64(checked, tcg_env,
                            offsetof(CPUIA64State, cr) +
                            op->source * sizeof(uint64_t));
+            if (op->source == IA64_CR_IIPA) {
+                /*
+                 * mov to CR.IIPA re-establishes the last-executed-bundle
+                 * latch that a subsequent interruption reports as IIPA.
+                 */
+                tcg_gen_st_i64(checked, tcg_env,
+                               offsetof(CPUIA64State,
+                                        last_successful_bundle));
+            }
         } else if (op->source == IA64_CR_SAPIC_LID) {
             /* Atomic store for cross-CPU readers; no translation effect. */
             gen_helper_write_cr(tcg_env, tcg_constant_i32(op->source),
@@ -880,16 +902,22 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         } else if (insn->opcode == IA64_OP_THASH) {
             gen_helper_thash(result, tcg_env, ia64_gr_src(op->register_index));
             if (op->destination != 0) {
-                tcg_gen_mov_i64(cpu_gr[op->destination], result);
+                /*
+                 * Derive the result NaT from the source before overwriting r1:
+                 * thash may name the same GR for source and destination, and an
+                 * earlier write would hide an unimplemented input address.
+                 */
                 ia64_gen_gr_nat_from_1_or_unimplemented_va(ctx, op->destination,
                                                            op->register_index);
+                tcg_gen_mov_i64(cpu_gr[op->destination], result);
             }
         } else {
             gen_helper_ttag(result, tcg_env, ia64_gr_src(op->register_index));
             if (op->destination != 0) {
-                tcg_gen_mov_i64(cpu_gr[op->destination], result);
+                /* Same source==destination ordering hazard as thash above. */
                 ia64_gen_gr_nat_from_1_or_unimplemented_va(ctx, op->destination,
                                                            op->register_index);
+                tcg_gen_mov_i64(cpu_gr[op->destination], result);
             }
         }
         break;

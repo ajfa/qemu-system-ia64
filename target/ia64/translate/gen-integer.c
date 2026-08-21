@@ -535,6 +535,20 @@ static void ia64_gen_native_integer_nat(const Ia64Instruction *insn)
         return;
     }
 
+    /*
+     * When every source that feeds the result is known NaT-clear at this point
+     * in the TB, the propagated destination NaT is provably 0.  Emit a single
+     * clear instead of reading each source's NaT bit and OR-ing them.  This
+     * reuses the same sound under-approximation (nat_known_clear) that
+     * ia64_update_nat_known() maintains and the consumption check already
+     * trusts, so it is exact -- when the result is not provably clear we fall
+     * through to the full propagation below.
+     */
+    if (insn->ctx && ia64_nat_result_is_known_clear(insn->ctx, insn)) {
+        ia64_gen_gr_nat_clear(op->destination);
+        return;
+    }
+
     switch (insn->opcode) {
     case IA64_OP_ADDS:
     case IA64_OP_ADDL:

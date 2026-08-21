@@ -154,6 +154,20 @@ void tlb_flush_page_by_mmuidx(CPUState *cpu, vaddr addr,
                               MMUIdxMap idxmap);
 
 /**
+ * tlb_flush_page_by_mmuidx_no_jmp_cache:
+ * @cpu: CPU whose TLB should be flushed
+ * @addr: virtual address of page to be flushed
+ * @idxmap: bitmap of MMU indexes to flush
+ *
+ * Flush one page like tlb_flush_page_by_mmuidx(), but retain translated-block
+ * jump-cache hints.  The single-page counterpart of
+ * tlb_flush_range_by_mmuidx_no_jmp_cache(); a target may use this only when the
+ * architectural invalidation cannot change instruction translation.
+ */
+void tlb_flush_page_by_mmuidx_no_jmp_cache(CPUState *cpu, vaddr addr,
+                                           MMUIdxMap idxmap);
+
+/**
  * tlb_flush_page_by_mmuidx_all_cpus_synced:
  * @cpu: Originating CPU of the flush
  * @addr: virtual address of page to be flushed
@@ -178,6 +192,19 @@ void tlb_flush_page_by_mmuidx_all_cpus_synced(CPUState *cpu, vaddr addr,
  * MMU indexes.
  */
 void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap);
+
+/**
+ * tlb_flush_by_mmuidx_no_jmp_cache:
+ * @cpu: CPU whose TLB should be flushed
+ * @idxmap: bitmap of MMU indexes to flush
+ *
+ * Flush all entries from the given MMU indexes like tlb_flush_by_mmuidx(), but
+ * retain translated-block jump-cache hints.  A target may use this only when
+ * none of the flushed indexes covers instruction fetches, so the invalidation
+ * cannot change instruction translation (cf.
+ * tlb_flush_range_by_mmuidx_no_jmp_cache()).
+ */
+void tlb_flush_by_mmuidx_no_jmp_cache(CPUState *cpu, MMUIdxMap idxmap);
 
 /**
  * tlb_flush_by_mmuidx_all_cpus_synced:
@@ -224,6 +251,17 @@ void tlb_flush_range_by_mmuidx(CPUState *cpu, vaddr addr,
                                vaddr len, MMUIdxMap idxmap,
                                unsigned bits);
 
+/**
+ * tlb_flush_range_by_mmuidx_no_jmp_cache
+ *
+ * Flush the same softmmu entries as tlb_flush_range_by_mmuidx(), but retain
+ * translated-block jump-cache hints.  A target may use this only when the
+ * architectural invalidation cannot change instruction translation.
+ */
+void tlb_flush_range_by_mmuidx_no_jmp_cache(CPUState *cpu, vaddr addr,
+                                            vaddr len, MMUIdxMap idxmap,
+                                            unsigned bits);
+
 /* Similarly, with broadcast and syncing. */
 void tlb_flush_range_by_mmuidx_all_cpus_synced(CPUState *cpu,
                                                vaddr addr,
@@ -247,8 +285,17 @@ static inline void tlb_flush_page_by_mmuidx(CPUState *cpu,
                                             vaddr addr, MMUIdxMap idxmap)
 {
 }
+static inline void tlb_flush_page_by_mmuidx_no_jmp_cache(CPUState *cpu,
+                                                         vaddr addr,
+                                                         MMUIdxMap idxmap)
+{
+}
 
 static inline void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
+{
+}
+static inline void tlb_flush_by_mmuidx_no_jmp_cache(CPUState *cpu,
+                                                    MMUIdxMap idxmap)
 {
 }
 static inline void tlb_flush_page_by_mmuidx_all_cpus_synced(CPUState *cpu,
@@ -274,6 +321,12 @@ tlb_flush_page_bits_by_mmuidx_all_cpus_synced(CPUState *cpu, vaddr addr,
 static inline void tlb_flush_range_by_mmuidx(CPUState *cpu, vaddr addr,
                                              vaddr len, MMUIdxMap idxmap,
                                              unsigned bits)
+{
+}
+static inline void
+tlb_flush_range_by_mmuidx_no_jmp_cache(CPUState *cpu, vaddr addr,
+                                       vaddr len, MMUIdxMap idxmap,
+                                       unsigned bits)
 {
 }
 static inline void tlb_flush_range_by_mmuidx_all_cpus_synced(CPUState *cpu,

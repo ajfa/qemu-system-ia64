@@ -968,10 +968,19 @@ BOOLEAN fw_legacy_io_protocols_selftest(VOID)
     VOID *mapping = NULL;
     UINTN bytes = sizeof(id);
 
+    /*
+     * Build a device path for an always-present controller.  The IDE (dev 0)
+     * and AHCI (dev 1) storage controllers are opt-in and absent from the
+     * default machine, where fw_pci_copy_device_path() would return
+     * EFI_UNSUPPORTED and fail the self-test.  The LSI SCSI controller at
+     * bus 0 / device 4 / function 0 is instantiated unconditionally, so
+     * exercise PciDevicePath against it to keep the DeviceIo path meaningful
+     * on every configuration.
+     */
     if (mDeviceIoProtocol.Pci.Read(&mDeviceIoProtocol, EfiIoWidthUint32,
                                    0, 1, &id) != EFI_SUCCESS || id == 0 ||
         mDeviceIoProtocol.PciDevicePath(&mDeviceIoProtocol,
-                                        1ULL << 16, &path) != EFI_SUCCESS ||
+                                        4ULL << 16, &path) != EFI_SUCCESS ||
         path == NULL || bs_free_pool(path) != EFI_SUCCESS ||
         mDeviceIoProtocol.Map(&mDeviceIoProtocol, EfiBusMasterRead,
                               &host_address, &bytes,

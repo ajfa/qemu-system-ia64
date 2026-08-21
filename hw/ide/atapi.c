@@ -349,6 +349,7 @@ static void ide_atapi_cmd_read_dma_cb(void *opaque, int ret)
 {
     IDEState *s = opaque;
     int data_offset, n;
+    bool raise_irq = false;
 
     if (ret < 0) {
         if (ide_handle_rw_error(s, -ret, ide_dma_cmd_to_retry(s->dma_cmd))) {
@@ -385,7 +386,16 @@ static void ide_atapi_cmd_read_dma_cb(void *opaque, int ret)
     if (s->packet_transfer_size <= 0) {
         s->status = READY_STAT | SEEK_STAT;
         s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
-        ide_bus_set_irq(s->bus);
+        /*
+         * Raise the completion interrupt only after ide_set_inactive() has
+         * cleared the bus-master Active bit (below), so a guest that samples
+         * the BMIDE status from the interrupt sees the transfer already
+         * finished -- (dma_stat & 7) == BM_STATUS_INT, which Linux'
+         * ide_dma_end() requires.  Raising here, with Active still set, let a
+         * guest observe dma_stat = INT|Active, mis-read the DMA as an error
+         * and retry, storming the shared IDE interrupt line.
+         */
+        raise_irq = true;
         goto eot;
     }
 
@@ -417,6 +427,9 @@ eot:
         block_acct_done(blk_get_stats(s->blk), &s->acct);
     }
     ide_set_inactive(s, false);
+    if (raise_irq) {
+        ide_bus_set_irq(s->bus);
+    }
 }
 
 /* start a CD-ROM read command with DMA */

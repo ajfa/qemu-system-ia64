@@ -79,6 +79,28 @@ static bool ia64_insn_may_modify_psr_ri(const Ia64Instruction *insn)
     return insn->opcode == IA64_OP_MOV_GRPSR;
 }
 
+/*
+ * Conservatively true for any instruction that can write PSR.ac.  ssm/rsm can
+ * set/clear it via their system-mask immediate; sum/rum and mov psr.um write
+ * the user mask; mov psr.l writes PSR{31:0}.  Used to invalidate the TB-flag
+ * view of PSR.ac for later ld/st in the same bundle.
+ */
+static bool ia64_insn_may_modify_psr_ac(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_SSM:
+    case IA64_OP_RSM:
+    case IA64_OP_SUM_UM:
+    case IA64_OP_RUM:
+        return insn->operands.system.immediate & IA64_PSR_AC;
+    case IA64_OP_MOV_GRUM:
+    case IA64_OP_MOV_GRPSR:
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool ia64_insn_is_empty_hint(const Ia64Instruction *insn)
 {
     switch (insn->opcode) {
@@ -466,8 +488,8 @@ static IA64NatResultPolicy ia64_nat_result_policy(
     }
 }
 
-static bool ia64_nat_result_is_known_clear(const DisasContext *ctx,
-                                           const Ia64Instruction *insn)
+bool ia64_nat_result_is_known_clear(const DisasContext *ctx,
+                                    const Ia64Instruction *insn)
 {
     switch (ia64_nat_result_policy(insn)) {
     case IA64_NAT_RESULT_CLEAR:
@@ -518,6 +540,7 @@ void ia64_update_frame_tracking(DisasContext *ctx,
 {
     if (ia64_insn_may_modify_cfm_sof(insn)) {
         ctx->cfm_sof_valid = false;
+        ctx->cfm_sof_checked = 0;
     }
 
     /*
@@ -526,8 +549,10 @@ void ia64_update_frame_tracking(DisasContext *ctx,
      * frame check.
      */
     if (insn->opcode == IA64_OP_ALLOC) {
-        ctx->cfm_sof =
-            tcg_constant_i32(insn->operands.common.immediate & 0x7f);
+        uint8_t new_sof = insn->operands.common.immediate & 0x7f;
+
+        ctx->cfm_sof = tcg_constant_i32(new_sof);
+        ctx->cfm_sof_checked = new_sof;
         ctx->cfm_sof_valid = true;
     }
 }
@@ -908,8 +933,31 @@ void ia64_gen_fr_set_nat(uint8_t reg)
     ia64_gen_fr_nat_set(reg);
 }
 
+/* Resolution of PSR.ac for a misaligned, non-always-fault access. */
+typedef enum IA64AlignAcMode {
+    IA64_ALIGN_AC_RUNTIME,  /* PSR.ac unknown: test it at run time */
+    IA64_ALIGN_AC_SET,      /* PSR.ac statically 1: any misalignment faults */
+    IA64_ALIGN_AC_CLEAR,    /* PSR.ac statically 0: only a page cross faults */
+} IA64AlignAcMode;
+
+static IA64AlignAcMode ia64_align_ac_mode(const Ia64Instruction *insn)
+{
+    const DisasContext *ctx = insn->ctx;
+
+    /*
+     * PSR.ac is in the TB flags.  While no ssm/rsm/sum/rum/mov-psr earlier in
+     * this bundle may have changed it, the flag is exact and the per-access
+     * PSR.ac read and branch can be resolved at translation time.
+     */
+    if (!ctx || ctx->restart.psr_ac_modified) {
+        return IA64_ALIGN_AC_RUNTIME;
+    }
+    return ctx->memory.psr_ac ? IA64_ALIGN_AC_SET : IA64_ALIGN_AC_CLEAR;
+}
+
 static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
                                                bool always_fault,
+                                               IA64AlignAcMode ac_mode,
                                                TCGLabel *fault)
 {
     TCGv_i64 tmp;
@@ -924,12 +972,18 @@ static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
     tcg_gen_andi_i64(tmp, addr, size - 1);
     tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, ok);
 
-    if (always_fault) {
+    if (always_fault || ac_mode == IA64_ALIGN_AC_SET) {
+        /* Misaligned always faults (PSR.ac set, or an alignment-required op). */
         tcg_gen_br(fault);
     } else {
-        tcg_gen_andi_i64(tmp, cpu_psr, IA64_PSR_AC);
-        tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, fault);
-
+        if (ac_mode == IA64_ALIGN_AC_RUNTIME) {
+            tcg_gen_andi_i64(tmp, cpu_psr, IA64_PSR_AC);
+            tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, fault);
+        }
+        /*
+         * PSR.ac clear: a misaligned access still faults if it crosses a
+         * 4 KiB page boundary (SDM Vol.2 5.5.4).
+         */
         tcg_gen_andi_i64(tmp, addr, 0xfff);
         tcg_gen_addi_i64(tmp, tmp, size - 1);
         tcg_gen_brcondi_i64(TCG_COND_GTU, tmp, 0xfff, fault);
@@ -952,7 +1006,8 @@ void ia64_gen_check_alignment_access(const Ia64Instruction *insn,
 
     fault = gen_new_label();
     ok = gen_new_label();
-    ia64_gen_branch_if_alignment_fault(addr, size, always_fault, fault);
+    ia64_gen_branch_if_alignment_fault(addr, size, always_fault,
+                                       ia64_align_ac_mode(insn), fault);
     tcg_gen_br(ok);
 
     gen_set_label(fault);
@@ -1272,24 +1327,34 @@ void ia64_gen_save_fault_slot_for_exit(DisasContext *ctx)
     }
 }
 
-static void ia64_gen_note_successful_bundle(uint64_t bundle_ip,
+static void ia64_gen_note_successful_bundle(const DisasContext *ctx,
+                                            uint64_t bundle_ip,
                                             bool record_iipa,
                                             bool track_psr_suppression)
 {
     if (record_iipa) {
-        TCGv_i64 collecting = tcg_temp_new_i64();
-        TCGLabel *l_done = gen_new_label();
-
         /*
          * Handler code with PSR.ic cleared must not advance the next IIPA
-         * value.
+         * value.  record_iipa is only set when PSR.ic is believed set
+         * (track_iipa), so unless an in-bundle ssm/rsm/mov-psr may have
+         * changed PSR.ic since TB entry, it is statically set and the store
+         * is unconditional -- no runtime andi/brcond/label per bundle.
          */
-        tcg_gen_andi_i64(collecting, cpu_psr, IA64_PSR_IC);
-        tcg_gen_brcondi_i64(TCG_COND_EQ, collecting, 0, l_done);
-        tcg_gen_st_i64(tcg_constant_i64(ia64_ip_bundle_addr(bundle_ip)),
-                       tcg_env,
-                       offsetof(CPUIA64State, last_successful_bundle));
-        gen_set_label(l_done);
+        if (!ctx->restart.psr_ic_modified) {
+            tcg_gen_st_i64(tcg_constant_i64(ia64_ip_bundle_addr(bundle_ip)),
+                           tcg_env,
+                           offsetof(CPUIA64State, last_successful_bundle));
+        } else {
+            TCGv_i64 collecting = tcg_temp_new_i64();
+            TCGLabel *l_done = gen_new_label();
+
+            tcg_gen_andi_i64(collecting, cpu_psr, IA64_PSR_IC);
+            tcg_gen_brcondi_i64(TCG_COND_EQ, collecting, 0, l_done);
+            tcg_gen_st_i64(tcg_constant_i64(ia64_ip_bundle_addr(bundle_ip)),
+                           tcg_env,
+                           offsetof(CPUIA64State, last_successful_bundle));
+            gen_set_label(l_done);
+        }
     }
 
     if (track_psr_suppression) {
@@ -1325,7 +1390,7 @@ void ia64_gen_exit_to_completed(DisasContext *ctx, uint64_t ip,
                                 bool record_iipa,
                                 bool track_psr_suppression)
 {
-    ia64_gen_note_successful_bundle(completed_ip, record_iipa,
+    ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_store_instruction_group_start(
         ctx->restart.next_instruction_group_start);
@@ -1337,7 +1402,7 @@ void ia64_gen_lookup_tcg_completed(DisasContext *ctx, TCGv_i64 ip,
                                    bool record_iipa,
                                    bool track_psr_suppression)
 {
-    ia64_gen_note_successful_bundle(completed_ip, record_iipa,
+    ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_store_instruction_group_start(true);
     ia64_gen_save_fault_slot_from_ri();
@@ -1351,7 +1416,7 @@ void ia64_gen_lookup_current_completed(DisasContext *ctx,
                                        bool record_iipa,
                                        bool track_psr_suppression)
 {
-    ia64_gen_note_successful_bundle(completed_ip, record_iipa,
+    ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_store_instruction_group_start(true);
     ia64_gen_save_fault_slot_from_ri();
@@ -1378,7 +1443,7 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
                                      bool record_iipa,
                                      bool track_psr_suppression)
 {
-    ia64_gen_note_successful_bundle(completed_ip, record_iipa,
+    ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_store_instruction_group_start(
         ctx->restart.next_instruction_group_start);
@@ -1390,7 +1455,7 @@ void ia64_gen_goto_completed(DisasContext *ctx, uint64_t ip,
                              bool record_iipa,
                              bool track_psr_suppression)
 {
-    ia64_gen_note_successful_bundle(completed_ip, record_iipa,
+    ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_goto_tb_group(ctx, ip, true);
 }
@@ -1538,13 +1603,17 @@ void ia64_prepare_self_counted_loop(
      * inside the body are re-established by the re-executed code.
      */
     ctx->cfm_sof_valid = false;
+    ctx->cfm_sof_checked = 0;
     ctx->memory.nat_known_clear[0] = 1;
     ctx->memory.nat_known_clear[1] = 0;
 
+    /*
+     * The budget temp is created and initialized once per TB in
+     * ia64_tr_tb_start (see there for why it cannot be initialized here);
+     * multiple self-loops in one TB share it, which only tightens the cap.
+     */
     ctx->branch.counted_self_label = gen_new_label();
-    ctx->branch.counted_self_budget = tcg_temp_new_i64();
     ctx->branch.counted_self_ip = bundle_ip;
-    tcg_gen_movi_i64(ctx->branch.counted_self_budget, IA64_COUNTED_SELF_BUDGET);
     gen_set_label(ctx->branch.counted_self_label);
 }
 
@@ -1566,7 +1635,7 @@ bool ia64_gen_self_counted_loop(DisasContext *ctx, uint64_t target,
                         0, exit_to_tb);
     tcg_gen_subi_i64(ctx->branch.counted_self_budget,
                      ctx->branch.counted_self_budget, 1);
-    ia64_gen_note_successful_bundle(completed_ip, record_iipa,
+    ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     /*
      * The taken branch restarts the target bundle at slot 0.  The internal
@@ -1834,9 +1903,20 @@ static void ia64_gen_check_gr_in_frame(const Ia64Instruction *insn,
 
     if (reg >= IA64_STACKED_GR_BASE) {
         DisasContext *ctx = insn->ctx;
-        TCGLabel *valid = gen_new_label();
+        uint8_t required_sof = reg - IA64_STACKED_GR_BASE + 1;
+        TCGLabel *valid;
         TCGv_i32 sof;
 
+        /*
+         * A successful dominating check proves every lower stacked register
+         * is also in frame until an instruction changes CFM.SOF.  Avoid
+         * regenerating an exception path and branch for that already-proven
+         * range.
+         */
+        if (ctx && required_sof <= ctx->cfm_sof_checked) {
+            return;
+        }
+        valid = gen_new_label();
         if (ctx && ctx->cfm_sof_valid) {
             sof = ctx->cfm_sof;
         } else {
@@ -1859,6 +1939,9 @@ static void ia64_gen_check_gr_in_frame(const Ia64Instruction *insn,
         ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
                                   insn->raw, insn->slot);
         gen_set_label(valid);
+        if (ctx && insn->qp == 0) {
+            ctx->cfm_sof_checked = required_sof;
+        }
     }
 }
 
@@ -2138,10 +2221,13 @@ static uint32_t ia64_insn_fp_read_sets(const Ia64Instruction *insn)
         return ia64_fp_reg_set(insn->operands.common.source1);
 
     case IA64_OP_CHK_S:
-    case IA64_OP_CHK_A:
-    case IA64_OP_CHK_A_CLR:
         return insn->check_fp ?
             ia64_fp_reg_set(insn->operands.common.source1) : 0;
+
+    case IA64_OP_CHK_A:
+    case IA64_OP_CHK_A_CLR:
+        /* A floating chk.a uses the FR number only as an ALAT tag. */
+        return 0;
 
     case IA64_OP_FCMP:
         return ia64_fp_reg_set(insn->operands.common.source1) |
@@ -2603,7 +2689,7 @@ bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     }
     if (result == IA64_GEN_CONTINUE) {
         ia64_gen_predicate_end(skip);
-        ia64_gen_note_successful_bundle(insn->address, record_iipa,
+        ia64_gen_note_successful_bundle(ctx, insn->address, record_iipa,
                                         track_psr_suppression);
         return false;
     }
@@ -2618,7 +2704,7 @@ bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     }
 
     ia64_gen_predicate_end(skip);
-    ia64_gen_note_successful_bundle(insn->address, record_iipa,
+    ia64_gen_note_successful_bundle(ctx, insn->address, record_iipa,
                                     track_psr_suppression);
     return false;
 }
@@ -2636,6 +2722,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     ctx->cpl = (flags & IA64_TB_FLAG_CPL_MASK) >> IA64_TB_FLAG_CPL_SHIFT;
     ctx->cpl_known = true;
     ctx->cfm_sof_valid = false;
+    ctx->cfm_sof_checked = 0;
     ctx->restart.start_slot = (ctx->base.tb->flags & IA64_TB_FLAG_RI_MASK) >>
                       IA64_TB_FLAG_RI_SHIFT;
     if (ctx->restart.start_slot > 2) {
@@ -2647,6 +2734,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     ctx->restart.track_psr_suppression =
         ctx->base.tb->flags & IA64_TB_FLAG_PSR_SUPPRESS;
     ctx->memory.be_data = ctx->base.tb->flags & IA64_TB_FLAG_BE;
+    ctx->memory.psr_ac = ctx->base.tb->flags & IA64_TB_FLAG_PSR_AC;
     ctx->memory.full_alat = ctx->env->alat_state.alat_full;
     ctx->memory.nat_known_clear[0] = 1;
     ctx->memory.nat_known_clear[1] = 0;
@@ -2658,6 +2746,26 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
 
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cs)
 {
+    DisasContext *ctx = container_of(db, DisasContext, base);
+
+    /*
+     * Shared iteration budget for the counted self-loop back edges
+     * (ia64_prepare_self_counted_loop).  It MUST be created and initialized
+     * here, in the TB's entry EBB, not next to the loop label: the init
+     * would otherwise sit between a preceding unconditional exit and the
+     * loop label, and when the optimizer proves that exit always taken
+     * (e.g. a predicate constant-folds), reachable_code_pass deletes the
+     * init while the label survives through its back-edge reference.
+     * liveness then reduces the now single-EBB temp to TEMP_EBB, discards
+     * its remaining writes, and the loop's budget test reads a dead temp -
+     * a temp_load() abort at code-generation time (measured: Server 2003
+     * SP1 GUI setup, -cpu montecito -smp 4).  In the entry EBB the init is
+     * reachable by construction whenever any use survives.  TBs without a
+     * self-loop lose nothing: the unused temp's init is dead-code removed.
+     */
+    ctx->branch.counted_self_budget = tcg_temp_new_i64();
+    tcg_gen_movi_i64(ctx->branch.counted_self_budget,
+                     IA64_COUNTED_SELF_BUDGET);
 }
 
 static void ia64_tr_insn_start(DisasContextBase *db, CPUState *cs)
@@ -2710,6 +2818,8 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
     skip_x_slot = false;
     record_iipa = true;
     psr_ic_modified = false;
+    ctx->restart.psr_ic_modified = false;
+    ctx->restart.psr_ac_modified = false;
     for (slot = ctx->restart.start_slot; slot < 3; ++slot) {
         if (skip_x_slot && slot == 2) {
             continue;
@@ -2740,6 +2850,10 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         }
         if (ia64_insn_may_modify_psr_ic(&insn)) {
             psr_ic_modified = true;
+            ctx->restart.psr_ic_modified = true;
+        }
+        if (ia64_insn_may_modify_psr_ac(&insn)) {
+            ctx->restart.psr_ac_modified = true;
         }
         track_iipa_for_insn = ctx->restart.track_iipa;
         if (ia64_insn_is_empty_hint(&insn) &&
@@ -3026,8 +3140,26 @@ void ia64_translate_code(CPUState *cs, TranslationBlock *tb,
     };
 
     if (tb->flags & IA64_TB_FLAG_PSR_IS) {
+        /*
+         * The IA-32 execution engine reuses the i386 translator and must obey
+         * the x86 memory model (x86-TSO: every ordering except store->load).
+         * Match target/i386's guest_default_memory_order so WOW64 code keeps
+         * the store-buffer ordering it relies on.
+         */
+        tcg_ctx->guest_mo = TCG_MO_ALL & ~TCG_MO_ST_LD;
         ia64_ia32_translate_code(cs, tb, max_insns, pc, host_pc);
     } else {
+        /*
+         * IA-64 is weakly ordered (SDM Vol.2 §2.5): ordinary loads and stores
+         * carry no ordering guarantee; software must use ld.acq/st.rel/mf/sync
+         * where it needs one, and the translator already emits the matching
+         * TCG barriers for those (IA64_TCG_MO_ACQUIRE/RELEASE and mf).  The
+         * inherited TCG_MO_ALL default instead declared the guest sequentially
+         * consistent, so tcg_gen_req_mo() emitted a barrier -- a locked host
+         * instruction on x86, a dmb on ARM -- before *every* guest access.
+         * Set the weak order so only the architected barriers cost anything.
+         */
+        tcg_ctx->guest_mo = 0;
         translator_loop(cs, tb, max_insns, pc, host_pc, &ia64_tr_ops,
                         &ctx.base, TCG_TYPE_VA);
     }

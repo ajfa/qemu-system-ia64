@@ -204,7 +204,7 @@ typedef struct {
 #define TEST_NVRAM_SIZE              0x0000000000010000ULL
 #define TEST_ECAM_BASE               0x0000007ff0000000ULL
 #define TEST_ECAM_SIZE               0x0000000010000000ULL
-#define TEST_PCI_MMIO_BASE           0x00000000c1000000ULL
+#define TEST_PCI_MMIO_BASE           0x00000000ee000000ULL
 #define TEST_PCI_MMIO_SIZE           0x0000000010000000ULL
 #define TEST_SPARSE_IO_BASE          0x000000800010000000ULL
 #define TEST_SPARSE_IO_SIZE          0x0000000004000000ULL
@@ -1672,13 +1672,18 @@ static BOOLEAN test_pci_root_io(EFI_SYSTEM_TABLE *SystemTable)
     EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *root = NULL;
     UINT32 device_id = 0;
 
+    /*
+     * Read the always-present LSI53C895A boot HBA at device 4 (0x1000:0x0012).
+     * The AHCI controller at device 1 is opt-in (ahci=off by default), so it
+     * must not be assumed present here.
+     */
     return SystemTable->BootServices->LocateProtocol(
                pci_root_guid, NULL, (VOID **)&root) == EFI_SUCCESS &&
            root != NULL && root->Pci.Read != NULL &&
            root->SegmentNumber == 0 &&
-           root->Pci.Read(root, EfiPciWidthUint32, 1ULL << 16, 1,
+           root->Pci.Read(root, EfiPciWidthUint32, 4ULL << 16, 1,
                           &device_id) == EFI_SUCCESS &&
-           device_id == 0x29228086U;
+           device_id == 0x00121000U;
 }
 
 static BOOLEAN test_pci_root_resources(EFI_SYSTEM_TABLE *SystemTable)
@@ -2001,12 +2006,20 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                 get_u16(descriptor + 14U) == 256U) {
                 bus = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
-                       descriptor[3] == 1U &&
+                       descriptor[3] == 1U && descriptor[5] == 0x33U &&
                        get_u64(descriptor + 6U) == 0 &&
                        get_u64(descriptor + 14U) == 0 &&
-                       get_u64(descriptor + 22U) == 0xffffffU &&
-                       get_u64(descriptor + 30U) == 0 &&
-                       get_u64(descriptor + 38U) == 0x1000000U) {
+                       get_u64(descriptor + 22U) == 0xffffU &&
+                       get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
+                       get_u64(descriptor + 38U) == 0x10000U) {
+                /*
+                 * Architectural 64 KB I/O window with a sparse translation
+                 * (_TTP|_TRS, type flags 0x33; _TRA = the memory-mapped port
+                 * window base).  The producer window shrank from 16 MB and
+                 * gained the sparse translation in 48321d4 so Windows' PnP I/O
+                 * arbiter can no longer rebalance the display adapter's I/O BAR
+                 * past the decodable range.
+                 */
                 io = 1;
             } else if (descriptor[0] == 0x87U && length == 23U &&
                        descriptor[3] == 0U &&
@@ -2371,7 +2384,7 @@ static BOOLEAN test_acpi_topology(const TEST_TABLE_CONTEXT *Context)
             madt_processors |= 1U << id;
         } else if (madt[offset] == 6U && length >= 16U) {
             iosapic = get_u32(madt + offset + 4U) == 0 &&
-                get_u64(madt + offset + 8U) == 0x80110000U;
+                get_u64(madt + offset + 8U) == 0xfec00000U;
         }
         offset += length;
     }

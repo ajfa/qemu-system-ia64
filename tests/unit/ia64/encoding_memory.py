@@ -410,6 +410,14 @@ def chk_a_nc_f(f1, source=0, target=0, qp=0):
         | bitfield(qp, 0, 6)
     )
 
+def chk_a_clr_f(f1, source=0, target=0, qp=0):
+    return (
+        bitfield(7, 33, 3)
+        | chk_a_target_bits(source, target)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
 def chk_a_clr_m(r2, source=0, target=0, qp=0):
     return (
         bitfield(1, 33, 1)
@@ -766,6 +774,7 @@ __all__ = (
     'chk_s_i',
     'chk_a_nc_m',
     'chk_a_nc_f',
+    'chk_a_clr_f',
     'chk_a_clr_m',
     'invala',
     'invala_e_gr',

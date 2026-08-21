@@ -624,8 +624,21 @@ static void ia64_do_fcmp(CPUIA64State *env, uint32_t p1, uint32_t p2,
         return;
     }
 
-    rel = floatx80_compare(ia64_fr_to_floatx80(env, r2),
-                           ia64_fr_to_floatx80(env, r3), &env->fp.fp_status);
+    /*
+     * fcmp.eq/.neq (cond 0) and fcmp.unord/.ord (cond 3) are quiet: an
+     * unordered (QNaN) operand does not raise Invalid.  Only fcmp.lt/.le
+     * (cond 1/2) signal.  Using softfloat's signaling compare for every
+     * relation wrongly set V (and could take an FP fault) on a QNaN.
+     */
+    if ((cond_code & 3) == 0 || (cond_code & 3) == 3) {
+        rel = floatx80_compare_quiet(ia64_fr_to_floatx80(env, r2),
+                                     ia64_fr_to_floatx80(env, r3),
+                                     &env->fp.fp_status);
+    } else {
+        rel = floatx80_compare(ia64_fr_to_floatx80(env, r2),
+                               ia64_fr_to_floatx80(env, r3),
+                               &env->fp.fp_status);
+    }
 
     switch (cond_code & 3) {
     case 0:
@@ -2964,8 +2977,14 @@ void ia64_fp_ldf_fill(CPUIA64State *env, uint32_t r1, uint64_t addr,
                       uintptr_t ra)
 {
     int mmu_idx = ia64_exec_mmu_index(env, false);
+    /*
+     * ldf.fill is not an atomic operation (SDM Vol.3 ldf), so the 16-byte
+     * spill slot needs no single-copy 16-byte atomicity -- only the natural
+     * 8-byte halves.  MO_ATOM_IFALIGN_PAIR keeps those atomic and avoids the
+     * cmpxchg16b/atomic16 path a default MO_128 access would take.
+     */
     MemOpIdx oi = make_memop_idx(
-        ia64_runtime_data_memop(env, MO_UO), mmu_idx);
+        ia64_runtime_data_memop(env, MO_UO | MO_ATOM_IFALIGN_PAIR), mmu_idx);
     Int128 pair = ia64_exec_load_16(env, addr, oi, ra);
     uint64_t low = int128_getlo(pair);
     uint64_t high = int128_gethi(pair);
@@ -3013,8 +3032,9 @@ void ia64_fp_stf_spill(CPUIA64State *env, uint64_t addr, uint32_t r2,
                        uintptr_t ra)
 {
     int mmu_idx = ia64_exec_mmu_index(env, false);
+    /* stf.spill is not atomic; pair-atomicity suffices (see ia64_fp_ldf_fill). */
     MemOpIdx oi = make_memop_idx(
-        ia64_runtime_data_memop(env, MO_UO), mmu_idx);
+        ia64_runtime_data_memop(env, MO_UO | MO_ATOM_IFALIGN_PAIR), mmu_idx);
     uint64_t low;
     uint64_t high;
 

@@ -41,8 +41,7 @@ typedef struct IA64MMUState {
     uint32_t tlb_inst_generation;
     IA64MicroTlbEntry tlb_data_micro[IA64_MICRO_TLB_SIZE];
     IA64MicroTlbEntry tlb_inst_micro[IA64_MICRO_TLB_SIZE];
-    uint8_t tlb_data_micro_next;
-    uint8_t tlb_inst_micro_next;
+    IA64CodeTlbEdCache code_tlb_ed;
 
     /* Transient bookkeeping for architected purge operations. */
     uint16_t pending_purge_data_count;
