@@ -57,7 +57,7 @@ jobs:
           libzstd-devel lzo-devel snappy-devel bzip2-devel
           libcurl-devel capstone-devel libiscsi-devel
           libusb1-devel usbredir-devel
-          gcc-ia64-linux-gnu binutils-ia64-linux-gnu
+          gcc-ia64-linux-gnu binutils-ia64-linux-gnu acpica-tools
 
       - uses: actions/checkout@v4
 
@@ -169,7 +169,7 @@ jobs:
           mingw64-pkg-config mingw64-SDL2 mingw64-gtk3
           mingw64-libpng mingw64-libjpeg-turbo mingw64-curl
           mingw64-gnutls mingw64-bzip2 mingw-w64-tools
-          gcc-ia64-linux-gnu binutils-ia64-linux-gnu
+          gcc-ia64-linux-gnu binutils-ia64-linux-gnu acpica-tools
 
       - uses: actions/checkout@v4
 

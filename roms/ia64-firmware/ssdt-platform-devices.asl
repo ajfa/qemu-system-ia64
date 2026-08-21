@@ -89,7 +89,12 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
         Device (UAR0)
         {
             Name (_HID, "PNP0501")
-            Name (_UID, 0)
+            /*
+             * Scalar names may stay ZeroOp (resolved via
+             * acpi_evaluate_object); only *package elements* must be typed
+             * byte literals under -oi -- see status.md 2.3.
+             */
+            Name (_UID, Zero)
             Name (_CRS, ResourceTemplate ()
             {
                 QWordMemory (ResourceConsumer, PosDecode, MinFixed,
