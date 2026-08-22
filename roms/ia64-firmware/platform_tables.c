@@ -375,17 +375,9 @@ static BOOLEAN acpi_published_range_valid(const VOID *Table, UINTN Size,
            end <= mAcpiTableEnd;
 }
 
-void efi_init_platform_tables(void)
+static void efi_init_sal_system_table(void)
 {
     UINTN i;
-    BOOLEAN vga_primary = fw_handoff_vga_console_primary();
-    UINT32 vga_id = (UINT32)pci_config_read_value(0, 0, 5, 0, 0, 4);
-    UINT64 debug_port_base = fw_handoff_debug_port_base();
-    BOOLEAN debug_port_present = debug_port_base != 0;
-    UINT32 xsdt_length = 36 + (debug_port_present ? 8U : 7U) * 8U;
-    UINT32 rsdt_length = 36 + (debug_port_present ? 8U : 7U) * 4U;
-
-    (void)acpi_assign_reclaim_tables();
 
     mSalSystemTable.Signature = EFI_SIGNATURE_32('S', 'S', 'T', '_');
     mSalSystemTable.Length = sizeof(mSalSystemTable);
@@ -508,6 +500,18 @@ void efi_init_platform_tables(void)
     mSalSystemTable.ApWake.Vector = 0xff;
     mSalSystemTable.Checksum =
         table_checksum8(&mSalSystemTable, sizeof(mSalSystemTable));
+
+}
+
+static void efi_init_acpi_tables(void)
+{
+    UINTN i;
+    BOOLEAN vga_primary = fw_handoff_vga_console_primary();
+    UINT32 vga_id = (UINT32)pci_config_read_value(0, 0, 5, 0, 0, 4);
+    UINT64 debug_port_base = fw_handoff_debug_port_base();
+    BOOLEAN debug_port_present = debug_port_base != 0;
+    UINT32 xsdt_length = 36 + (debug_port_present ? 8U : 7U) * 8U;
+    UINT32 rsdt_length = 36 + (debug_port_present ? 8U : 7U) * 4U;
 
     mFacs.Signature = EFI_SIGNATURE_32('F', 'A', 'C', 'S');
     mFacs.Length = sizeof(mFacs);
@@ -819,6 +823,12 @@ void efi_init_platform_tables(void)
 
     acpi_publish_reclaim_tables();
     smbios_init_table();
+}
+
+static void efi_publish_config_tables(void)
+{
+    UINTN i;
+
 
     for (i = 0; i < 16; i++) {
         mConfigTables[PLATFORM_TABLE_ACPI20].VendorGuid[i] =
@@ -855,6 +865,14 @@ void efi_init_platform_tables(void)
 
     mSystemTable.NumberOfTableEntries = PLATFORM_TABLE_INITIAL;
     mSystemTable.ConfigurationTable = mConfigTables;
+}
+
+void efi_init_platform_tables(void)
+{
+    (void)acpi_assign_reclaim_tables();
+    efi_init_sal_system_table();
+    efi_init_acpi_tables();
+    efi_publish_config_tables();
 }
 
 static BOOLEAN acpi_sdt_integrity_valid(const ACPI_SDT_HEADER *Hdr,
