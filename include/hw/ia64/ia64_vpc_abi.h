@@ -25,9 +25,11 @@
  * address-space window [0xFF000000, 4 GiB), not in guest low RAM: its old
  * home at 0xFF000 sat inside the sub-1 MB compatibility area, which real
  * firmware hands to the OS (shadowed IA-32 BIOS DRAM), and which the Phase 2
- * map rework publishes accordingly.  0xFF0FF000 is below every device in the
- * window (watchdog 0xFFEE0000, RTC 0xFFEF0000, NVRAM 0xFFF00000) and clear
- * of the 0xFFC00000+ area a future flash-resident firmware would claim.
+ * map rework publishes accordingly.  The handoff page and the (guest-
+ * invisible) watchdog assist page sit at 0xFF0FF000/0xFF0FE000, clear of
+ * the 0xFFC00000+ flash range a future flash-resident firmware would claim;
+ * the NVRAM window sits inside that range at the real SDV flash's
+ * NVRAM-sector address.
  */
 #define IA64_FW_HANDOFF_ADDR          IA64_U64(0x00000000ff0ff000)
 #define IA64_FW_HANDOFF_MAGIC         IA64_U64(0x4d41523436414951) /* "QIA64RAM" */
@@ -219,13 +221,18 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * Invented MMIO devices inside the firmware window (deviation D8 in
  * plans/firmware-rework-target-model.md; to be relocated).
  */
-#define IA64_RTC_BASE                 IA64_U64(0x00000000ffef0000)
-#define IA64_RTC_SIZE                 IA64_U64(0x0000000000002000)
-#define IA64_WATCHDOG_BASE            IA64_U64(0x00000000ffee0000)
+/* QEMU-internal EFI watchdog assist; undescribed, guests never see it. */
+#define IA64_WATCHDOG_BASE            IA64_U64(0x00000000ff0fe000)
 #define IA64_WATCHDOG_SIZE            IA64_U64(0x0000000000001000)
 #define IA64_WATCHDOG_TIMEOUT_OFFSET  0x00U
 #define IA64_WATCHDOG_CODE_OFFSET     0x08U
-#define IA64_NVRAM_BASE               IA64_U64(0x00000000fff00000)
+/*
+ * EFI variable store, standing in for the flash variable sector.  The real
+ * i2000/SDV flash keeps its NVRAM/variable scratch block at 0xFFF90000
+ * (FIT type 0x1E, 128 KB - plans/sdv-i2000-firmware-reference.md sec 11),
+ * so the window sits at that address.
+ */
+#define IA64_NVRAM_BASE               IA64_U64(0x00000000fff90000)
 #define IA64_NVRAM_SIZE               IA64_U64(0x0000000000010000)
 #define IA64_NVRAM_COMMIT_OFFSET      (IA64_NVRAM_SIZE - 8U)
 #define IA64_NVRAM_COMMIT_MAGIC       IA64_U64(0x54494d4d4f43564e) /* "NVCOMMIT" */
