@@ -882,24 +882,56 @@ static bool rtc_value_is_current(uint64_t value)
     return value >= now - 5 && value <= now + 5;
 }
 
+/* MC146818 CMOS RTC at legacy ports 0x70/0x71 in the I/O port space. */
+static uint8_t rtc_cmos_read(QTestState *qts, uint8_t reg)
+{
+    qtest_writeb(qts, IA64_PCI_IO_BASE + 0x70, reg);
+    return qtest_readb(qts, IA64_PCI_IO_BASE + 0x71);
+}
+
+static uint64_t rtc_cmos_field(uint8_t value, bool binary)
+{
+    return binary ? value : (uint64_t)(value >> 4) * 10 + (value & 0x0f);
+}
+
 static void test_rtc_aligned_read(void)
 {
     QTestState *qts = ia64_vpc_start(NULL);
-    uint64_t before_write;
-    uint64_t after_write;
-    uint64_t after_reset;
+    uint8_t reg_b;
+    bool binary;
+    struct tm tm = { 0 };
+    time_t guest;
+    unsigned attempt;
 
-    before_write = qtest_readq(qts, IA64_RTC_BASE);
-    g_assert_true(rtc_value_is_current(before_write));
+    for (attempt = 0; attempt < 4; attempt++) {
+        unsigned spin;
+        uint64_t sec;
 
-    /* The RTC window is deliberately read-only. */
-    qtest_writeq(qts, IA64_RTC_BASE, UINT64_MAX);
-    after_write = qtest_readq(qts, IA64_RTC_BASE);
-    g_assert_true(rtc_value_is_current(after_write));
+        for (spin = 0; spin < 1000; spin++) {
+            if (!(rtc_cmos_read(qts, 0x0a) & 0x80)) {
+                break;
+            }
+        }
+        reg_b = rtc_cmos_read(qts, 0x0b);
+        binary = (reg_b & 0x04) != 0;
+        g_assert_true((reg_b & 0x02) != 0);   /* 24-hour mode */
 
-    qtest_system_reset(qts);
-    after_reset = qtest_readq(qts, IA64_RTC_BASE);
-    g_assert_true(rtc_value_is_current(after_reset));
+        sec = rtc_cmos_field(rtc_cmos_read(qts, 0x00), binary);
+        tm.tm_sec = sec;
+        tm.tm_min = rtc_cmos_field(rtc_cmos_read(qts, 0x02), binary);
+        tm.tm_hour = rtc_cmos_field(rtc_cmos_read(qts, 0x04), binary);
+        tm.tm_mday = rtc_cmos_field(rtc_cmos_read(qts, 0x07), binary);
+        tm.tm_mon = rtc_cmos_field(rtc_cmos_read(qts, 0x08), binary) - 1;
+        tm.tm_year = rtc_cmos_field(rtc_cmos_read(qts, 0x09), binary);
+        if (rtc_cmos_field(rtc_cmos_read(qts, 0x00), binary) != sec) {
+            continue;                          /* ticked mid-read */
+        }
+        break;
+    }
+    tm.tm_year += tm.tm_year < 80 ? 100 : 0;   /* two-digit year pivot */
+
+    guest = timegm(&tm);
+    g_assert_true(rtc_value_is_current(guest));
     qtest_quit(qts);
 }
 

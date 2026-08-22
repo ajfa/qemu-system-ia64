@@ -37,6 +37,7 @@
 #include "hw/pci/pci_bus.h"
 #include "net/net.h"
 #include "hw/isa/isa.h"
+#include "hw/rtc/mc146818rtc.h"
 #include "hw/usb/hcd-uhci.h"
 #include "hw/usb/usb.h"
 #include "hw/ia64/ia64_loader.h"
@@ -406,7 +407,6 @@ struct IA64VpcMachineState {
     MemoryRegion *vga_legacy_alias;
     MemoryRegion *lsapic_mmio;
     MemoryRegion firmware_space;
-    MemoryRegion rtc_mmio;
     MemoryRegion watchdog_mmio;
     MemoryRegion nvram_mmio;
     MemoryRegion acpi_pm;
@@ -1444,58 +1444,6 @@ static void ia64_vpc_init_int10(IA64VpcMachineState *s,
 }
 #endif
 
-static uint64_t ia64_vpc_rtc_read(void *opaque, hwaddr addr, unsigned size)
-{
-    struct tm tm;
-
-    (void)opaque;
-    if (addr != 0 || size != sizeof(uint64_t)) {
-        return 0;
-    }
-
-    /*
-     * Expose the QEMU-configured RTC as seconds since the Unix epoch.  A
-     * single aligned 64-bit read is intrinsically coherent, unlike a bank of
-     * calendar registers whose fields could straddle a second boundary.
-     */
-    qemu_get_timedate(&tm, 0);
-    return mktimegm(&tm);
-}
-
-static void ia64_vpc_rtc_write(void *opaque, hwaddr addr, uint64_t value,
-                               unsigned size)
-{
-    /* The platform RTC is a read-only seconds-since-epoch register. */
-    (void)opaque;
-    (void)addr;
-    (void)value;
-    (void)size;
-}
-
-static const MemoryRegionOps ia64_vpc_rtc_ops = {
-    .read = ia64_vpc_rtc_read,
-    .write = ia64_vpc_rtc_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = {
-        .min_access_size = 8,
-        .max_access_size = 8,
-        .unaligned = false,
-    },
-    .impl = {
-        .min_access_size = 8,
-        .max_access_size = 8,
-        .unaligned = false,
-    },
-};
-
-static void ia64_vpc_init_rtc(IA64VpcMachineState *s)
-{
-    memory_region_init_io(&s->rtc_mmio, OBJECT(s),
-                          &ia64_vpc_rtc_ops, s, "ia64-vpc.rtc",
-                          IA64_RTC_SIZE);
-    memory_region_add_subregion_overlap(get_system_memory(), IA64_RTC_BASE,
-                                        &s->rtc_mmio, 2);
-}
 
 static void ia64_vpc_watchdog_expired(void *opaque)
 {
@@ -3399,7 +3347,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (!ia64_vpc_map_firmware_address_space(s, errp)) {
         return false;
     }
-    ia64_vpc_init_rtc(s);
     ia64_vpc_init_watchdog(s);
     ia64_vpc_init_nvram(s);
     ia64_vpc_write_firmware_handoff(s);
@@ -3557,6 +3504,12 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
     }
     isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
+    /*
+     * The real-time clock is the standard MC146818 CMOS device at legacy
+     * ports 0x70/0x71 (IRQ 8), as the i2000/SDV Super-I/O provides - the
+     * invented MMIO seconds register at 0xFFEF0000 is gone (rework D8).
+     */
+    mc146818_rtc_init(isa_bus, 2000, NULL);
 #ifdef CONFIG_IA64_VPC_PS2
     if (s->i8042_enabled) {
         ISADevice *i8042 = isa_new(TYPE_I8042);

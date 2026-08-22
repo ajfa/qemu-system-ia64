@@ -705,14 +705,9 @@ void efi_init_memory_map(void)
      * as it was before AGP support.
      */
 
+    /* The RTC is a CMOS device at legacy ports now (rework D8). */
     efi_add_memory_range(&index, EfiMemoryMappedIO,
                          FW_FIRMWARE_ADDRESS_SPACE_BASE,
-                         FW_RTC_BASE, EFI_MEMORY_UC);
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         FW_RTC_BASE, FW_RTC_BASE + FW_RTC_SIZE,
-                         EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         FW_RTC_BASE + FW_RTC_SIZE,
                          FW_NVRAM_BASE, EFI_MEMORY_UC);
     efi_add_memory_range(&index, EfiMemoryMappedIO,
                          FW_NVRAM_BASE, FW_NVRAM_BASE + FW_NVRAM_SIZE,

@@ -412,7 +412,8 @@ static UINTN                  mRuntimeResetControl =
     LEGACY_IO_BASE + ACPI_PM_IO_BASE + ACPI_PM_RESET_OFFSET;
 UINTN                         mRuntimePciConfigEcam =
     PCI_CONFIG_ECAM_BASE;
-static UINTN                  mRuntimeRtc = FW_RTC_BASE;
+/* MC146818 CMOS RTC index port; the data port is index + 1 (rework D8). */
+static UINTN                  mRuntimeRtc = LEGACY_IO_BASE + 0x70U;
 static UINTN                  mRuntimeRtcState =
     FW_NVRAM_BASE + FW_NVRAM_RTC_OFFSET;
 
@@ -5703,20 +5704,96 @@ static BOOLEAN fw_rtc_state_valid(const FW_RTC_STATE *State)
             (State->TimeZone >= -1440 && State->TimeZone <= 1440));
 }
 
+static UINT8 fw_cmos_read(UINT8 Reg)
+{
+    *(volatile UINT8 *)mRuntimeRtc = Reg;
+    return *(volatile UINT8 *)(mRuntimeRtc + 1U);
+}
+
+static UINT64 fw_rtc_field(UINT8 Value, BOOLEAN Binary)
+{
+    return Binary ? Value : (UINT64)(Value >> 4) * 10U + (Value & 0x0FU);
+}
+
+/*
+ * Read the MC146818 CMOS calendar (ports 0x70/0x71, as on the i2000/SDV
+ * Super-I/O) and convert it to seconds since the Unix epoch.  Honors the
+ * update-in-progress bit and the binary/BCD and 12/24-hour modes; a
+ * double read guards against an update between fields.
+ */
 static BOOLEAN fw_rtc_read_seconds(INT64 *Seconds)
 {
-    UINT64 value;
+    UINTN attempt;
 
     if (Seconds == NULL) {
         return 0;
     }
-    /* This volatile load targets the host-backed RTC MMIO register. */
-    value = *(volatile UINT64 *)mRuntimeRtc;
-    if (value > 0x7fffffffffffffffULL) {
-        return 0;
+
+    for (attempt = 0; attempt < 4U; attempt++) {
+        UINT8 reg_b;
+        BOOLEAN binary;
+        BOOLEAN hours24;
+        UINT64 sec, min, hour, day, month, year;
+        UINT8 raw_hour;
+        UINTN spin;
+        UINT64 era, yoe, doy, doe, days;
+
+        for (spin = 0; spin < 100000U; spin++) {
+            if ((fw_cmos_read(0x0AU) & 0x80U) == 0) {
+                break;
+            }
+        }
+
+        reg_b = fw_cmos_read(0x0BU);
+        binary = (reg_b & 0x04U) != 0;
+        hours24 = (reg_b & 0x02U) != 0;
+
+        sec = fw_rtc_field(fw_cmos_read(0x00U), binary);
+        min = fw_rtc_field(fw_cmos_read(0x02U), binary);
+        raw_hour = fw_cmos_read(0x04U);
+        day = fw_rtc_field(fw_cmos_read(0x07U), binary);
+        month = fw_rtc_field(fw_cmos_read(0x08U), binary);
+        year = fw_rtc_field(fw_cmos_read(0x09U), binary);
+        if (fw_cmos_read(0x00U) != (binary ? (UINT8)sec :
+                (UINT8)(((sec / 10U) << 4) | (sec % 10U)))) {
+            continue;   /* the clock ticked mid-read */
+        }
+
+        if (hours24) {
+            hour = fw_rtc_field(raw_hour, binary);
+        } else {
+            hour = fw_rtc_field(raw_hour & 0x7FU, binary) % 12U;
+            if (raw_hour & 0x80U) {
+                hour += 12U;
+            }
+        }
+        /* No century register contract: pivot on the two-digit year. */
+        year += (year < 80U) ? 2000U : 1900U;
+
+        if (sec > 59U || min > 59U || hour > 23U ||
+            day < 1U || day > 31U || month < 1U || month > 12U) {
+            continue;
+        }
+
+        /*
+
+         * Days from civil date (proleptic Gregorian), epoch 1970-01-01.
+         */
+        {
+            UINT64 y = year - (month <= 2U ? 1U : 0U);
+
+            era = y / 400U;
+            yoe = y - era * 400U;
+            doy = (153U * (month + (month > 2U ? (UINT64)-3 : 9U)) + 2U) /
+                  5U + day - 1U;
+            doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+            days = era * 146097U + doe - 719468U;
+        }
+
+        *Seconds = (INT64)(days * 86400U + hour * 3600U + min * 60U + sec);
+        return 1;
     }
-    *Seconds = (INT64)value;
-    return 1;
+    return 0;
 }
 
 EFI_STATUS rs_get_time(EFI_TIME *Time, EFI_TIME_CAPABILITIES *Capabilities)
