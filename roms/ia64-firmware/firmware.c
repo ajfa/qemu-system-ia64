@@ -1272,11 +1272,28 @@ static BOOLEAN efi_find_free_pages_backward(UINT64 Start, UINT64 End,
     return 0;
 }
 
+static BOOLEAN efi_find_max_pages(UINT64 MaxAddress, UINT64 Size,
+                                  UINT64 Alignment,
+                                  EFI_PHYSICAL_ADDRESS *Memory);
+
 static BOOLEAN efi_find_any_pages(UINT64 Size, UINT64 Alignment,
                                   EFI_PHYSICAL_ADDRESS *Memory)
 {
     UINT64 lower_bound;
     unsigned pass;
+
+    /*
+     * Real EFI cores satisfy AllocateAnyPages top-down (rework plan 2.5):
+     * boot-services allocations cluster directly below the RAM-top firmware
+     * reservation instead of fragmenting the low RAM the Windows loaders
+     * carve their heaps and images from ([1 MB, ~256 MB)).  Cap at the low
+     * RAM end so loader-visible data stays below 4 GiB; the ascending
+     * legacy walk below remains as the fallback.
+     */
+    if (mGuestLowRamEnd != 0 &&
+        efi_find_max_pages(mGuestLowRamEnd - 1U, Size, Alignment, Memory)) {
+        return 1;
+    }
 
     if (!efi_align_up_u64(mNextPageAddr, Alignment, &lower_bound)) {
         lower_bound = ~0ULL;
