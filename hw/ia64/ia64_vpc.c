@@ -1940,13 +1940,21 @@ static const struct {
  *  - low-boundaries: retired in phase 2.3 on the relocated map - the
  *    32/48/64/80 MB no-coalesce boundaries' motivating lanes (XP 2600
  *    ntoskrnl-missing class; 2003 SP1 installer error 16) pass without
- *    them.  NOTE: split-page is NOT retired - the XP 2002 installer
- *    wedges in kernel-init memmove without it (see the expected-state
- *    ledger).
+ *    them.
+ *  - low-anchor + anchor-version-sniff: retired in phase 2.4 - on the
+ *    relocated map the XP-era MiInitMachineDependent reset class no
+ *    longer fires (XP 2600 UP+SMP desktops, 2462 logon, XP 2002 and
+ *    2003 SP1 installers to text setup, XP SP1 desktop, all A/B'd with
+ *    the anchor off).  With the sniff gone the map is no longer
+ *    guest-build-specific.
+ *
+ *  NOT retired: split-page - the XP 2002 installer wedges in kernel-init
+ *  memmove without it (see the expected-state ledger); pal-8k-page.
  */
 #define IA64_VPC_FW_QUIRK_DEFAULT_DISABLE \
     (IA64_FW_QUIRK_ACPI_LOW_ISLAND | IA64_FW_QUIRK_SCRATCH_2G | \
-     IA64_FW_QUIRK_LOW_BOUNDARIES)
+     IA64_FW_QUIRK_LOW_BOUNDARIES | IA64_FW_QUIRK_LOW_ANCHOR | \
+     IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF)
 
 static char *ia64_vpc_get_fw_quirks(Object *obj, Error **errp)
 {
@@ -3814,8 +3822,8 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "disables, '+name'/'name' re-enables, 'default' resets.  Names: "
         "split-page, low-boundaries, low-anchor, anchor-version-sniff, "
         "2g-scratch, pal-8k-page, acpi-low-island.  Retired quirks "
-        "(acpi-low-island, 2g-scratch, low-boundaries) default off, the "
-        "rest default on; "
+        "(acpi-low-island, 2g-scratch, low-boundaries, low-anchor, "
+        "anchor-version-sniff) default off, the rest default on; "
         "toggling changes the guest-visible EFI memory map -- "
         "A/B rig for plans/firmware-rework-plan.md Phase 2");
     object_class_property_add_str(oc, "firmware-console",

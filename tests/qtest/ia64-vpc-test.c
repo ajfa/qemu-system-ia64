@@ -662,7 +662,8 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
     g_assert_cmphex(le64_to_cpu(handoff.ThreadsPerCore), ==, threads);
     g_assert_cmphex(le64_to_cpu(handoff.MapQuirkDisable), ==,
                     IA64_FW_QUIRK_ACPI_LOW_ISLAND | IA64_FW_QUIRK_SCRATCH_2G |
-                    IA64_FW_QUIRK_LOW_BOUNDARIES);
+                    IA64_FW_QUIRK_LOW_BOUNDARIES | IA64_FW_QUIRK_LOW_ANCHOR |
+                    IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF);
 }
 
 static void test_firmware_handoff_defaults(void)
@@ -681,7 +682,7 @@ static void test_firmware_handoff_defaults(void)
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x5e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
     uint8_t actual[sizeof(IA64VpcHandoff)];
     QTestState *qts = ia64_vpc_start(NULL);
