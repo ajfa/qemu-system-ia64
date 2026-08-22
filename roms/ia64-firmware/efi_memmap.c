@@ -376,28 +376,86 @@ UINT64 fw_low_anchor_base(void)
            FW_LOW_ANCHOR_BASE : FW_LOW_IMAGE_END;
 }
 
+/*
+ * The resident firmware image, shadowed at the top of low RAM.  Linux
+ * discovers the PAL entry through an EfiPalCode memory descriptor and calls
+ * it through a region 7 alias, so expose the actual PAL trampoline page
+ * separately.  Keep the one-time entry path as boot-services code, then
+ * expose the aligned runtime text and data as ONE runtime descriptor: IA-64
+ * SAL enters with a GP supplied by the SAL system table, and the linked code
+ * uses GP-relative references into rodata/data - a loader may assign
+ * unrelated virtual bases to separate runtime descriptors, which would break
+ * those references.
+ */
+static void efi_add_firmware_image(UINTN *Index)
+{
+    UINTN image_start = (UINTN)__fw_image_start;
+    UINTN firmware_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
+    UINTN runtime_code_start = (UINTN)&__runtime_code_start;
+    /*
+     * Describe PAL code as a whole 8 KB OS page.  The Windows IA-64 loader
+     * stores its descriptors in 4 KB units and, in InsertDescriptor
+     * (WXPSP1 base/boot/efi/sumain.c), sets MustCoellesce whenever an
+     * entry's 4 KB base is odd or the PREVIOUS entry's 4 KB page count is
+     * odd -- and for MemoryFirmwarePermanent it then resolves that by
+     * "stealing" a page from the prior (free) entry.  A 4 KB PAL descriptor
+     * makes the run odd and perturbs every boundary after it.
+     */
+    UINTN pal_align = fw_map_quirk_enabled(IA64_FW_QUIRK_PAL_8K_PAGE) ?
+                      0x1FFFULL : 0xFFFULL;
+    UINTN pal_start = (UINTN)pal_proc_entry & ~pal_align;
+    UINTN pal_end = pal_start + pal_align + 1U;
+
+    if (pal_start >= image_start && pal_end <= firmware_end) {
+        efi_add_memory_range(Index, EfiBootServicesCode, image_start,
+                             pal_start, EFI_MEMORY_WB);
+        efi_add_memory_range(Index, EfiPalCode, pal_start, pal_end,
+                             EFI_MEMORY_WB);
+        efi_add_memory_range(Index, EfiBootServicesCode, pal_end,
+                             runtime_code_start, EFI_MEMORY_WB);
+        efi_add_memory_range(Index, EfiRuntimeServicesCode,
+                             runtime_code_start, firmware_end,
+                             efi_memory_attribute(EfiRuntimeServicesCode,
+                                                  EFI_MEMORY_WB));
+    } else {
+        efi_add_memory_range(Index, EfiRuntimeServicesCode, image_start,
+                             firmware_end,
+                             efi_memory_attribute(EfiRuntimeServicesCode,
+                                                  EFI_MEMORY_WB));
+    }
+}
+
 void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 StartRam,
                                        UINT64 LowRamEnd)
 {
+    UINTN image_start = (UINTN)__fw_image_start;
+    BOOLEAN image_low = image_start == 0x00100000ULL;
+    UINTN image_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
+    BOOLEAN island = fw_map_quirk_enabled(IA64_FW_QUIRK_ACPI_LOW_ISLAND);
+    UINT64 top_block = island ? mCpuAssistBase : mAcpiRegionBase;
+
     /*
      * Real IA-64 firmware carves its SAL/boot scratch from the top of
      * installed RAM and leaves the DRAM below it contiguous (460GX SDV and
-     * E8870 SR870BH2 alike).  The CPU-assist region - SAL re-entry slots,
-     * debug contexts/stacks, initial RSE backing stores and the boot memory
-     * stacks that SAL reuses after ExitBootServices() - is published as one
-     * runtime-data descriptor ending exactly at the low-RAM end.
+     * E8870 SR870BH2 alike).  In the relocated layout the whole RAM-top
+     * firmware reservation is one contiguous run ending exactly at the
+     * low-RAM end: the shadowed image (descriptors emitted by
+     * efi_add_firmware_image), its bss/headroom tail, the ACPI staging
+     * region (unless the acpi-low-island quirk parks it at 8 MB), and the
+     * CPU-assist region - SAL re-entry slots, debug contexts/stacks,
+     * initial RSE backing stores and the boot memory stacks that SAL
+     * reuses after ExitBootServices().
      */
-    if (fw_map_quirk_enabled(IA64_FW_QUIRK_ACPI_LOW_ISLAND)) {
-        efi_add_conventional_with_system_pointer(Index, StartRam,
-                                                 mCpuAssistBase);
+    if (image_low) {
+        efi_add_conventional_with_system_pointer(Index, StartRam, top_block);
     } else {
-        /*
-         * ACPI staging sits directly below the CPU-assist region, so the
-         * whole RAM-top firmware reservation is one contiguous block:
-         * FACS NVS page, reclaimable tables, then the runtime-data region.
-         */
         efi_add_conventional_with_system_pointer(Index, StartRam,
-                                                 mAcpiRegionBase);
+                                                 image_start);
+        /* bss + span headroom up to the next block: boot-services scratch. */
+        efi_add_memory_range(Index, EfiBootServicesData, image_end,
+                             top_block, EFI_MEMORY_WB);
+    }
+    if (!island) {
         efi_add_memory_range(Index, EfiACPIMemoryNVS, ACPI_RECLAIM_BASE,
                              ACPI_RECLAIM_TABLE_BASE, EFI_MEMORY_WB);
         efi_add_memory_range(Index, EfiACPIReclaimMemory,
@@ -415,23 +473,18 @@ void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 StartRam,
 
 void efi_init_memory_map(void)
 {
-    UINTN firmware_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
-    UINTN runtime_code_start = (UINTN)&__runtime_code_start;
-    /*
-     * Describe PAL code as a whole 8 KB OS page.  The Windows IA-64 loader
-     * stores its descriptors in 4 KB units and, in InsertDescriptor
-     * (WXPSP1 base/boot/efi/sumain.c), sets MustCoellesce whenever an entry's
-     * 4 KB base is odd or the PREVIOUS entry's 4 KB page count is odd -- and
-     * for MemoryFirmwarePermanent it then resolves that by "stealing" a page
-     * from the prior (free) entry.  A 4 KB PAL descriptor makes the run odd and
-     * perturbs every boundary after it.
-     */
-    UINTN pal_align = fw_map_quirk_enabled(IA64_FW_QUIRK_PAL_8K_PAGE) ?
-                      0x1FFFULL : 0xFFFULL;
-    UINTN pal_start = (UINTN)pal_proc_entry & ~pal_align;
-    UINTN pal_end = pal_start + pal_align + 1U;
     UINT64 ram_size = fw_guest_ram_size();
     UINT64 low_ram_end = fw_guest_low_ram_end();
+    /*
+     * The image executes either from its 1 MB link home (machine option
+     * fw-relocate=off, and the microprogram batteries) or from the RAM-top
+     * shadow; its own relocated start symbol says which.  In the relocated
+     * layout the vacated low RAM is conventional from 1 MB.
+     */
+    UINTN image_start = (UINTN)__fw_image_start;
+    BOOLEAN image_low = image_start == 0x00100000ULL;
+    UINTN image_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
+    UINT64 low_conv_start = image_low ? image_end : 0x00100000ULL;
     UINTN index = 0;
     UINTN i;
 
@@ -447,9 +500,15 @@ void efi_init_memory_map(void)
                                      mBootStackTop);
     mSystemTablePointer =
         (EFI_SYSTEM_TABLE_POINTER *)(UINTN)mSystemTablePointerBase;
+    efi_add_firmware_image(&index);
 
-    if (mNextPageAddr < firmware_end) {
-        mNextPageAddr = firmware_end;
+    /*
+     * In the relocated layout the image no longer bounds the allocator;
+     * the static 16 MB floor keeps boot-services allocations out of the
+     * loaders' low staging area.
+     */
+    if (image_low && mNextPageAddr < image_end) {
+        mNextPageAddr = image_end;
     }
 
     /*
@@ -500,46 +559,13 @@ void efi_init_memory_map(void)
                          EFI_MEMORY_WT | EFI_MEMORY_WB);
 
     /*
-     * Keep the resident firmware image out of loader allocations.  Linux
-     * discovers the PAL entry through an EfiPalCode memory descriptor and
-     * calls it through a region 7 alias, so expose the actual PAL trampoline
-     * page separately.  Keep the one-time entry path as boot-services code,
-     * then expose the aligned runtime text and data ranges so OSes do not
-     * reclaim callable firmware services after ExitBootServices().
-     */
-    if (pal_start >= 0x00100000 && pal_end <= firmware_end) {
-        efi_add_memory_range(&index, EfiBootServicesCode, 0x00100000,
-                             pal_start, EFI_MEMORY_WB);
-        efi_add_memory_range(&index, EfiPalCode, pal_start, pal_end,
-                             EFI_MEMORY_WB);
-        efi_add_memory_range(&index, EfiBootServicesCode, pal_end,
-                             runtime_code_start, EFI_MEMORY_WB);
-        /*
-         * Keep the linked runtime image in one EFI descriptor.  IA-64 SAL
-         * enters with a GP supplied by the SAL system table, and the linked
-         * code uses GP-relative references into rodata/data.  A loader may
-         * assign unrelated virtual bases to separate runtime descriptors,
-         * which would break those references.
-         */
-        efi_add_memory_range(&index, EfiRuntimeServicesCode,
-                             runtime_code_start, firmware_end,
-                             efi_memory_attribute(EfiRuntimeServicesCode,
-                                                  EFI_MEMORY_WB));
-    } else {
-        efi_add_memory_range(&index, EfiRuntimeServicesCode, 0x00100000,
-                             firmware_end,
-                             efi_memory_attribute(EfiRuntimeServicesCode,
-                                                  EFI_MEMORY_WB));
-    }
-
-    /*
      * IA-64 loaders commonly build page lists from EFI descriptors before
      * reserving image pages.  Expose the natural 32 MiB/64 MiB low-image
      * boundaries while also keeping the legacy 48 MiB/80 MiB staging bounds
      * visible as descriptor boundaries.
      */
     if (fw_map_quirk_enabled(IA64_FW_QUIRK_ACPI_LOW_ISLAND)) {
-        efi_add_memory_range(&index, EfiConventionalMemory, firmware_end,
+        efi_add_memory_range(&index, EfiConventionalMemory, low_conv_start,
                              FW_LOW_ACPI_ISLAND_BASE, EFI_MEMORY_WB);
         efi_add_memory_range(&index, EfiACPIMemoryNVS, ACPI_RECLAIM_BASE,
                              ACPI_RECLAIM_TABLE_BASE, EFI_MEMORY_WB);
@@ -554,7 +580,7 @@ void efi_init_memory_map(void)
          * efi_add_boot_stack_low_ram) and low RAM stays contiguous here,
          * as on real hardware.
          */
-        efi_add_memory_range(&index, EfiConventionalMemory, firmware_end,
+        efi_add_memory_range(&index, EfiConventionalMemory, low_conv_start,
                              FW_LOW_FREE_BASE, EFI_MEMORY_WB);
     }
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_FREE_BASE,

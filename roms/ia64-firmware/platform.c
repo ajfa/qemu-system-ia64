@@ -523,6 +523,13 @@ UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
         base = (ACPI_RECLAIM_BASE - FW_SYSTEM_TABLE_POINTER_SIZE) &
                ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
     }
+    /* And below the RAM-top image shadow (its span is machine-reserved). */
+    if (base < (UINT64)(UINTN)__fw_image_start + IA64_FW_IMAGE_SPAN &&
+        base + FW_SYSTEM_TABLE_POINTER_SIZE > (UINT64)(UINTN)__fw_image_start) {
+        base = ((UINT64)(UINTN)__fw_image_start -
+                FW_SYSTEM_TABLE_POINTER_SIZE) &
+               ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
+    }
     if (base <= FW_LOW_IMAGE_END ||
         base + FW_SYSTEM_TABLE_POINTER_SIZE > LowRamEnd) {
         return 0;

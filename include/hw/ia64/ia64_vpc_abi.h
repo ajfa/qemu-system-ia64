@@ -119,12 +119,28 @@
 #define IA64_FW_BOOT_STACK_OFFSET \
     (IA64_FW_CPU_ASSIST_SIZE - IA64_FW_BOOT_STACK_SIZE)
 
+/*
+ * RAM-top firmware image shadow (rework phase 2.2).  The machine loads the
+ * firmware binary at IA64_FW_IMAGE_BASE_FOR(ram_size) - 1 MB aligned, sized
+ * for the image plus bss with headroom (the linker asserts the real span
+ * fits) - applies the image's self-relocation fixup table for the delta from
+ * the 1 MB link base, and seeds each CPU's fw_image_base.  Above the image
+ * sit the ACPI staging region and the CPU-assist region, ending exactly at
+ * the end of installed low RAM, mirroring how real 460GX/E8870 firmware
+ * shadows itself near the top of memory.
+ */
+#define IA64_FW_IMAGE_SPAN            IA64_U64(0x0000000000400000)
+#define IA64_FW_ACPI_REGION_SIZE      IA64_U64(0x0000000000020000)
+
 /* low_ram_end for an installed RAM size, as both QEMU and the firmware see it. */
 #define IA64_FW_LOW_RAM_END(ram_size) \
     ((((ram_size) < IA64_PCI_MMIO_BASE ? (ram_size) : IA64_PCI_MMIO_BASE)) & \
      ~(IA64_FW_LOW_RAM_ALIGN - 1ULL))
 #define IA64_FW_CPU_ASSIST_BASE_FOR(ram_size) \
     (IA64_FW_LOW_RAM_END(ram_size) - IA64_FW_CPU_ASSIST_SIZE)
+#define IA64_FW_IMAGE_BASE_FOR(ram_size) \
+    ((IA64_FW_CPU_ASSIST_BASE_FOR(ram_size) - IA64_FW_ACPI_REGION_SIZE - \
+      IA64_FW_IMAGE_SPAN) & ~IA64_U64(0xfffff))
 
 #ifndef __ASSEMBLER__
 /*

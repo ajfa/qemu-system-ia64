@@ -53,6 +53,8 @@
 #include "target/ia64/cpu-qom.h"
 #include "target/ia64/cpu.h"
 
+/* The firmware's 1 MB link base; it executes from the RAM-top shadow. */
+#define IA64_FW_LINK_BASE 0x0000000000100000ULL
 #define IA64_FW_BASE    0x0000000000100000ULL
 /*
  * Firmware image loaded when no -bios is given.  It is installed beside the
@@ -377,6 +379,7 @@ struct IA64VpcMachineState {
 
     bool i8042_enabled;
     bool ahci_enabled;
+    bool fw_relocate;
     uint64_t fw_map_quirk_disable;
     bool ide_enabled;
     bool firmware_ide_dma;
@@ -439,6 +442,13 @@ struct IA64VpcMachineState {
     Notifier done_notifier;
     bool vmstate_registered;
 };
+
+static uint64_t ia64_vpc_fw_base(IA64VpcMachineState *s, uint64_t ram_size)
+{
+    return s->fw_relocate ? IA64_FW_IMAGE_BASE_FOR(ram_size)
+                          : IA64_FW_LINK_BASE;
+}
+
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
 static const IA64VbeMode *ia64_vbe_find_mode(uint16_t number)
@@ -1767,6 +1777,24 @@ static void ia64_vpc_add_compat_defaults(MachineClass *mc)
     }
 }
 
+static bool ia64_vpc_get_fw_relocate(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->fw_relocate;
+}
+
+static void ia64_vpc_set_fw_relocate(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    s->fw_relocate = value;
+}
+
 static bool ia64_vpc_get_i8042(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -3032,6 +3060,7 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
 #endif
 
 static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
+                                       uint64_t firmware_base,
                                        unsigned int cpu_index,
                                        uint64_t entry,
                                        uint64_t global_pointer)
@@ -3044,7 +3073,7 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
      */
     uint64_t assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(machine->ram_size);
     IA64BootInfo info = {
-        .firmware_base = IA64_FW_BASE,
+        .firmware_base = firmware_base,
         .firmware_entry = entry,
         .global_pointer = global_pointer,
         .iva = IA64_IVT_BASE,
@@ -3123,14 +3152,18 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
      * for PE metadata and clobber startup registers (including gp).
      */
     image = g_malloc(s->firmware_size);
-    cpu_physical_memory_read(IA64_FW_BASE, image, s->firmware_size);
+    cpu_physical_memory_read(ia64_vpc_fw_base(s, current_machine->ram_size),
+                             image, s->firmware_size);
     if (!ia64_loader_parse_pe_plabel(image, s->firmware_size,
                                      &entrypoint)) {
         return;
     }
 
     CPU_FOREACH(cs) {
-        IA64BootInfo info = ia64_vpc_boot_info(MACHINE(s), cs->cpu_index,
+        IA64BootInfo info = ia64_vpc_boot_info(MACHINE(s),
+                                               ia64_vpc_fw_base(s,
+                                                   current_machine->ram_size),
+                                               cs->cpu_index,
                                                entrypoint.entry,
                                                entrypoint.global_pointer);
 
@@ -3152,6 +3185,116 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
     if (s->alat_full && machine->smp.cpus > 1) {
         error_setg(errp, "full ALAT emulation is not SMP-safe");
         return false;
+    }
+    return true;
+}
+
+/*
+ * Firmware self-relocation (rework phase 2.2).  The image links at 1 MB but
+ * executes from the RAM-top shadow (IA64_FW_IMAGE_BASE_FOR); the build embeds
+ * a machine-checked fixup table (fw-fixups.py) and a trailing footer
+ * { "IA64FXUP", table file offset }.  QEMU plays SAL_A here: it applies the
+ * fixups while placing the shadow, exactly as real firmware fixes up SAL_B
+ * when shadowing it near the top of memory.
+ */
+#define IA64_FW_FIXUP_FOOTER_MAGIC 0x5055584634364149ULL /* "IA64FXUP" */
+#define IA64_FW_FIXUP_MAGIC        0x50555846u           /* "FXUP" */
+
+static uint64_t ia64_fw_bundle_imm64_get(const uint8_t *bundle)
+{
+    uint64_t lo = ldq_le_p(bundle);
+    uint64_t hi = ldq_le_p(bundle + 8);
+    uint64_t slot1 = ((lo >> 46) | (hi << 18)) & ((1ULL << 41) - 1);
+    uint64_t slot2 = (hi >> 23) & ((1ULL << 41) - 1);
+    uint64_t imm7b = (slot2 >> 6) & 0x7f;
+    uint64_t imm9d = (slot2 >> 27) & 0x1ff;
+    uint64_t imm5c = (slot2 >> 22) & 0x1f;
+    uint64_t ic = (slot2 >> 21) & 0x1;
+    uint64_t i = (slot2 >> 36) & 0x1;
+
+    return (i << 63) | (slot1 << 22) | (ic << 21) | (imm5c << 16) |
+           (imm9d << 7) | imm7b;
+}
+
+static void ia64_fw_bundle_imm64_set(uint8_t *bundle, uint64_t imm64)
+{
+    uint64_t lo = ldq_le_p(bundle);
+    uint64_t hi = ldq_le_p(bundle + 8);
+    uint64_t slot2 = (hi >> 23) & ((1ULL << 41) - 1);
+    uint64_t slot1 = (imm64 >> 22) & ((1ULL << 41) - 1);
+
+    slot2 &= ~((1ULL << 36) | (0x1ffULL << 27) | (0x1fULL << 22) |
+               (1ULL << 21) | (0x7fULL << 6));
+    slot2 |= (((imm64 >> 63) & 1) << 36) | (((imm64 >> 7) & 0x1ff) << 27) |
+             (((imm64 >> 16) & 0x1f) << 22) | (((imm64 >> 21) & 1) << 21) |
+             ((imm64 & 0x7f) << 6);
+    lo = (lo & ((1ULL << 46) - 1)) | (slot1 << 46);
+    hi = (slot1 >> 18) | (slot2 << 23);
+    stq_le_p(bundle, lo);
+    stq_le_p(bundle + 8, hi);
+}
+
+static bool ia64_vpc_relocate_firmware(uint8_t *image, int64_t size,
+                                       uint64_t delta, Error **errp)
+{
+    uint64_t fixups_off;
+    uint32_t n64, n32, nimm, i;
+    const uint8_t *table;
+    uint64_t entries;
+
+    if (size < 16 ||
+        ldq_le_p(image + size - 16) != IA64_FW_FIXUP_FOOTER_MAGIC) {
+        error_setg(errp, "firmware image carries no relocation footer "
+                   "(rebuilt with fw-fixups.py?)");
+        return false;
+    }
+    fixups_off = ldq_le_p(image + size - 8);
+    if (fixups_off > (uint64_t)size - 32) {
+        error_setg(errp, "firmware relocation table offset out of range");
+        return false;
+    }
+    table = image + fixups_off;
+    if (ldl_le_p(table) != IA64_FW_FIXUP_MAGIC || ldl_le_p(table + 4) != 1) {
+        error_setg(errp, "firmware relocation table has a bad header");
+        return false;
+    }
+    n64 = ldl_le_p(table + 8);
+    n32 = ldl_le_p(table + 12);
+    nimm = ldl_le_p(table + 16);
+    entries = (uint64_t)n64 + n32 + nimm;
+    if (fixups_off + 32 + entries * 8 > (uint64_t)size) {
+        error_setg(errp, "firmware relocation table truncated");
+        return false;
+    }
+    table += 32;
+    for (i = 0; i < n64; i++, table += 8) {
+        uint64_t off = ldq_le_p(table);
+
+        if (off > (uint64_t)size - 8) {
+            error_setg(errp, "firmware DIR64 fixup out of range");
+            return false;
+        }
+        stq_le_p(image + off, ldq_le_p(image + off) + delta);
+    }
+    for (i = 0; i < n32; i++, table += 8) {
+        uint64_t off = ldq_le_p(table);
+
+        if (off > (uint64_t)size - 4) {
+            error_setg(errp, "firmware DIR32 fixup out of range");
+            return false;
+        }
+        stl_le_p(image + off, ldl_le_p(image + off) + (uint32_t)delta);
+    }
+    for (i = 0; i < nimm; i++, table += 8) {
+        uint64_t off = ldq_le_p(table);
+
+        if (off > (uint64_t)size - 16) {
+            error_setg(errp, "firmware IMM64 fixup out of range");
+            return false;
+        }
+        ia64_fw_bundle_imm64_set(image + off,
+                                 ia64_fw_bundle_imm64_get(image + off) +
+                                 delta);
     }
     return true;
 }
@@ -3188,17 +3331,33 @@ static bool ia64_vpc_load_firmware(IA64VpcMachineState *s,
         error_propagate(errp, local_err);
         return false;
     }
-    if (firmware_size <= 0 ||
-        (uint64_t)firmware_size > machine->ram_size - IA64_FW_BASE) {
-        error_setg(errp, "invalid firmware image size for '%s'",
-                   firmware);
-        return false;
+    {
+        uint64_t fw_base = ia64_vpc_fw_base(s, machine->ram_size);
+        g_autofree uint8_t *image = NULL;
+        gsize image_size = 0;
+        GError *gerr = NULL;
+
+        if (firmware_size <= 0 ||
+            (uint64_t)firmware_size > IA64_FW_IMAGE_SPAN) {
+            error_setg(errp, "invalid firmware image size for '%s'",
+                       firmware);
+            return false;
+        }
+        if (!g_file_get_contents(firmware_path, (gchar **)&image,
+                                 &image_size, &gerr)) {
+            error_setg(errp, "failed to read firmware '%s': %s", firmware,
+                       gerr->message);
+            g_error_free(gerr);
+            return false;
+        }
+        if (fw_base != IA64_FW_LINK_BASE &&
+            !ia64_vpc_relocate_firmware(image, image_size,
+                                        fw_base - IA64_FW_LINK_BASE, errp)) {
+            return false;
+        }
+        rom_add_blob_fixed("ia64-firmware", image, image_size, fw_base);
+        s->firmware_size = firmware_size;
     }
-    if (rom_add_file_fixed(firmware, IA64_FW_BASE, -1)) {
-        error_setg(errp, "failed to load firmware '%s'", firmware);
-        return false;
-    }
-    s->firmware_size = firmware_size;
     return true;
 }
 
@@ -3235,12 +3394,13 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         uint32_t cores = MAX(machine->smp.cores, 1U);
         uint32_t per_socket = threads * cores;
         uint32_t package_base = (i / per_socket) * per_socket;
-        IA64BootInfo boot_info = ia64_vpc_boot_info(machine, i,
-                                                    IA64_FW_BASE,
-                                                    IA64_FW_BASE);
+        uint64_t fw_base = ia64_vpc_fw_base(s, machine->ram_size);
+        IA64BootInfo boot_info = ia64_vpc_boot_info(machine, fw_base, i,
+                                                    fw_base, fw_base);
 
         cpu = IA64_CPU(object_new(machine->cpu_type));
         cpu->alat_full = s->alat_full;
+        cpu->fw_image_base = fw_base;
         cpu->socket_id = i / per_socket;
         cpu->core_id = (i / threads) % cores;
         cpu->thread_id = i % threads;
@@ -3521,6 +3681,7 @@ static void ia64_vpc_machine_instance_init(Object *obj)
 #ifdef CONFIG_IA64_VPC_PS2
     s->i8042_enabled = true;
 #endif
+    s->fw_relocate = true;
 #ifdef CONFIG_IA64_VPC_STORAGE
     /*
      * Default the SATA controller off: Windows XP/2003 IA-64 ship no inbox
@@ -3594,6 +3755,13 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
 
     ia64_vpc_add_compat_defaults(mc);
 
+    object_class_property_add_bool(oc, "fw-relocate",
+                                   ia64_vpc_get_fw_relocate,
+                                   ia64_vpc_set_fw_relocate);
+    object_class_property_set_description(oc, "fw-relocate",
+        "Shadow the firmware image at the top of low RAM (default on; "
+        "off keeps the historical 1 MB execution home - the A/B lever "
+        "for plans/firmware-rework-plan.md phase 2.2)");
     object_class_property_add_bool(oc, "i8042",
                                    ia64_vpc_get_i8042,
                                    ia64_vpc_set_i8042);

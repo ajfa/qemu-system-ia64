@@ -951,7 +951,8 @@ uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
     env->gr[IA64_GR_STACK_POINTER] = stack;
     ia64_gr_nat_set(env, IA64_GR_GLOBAL_POINTER, false);
     ia64_gr_nat_set(env, IA64_GR_STACK_POINTER, false);
-    env->br[IA64_BR_RETURN_LINK] = IA64_FW_SAL_RUNTIME_RETURN_PA;
+    env->br[IA64_BR_RETURN_LINK] =
+        env->fw_image_base + IA64_FW_SAL_RUNTIME_RETURN_OFF;
 
     ia64_set_psr(env, env->psr & ~(IA64_PSR_DT | IA64_PSR_RT |
                                    IA64_PSR_IT | IA64_PSR_I |

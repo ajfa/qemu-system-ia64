@@ -15,6 +15,7 @@ __fw_link_base = FW_LINK_BASE;
 SECTIONS
 {
     . = __fw_link_base;
+    __fw_image_start = .;
 
     .text.boot : {
         *(.text._start)
@@ -119,3 +120,6 @@ ASSERT(sal_runtime_return == __fw_link_base + 0x2020,
        "sal_runtime_return must sit at IA64_FW_SAL_RUNTIME_RETURN_PA (base+0x2020)")
 ASSERT(sal_dispatch_block == __fw_link_base + 0x2040,
        "sal_dispatch_block must sit at IA64_FW_SAL_DISPATCH_BLOCK_PA (base+0x2040)")
+/* The machine reserves IA64_FW_IMAGE_SPAN (4 MiB) for image + bss. */
+ASSERT(_end - __fw_link_base <= 0x400000,
+       "firmware image + bss exceed IA64_FW_IMAGE_SPAN")

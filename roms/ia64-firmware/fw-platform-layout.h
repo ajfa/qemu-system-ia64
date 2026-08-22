@@ -17,6 +17,8 @@
 
 /* Owned by firmware.c; several layout macros are relative to it. */
 extern UINT64 mCpuAssistBase;
+/* Linker-defined image bounds; relocated with the image (phase 2.2). */
+extern char __fw_image_start[];
 
 #define PCI_OHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define PCI_AHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00020000ULL)
@@ -38,7 +40,7 @@ extern UINT64 mCpuAssistBase;
  * the firmware reservation, the way real 460GX/E8870 firmware stages ACPI
  * tables (target-model doc sec 2; phase 2.2 of the rework plan).
  */
-#define FW_ACPI_REGION_SIZE 0x0000000000020000ULL
+#define FW_ACPI_REGION_SIZE IA64_FW_ACPI_REGION_SIZE
 #define FW_LOW_ACPI_ISLAND_BASE 0x0000000000800000ULL
 extern UINT64 mAcpiRegionBase;
 #define ACPI_RECLAIM_BASE (mAcpiRegionBase)

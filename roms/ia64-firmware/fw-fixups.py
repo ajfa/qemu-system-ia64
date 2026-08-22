@@ -196,6 +196,11 @@ def main():
 
     final = bytearray(primary)
     final[fixups_off:fixups_off + len(blob)] = blob
+    # Trailing footer so the loader (QEMU) can find the table without
+    # knowing the layout: last 16 bytes = { "IA64FXUP", file offset }.
+    # The footer lands at the start of the bss region in RAM, which entry.S
+    # zeroes before use.
+    final += struct.pack('<8sQ', b'IA64FXUP', fixups_off)
     with open(out_path, 'wb') as f:
         f.write(final)
     print('fw-fixups: %d DIR64, %d DIR32, %d IMM64 sites; table %d bytes'

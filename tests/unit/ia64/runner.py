@@ -101,7 +101,11 @@ def _loader_args(program: MicroProgram) -> list[str]:
 
 
 def _command(qemu: str, program: MicroProgram) -> list[str]:
-    machine = "ia64-vpc"
+    # The battery loads microprograms over the firmware's historical 1 MB
+    # home and relies on the identity window there; pin the machine to the
+    # unrelocated layout (the shipping firmware runs from the RAM-top
+    # shadow by default since rework phase 2.2).
+    machine = "ia64-vpc,fw-relocate=off"
     if program.machine_args:
         machine += "," + ",".join(program.machine_args)
     command = [
