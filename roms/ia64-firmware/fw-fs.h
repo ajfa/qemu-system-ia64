@@ -278,7 +278,7 @@ typedef struct {
     EFI_BLOCK_IO_MEDIA media;
     EFI_BLOCK_IO_PROTOCOL block_io;
     EFI_DISK_IO_PROTOCOL disk_io;
-    UINT8 device_path[FW_PARTITION_DEVICE_PATH_MAX];
+    UINT8 device_path[FW_PARTITION_DEVICE_PATH_MAX] FW_DEVICE_PATH_GUEST_ALIGN;
 } FW_PARTITION_RECORD;
 BOOLEAN fw_set_loaded_image_load_options(EFI_HANDLE ImageHandle,
                                                 VOID *LoadOptions,

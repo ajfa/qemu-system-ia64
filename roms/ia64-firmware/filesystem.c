@@ -1080,7 +1080,7 @@ FW_DEVICE_PATH_NODE mEndDevicePath = {
     .Length = 4,
 };
 
-FW_PCI_ROOT_BRIDGE_DEVICE_PATH mPciRootBridgeDevicePath = {
+FW_PCI_ROOT_BRIDGE_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mPciRootBridgeDevicePath = {
     .Acpi = {
         .Header = {
             .Type = 0x02,
@@ -1097,18 +1097,18 @@ FW_PCI_ROOT_BRIDGE_DEVICE_PATH mPciRootBridgeDevicePath = {
     },
 };
 
-FW_PCI_CONTROLLER_DEVICE_PATH mPciIdeDevicePath =
+FW_PCI_CONTROLLER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mPciIdeDevicePath =
     FW_PCI_CONTROLLER_DEVICE_PATH_INIT(0);
-FW_PCI_CONTROLLER_DEVICE_PATH mPciAhciDevicePath =
+FW_PCI_CONTROLLER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mPciAhciDevicePath =
     FW_PCI_CONTROLLER_DEVICE_PATH_INIT(1);
-FW_PCI_CONTROLLER_DEVICE_PATH mPciOhciDevicePath =
+FW_PCI_CONTROLLER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mPciOhciDevicePath =
     FW_PCI_CONTROLLER_DEVICE_PATH_INIT(2);
-FW_PCI_CONTROLLER_DEVICE_PATH mPciUhciDevicePath =
+FW_PCI_CONTROLLER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mPciUhciDevicePath =
     FW_PCI_CONTROLLER_DEVICE_PATH_INIT(3);
-FW_PCI_CONTROLLER_DEVICE_PATH mPciLsiDevicePath =
+FW_PCI_CONTROLLER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mPciLsiDevicePath =
     FW_PCI_CONTROLLER_DEVICE_PATH_INIT(4);
 
-FW_BLOCK_DEVICE_PATH mBlockDevicePath = {
+FW_BLOCK_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mBlockDevicePath = {
     .Acpi = {
         .Header = {
             .Type = 0x02,
@@ -1154,7 +1154,7 @@ FW_BLOCK_DEVICE_PATH mBlockDevicePath = {
     },
 };
 
-FW_RAW_BLOCK_DEVICE_PATH mRawBlockDevicePath = {
+FW_RAW_BLOCK_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mRawBlockDevicePath = {
     .Acpi = {
         .Header = {
             .Type = 0x02,
@@ -1190,7 +1190,7 @@ FW_RAW_BLOCK_DEVICE_PATH mRawBlockDevicePath = {
     },
 };
 
-FW_RAW_BLOCK_DEVICE_PATH mDiskBlockDevicePath = {
+FW_RAW_BLOCK_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mDiskBlockDevicePath = {
     .Acpi = {
         .Header = {
             .Type = 0x02,
@@ -1247,13 +1247,13 @@ FW_RAW_BLOCK_DEVICE_PATH mDiskBlockDevicePath = {
         .End = { 0x7f, 0xff, sizeof(FW_DEVICE_PATH_NODE) }, \
     }
 
-FW_SATA_RAW_BLOCK_DEVICE_PATH mSataBootDevicePath =
+FW_SATA_RAW_BLOCK_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mSataBootDevicePath =
     FW_SATA_RAW_BLOCK_DEVICE_PATH_INIT;
-FW_SATA_RAW_BLOCK_DEVICE_PATH mSataDiskDevicePath =
+FW_SATA_RAW_BLOCK_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mSataDiskDevicePath =
     FW_SATA_RAW_BLOCK_DEVICE_PATH_INIT;
-FW_SATA_RAW_BLOCK_DEVICE_PATH mSataRawDevicePath =
+FW_SATA_RAW_BLOCK_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mSataRawDevicePath =
     FW_SATA_RAW_BLOCK_DEVICE_PATH_INIT;
-FW_SATA_BLOCK_DEVICE_PATH mSataBlockDevicePath = {
+FW_SATA_BLOCK_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mSataBlockDevicePath = {
     .Acpi = {
         .Header = { 0x02, 0x01, sizeof(FW_ACPI_HID_DEVICE_PATH_NODE) },
         .Hid = 0x0A0341D0,
@@ -1281,7 +1281,7 @@ FW_SATA_BLOCK_DEVICE_PATH mSataBlockDevicePath = {
 
 #undef FW_SATA_RAW_BLOCK_DEVICE_PATH_INIT
 
-FW_GRAPHICS_DEVICE_PATH mGraphicsDevicePath = {
+FW_GRAPHICS_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mGraphicsDevicePath = {
     .Acpi = {
         .Header = {
             .Type = 0x02,
@@ -1307,7 +1307,7 @@ FW_GRAPHICS_DEVICE_PATH mGraphicsDevicePath = {
     },
 };
 
-FW_CONSOLE_OUTPUT_DEVICE_PATH mConsoleOutputDevicePath = {
+FW_CONSOLE_OUTPUT_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mConsoleOutputDevicePath = {
     .Graphics = {
         .Acpi = {
             .Header = {
@@ -1372,7 +1372,7 @@ const CHAR16 mDefaultBootDescription[14] = {
 };
 
 
-FW_OPTICAL_SETUP_LOADER_DEVICE_PATH mOpticalSetupLoaderDevicePath = {
+FW_OPTICAL_SETUP_LOADER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mOpticalSetupLoaderDevicePath = {
     .Acpi = {
         .Header = {
             .Type = 0x02,
@@ -1494,7 +1494,7 @@ static BOOLEAN fw_storage_path_node_matches(
     return 0;
 }
 
-FW_BOOT_FULL_DEVICE_PATH mBootFullDevicePath = {
+FW_BOOT_FULL_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mBootFullDevicePath = {
     .Acpi = {
         .Header = {
             .Type = 0x02,

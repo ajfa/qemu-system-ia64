@@ -292,7 +292,7 @@ static UINT8 mSerialLoopback[256];
 static UINTN mSerialLoopbackRead;
 static UINTN mSerialLoopbackWrite;
 static UINTN mSerialLoopbackCount;
-static FW_SERIAL_DEVICE_PATH mSerialDevicePath = {
+static FW_SERIAL_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mSerialDevicePath = {
     .Acpi = {
         .Header = { 0x02, 0x01, sizeof(FW_ACPI_HID_DEVICE_PATH_NODE) },
         .Hid = FW_UART_DEVICE_PATH_HID_PNP0501,

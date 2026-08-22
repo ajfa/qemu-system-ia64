@@ -118,4 +118,19 @@ typedef struct {
 /* Shared freestanding memory primitive implemented by firmware.c. */
 void fw_set_mem(VOID *buffer, UINTN size, UINT8 value);
 
+/*
+ * Windows XP's setupldr sizes an EFI device path as
+ * "(UCHAR) DevPath - (UCHAR) Start" (WXPSP1 NT/base/boot/efi/sumain.c:1023,
+ * GetDevPathSize): the pointers are truncated to eight bits, so the result
+ * goes negative (as ULONG: huge) whenever the path crosses a 256-byte
+ * boundary in memory.  GetCd/GetDisk (biosdrv.c) then pick the wrong
+ * Block I/O handle by their smallest-path heuristic and text setup dies
+ * with "INF file txtsetup.sif is corrupt or missing, status 18" -- measured
+ * with the build 2002 installer whenever a firmware data reshuffle made the
+ * raw-CD path straddle a boundary.  Keep every device path a guest can
+ * observe within one 256-byte line: over-align the objects, which all are
+ * at most 128 bytes long.
+ */
+#define FW_DEVICE_PATH_GUEST_ALIGN __attribute__((aligned(128)))
+
 #endif /* IA64_FIRMWARE_FW_BASE_H */

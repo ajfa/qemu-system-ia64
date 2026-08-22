@@ -70,7 +70,7 @@ static EFI_SIMPLE_POINTER_MODE mSimplePointerMode = {
     .RightButton = 1,
 };
 static EFI_SIMPLE_POINTER_STATE mSimplePointerState;
-static FW_POINTER_DEVICE_PATH mSimplePointerDevicePath = {
+static FW_POINTER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mSimplePointerDevicePath = {
     .Acpi = {
         .Header = { 0x02, 0x01, sizeof(FW_ACPI_HID_DEVICE_PATH_NODE) },
         .Hid = 0x0f1341d0U,
