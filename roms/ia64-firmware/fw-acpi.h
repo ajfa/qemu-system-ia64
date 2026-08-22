@@ -634,6 +634,11 @@ FW_STATIC_ASSERT((IA64_FW_CPU_ASSIST_SIZE & (IA64_FW_LOW_RAM_ALIGN - 1U)) == 0,
                  cpu_assist_alignment);
 FW_STATIC_ASSERT(IA64_FW_LOW_RAM_MIN >= IA64_FW_CPU_ASSIST_SIZE,
                  cpu_assist_fits_minimum_ram);
+FW_STATIC_ASSERT(IA64_FW_LOW_RAM_MIN >=
+                 IA64_FW_CPU_ASSIST_SIZE + FW_ACPI_REGION_SIZE,
+                 ram_top_acpi_region_fits_minimum_ram);
+FW_STATIC_ASSERT((FW_ACPI_REGION_SIZE & (IA64_FW_LOW_RAM_ALIGN - 1U)) == 0,
+                 acpi_region_alignment);
 FW_STATIC_ASSERT(IA64_FW_SAL_RUNTIME_SLOT_SIZE / 2U >=
                  IA64_EFI_MIN_BACKING_BYTES,
                  sal_runtime_slot_capacity);

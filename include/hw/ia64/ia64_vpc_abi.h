@@ -54,7 +54,8 @@
 #define IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF (1ULL << 3) /* drop anchor for >=5.2.3790 loaders */
 #define IA64_FW_QUIRK_SCRATCH_2G           (1ULL << 4) /* 1 MiB reserve at 2 GiB */
 #define IA64_FW_QUIRK_PAL_8K_PAGE          (1ULL << 5) /* whole-8K EfiPalCode page */
-#define IA64_FW_QUIRK_ALL                  0x3fULL
+#define IA64_FW_QUIRK_ACPI_LOW_ISLAND      (1ULL << 6) /* ACPI tables at 8 MB */
+#define IA64_FW_QUIRK_ALL                  0x7fULL
 
 /*
  * CPU-private physical memory used before and after ExitBootServices().

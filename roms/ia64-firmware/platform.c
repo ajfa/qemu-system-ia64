@@ -112,6 +112,8 @@ extern UINTN fw_sal_handoff_probe(EFI_HANDLE ImageHandle,
 void fw_set_mem(VOID *Buffer, UINTN Size, UINT8 Value);
 
 UINT64                        mGuestRamSize = FW_LOW_RAM_LIMIT;
+/* ACPI staging base; placement decided in efi_init_memory_map (quirk). */
+UINT64                        mAcpiRegionBase = FW_LOW_ACPI_ISLAND_BASE;
 UINT64                        mGuestLowRamEnd = FW_LOW_RAM_LIMIT;
 static UINTN                  mProcessorCount = 1;
 static UINTN                  mSocketCount = 1;
@@ -512,6 +514,13 @@ UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
     if (base < mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE &&
         base + FW_SYSTEM_TABLE_POINTER_SIZE > mCpuAssistBase) {
         base = (mCpuAssistBase - FW_SYSTEM_TABLE_POINTER_SIZE) &
+               ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
+    }
+    /* When ACPI staging sits below the CPU-assist region, step below it. */
+    if (!fw_map_quirk_enabled(IA64_FW_QUIRK_ACPI_LOW_ISLAND) &&
+        base < ACPI_RECLAIM_END &&
+        base + FW_SYSTEM_TABLE_POINTER_SIZE > ACPI_RECLAIM_BASE) {
+        base = (ACPI_RECLAIM_BASE - FW_SYSTEM_TABLE_POINTER_SIZE) &
                ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
     }
     if (base <= FW_LOW_IMAGE_END ||

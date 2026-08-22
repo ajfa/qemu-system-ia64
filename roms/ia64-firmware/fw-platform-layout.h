@@ -29,10 +29,22 @@ extern UINT64 mCpuAssistBase;
 #define PCI_VGA_STD_FB_SIZE           0x01000000ULL
 #define VGA_FB_BASE                   ((UINT64)PCI_VGA_FB_BAR)
 #define VGA_MMIO_BASE                 ((UINT64)PCI_VGA_MMIO_BAR)
-#define ACPI_RECLAIM_BASE 0x0000000000800000ULL
+/*
+ * ACPI staging region: one FACS EfiACPIMemoryNVS page followed by the
+ * reclaimable tables, 128 KiB total.  Its base is chosen at map-init time:
+ * with the acpi-low-island quirk enabled (the historical, validated default)
+ * it sits at the invented 8 MB low-RAM island; with the quirk disabled it
+ * sits directly below the RAM-top CPU-assist region, adjacent to the rest of
+ * the firmware reservation, the way real 460GX/E8870 firmware stages ACPI
+ * tables (target-model doc sec 2; phase 2.2 of the rework plan).
+ */
+#define FW_ACPI_REGION_SIZE 0x0000000000020000ULL
+#define FW_LOW_ACPI_ISLAND_BASE 0x0000000000800000ULL
+extern UINT64 mAcpiRegionBase;
+#define ACPI_RECLAIM_BASE (mAcpiRegionBase)
 #define ACPI_RECLAIM_TABLE_BASE \
     (ACPI_RECLAIM_BASE + IA64_EFI_MEMORY_ALIGN)
-#define ACPI_RECLAIM_END 0x0000000000820000ULL
+#define ACPI_RECLAIM_END (ACPI_RECLAIM_BASE + FW_ACPI_REGION_SIZE)
 /* 460GX/i2000 SDV SAPIC message block, just below the local SAPIC. */
 #define IOSAPIC_BASE     IA64_IOSAPIC_BASE
 #define IOSAPIC_SIZE     IA64_IOSAPIC_MMIO_SIZE

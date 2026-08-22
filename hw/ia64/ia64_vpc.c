@@ -1897,6 +1897,7 @@ static const struct {
     { "anchor-version-sniff", IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF },
     { "2g-scratch",          IA64_FW_QUIRK_SCRATCH_2G },
     { "pal-8k-page",         IA64_FW_QUIRK_PAL_8K_PAGE },
+    { "acpi-low-island",     IA64_FW_QUIRK_ACPI_LOW_ISLAND },
 };
 
 static char *ia64_vpc_get_fw_quirks(Object *obj, Error **errp)
@@ -3622,7 +3623,8 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Comma list of firmware memory-map quirks to toggle: '-name' "
         "disables, '+name'/'name' re-enables, 'default' resets.  Names: "
         "split-page, low-boundaries, low-anchor, anchor-version-sniff, "
-        "2g-scratch, pal-8k-page.  All quirks default on (the validated "
+        "2g-scratch, pal-8k-page, acpi-low-island.  All quirks default on "
+        "(the validated "
         "map); disabling changes the guest-visible EFI memory map -- "
         "A/B rig for plans/firmware-rework-plan.md Phase 2");
     object_class_property_add_str(oc, "firmware-console",

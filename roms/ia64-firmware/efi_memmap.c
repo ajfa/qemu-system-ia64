@@ -387,8 +387,23 @@ void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 StartRam,
      * stacks that SAL reuses after ExitBootServices() - is published as one
      * runtime-data descriptor ending exactly at the low-RAM end.
      */
-    efi_add_conventional_with_system_pointer(Index, StartRam,
-                                             mCpuAssistBase);
+    if (fw_map_quirk_enabled(IA64_FW_QUIRK_ACPI_LOW_ISLAND)) {
+        efi_add_conventional_with_system_pointer(Index, StartRam,
+                                                 mCpuAssistBase);
+    } else {
+        /*
+         * ACPI staging sits directly below the CPU-assist region, so the
+         * whole RAM-top firmware reservation is one contiguous block:
+         * FACS NVS page, reclaimable tables, then the runtime-data region.
+         */
+        efi_add_conventional_with_system_pointer(Index, StartRam,
+                                                 mAcpiRegionBase);
+        efi_add_memory_range(Index, EfiACPIMemoryNVS, ACPI_RECLAIM_BASE,
+                             ACPI_RECLAIM_TABLE_BASE, EFI_MEMORY_WB);
+        efi_add_memory_range(Index, EfiACPIReclaimMemory,
+                             ACPI_RECLAIM_TABLE_BASE, ACPI_RECLAIM_END,
+                             EFI_MEMORY_WB);
+    }
     efi_add_memory_range(
         Index, EfiRuntimeServicesData,
         mCpuAssistBase, mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE,
@@ -423,6 +438,10 @@ void efi_init_memory_map(void)
     mGuestRamSize = ram_size;
     mGuestLowRamEnd = low_ram_end;
     fw_init_guest_high_ram_ranges(ram_size);
+    /* See fw-platform-layout.h: island at 8 MB vs the RAM-top block. */
+    mAcpiRegionBase = fw_map_quirk_enabled(IA64_FW_QUIRK_ACPI_LOW_ISLAND) ?
+                      FW_LOW_ACPI_ISLAND_BASE :
+                      mCpuAssistBase - FW_ACPI_REGION_SIZE;
     mSystemTablePointerBase =
         fw_system_table_pointer_base(low_ram_end, mBootStackBase,
                                      mBootStackTop);
@@ -519,15 +538,25 @@ void efi_init_memory_map(void)
      * boundaries while also keeping the legacy 48 MiB/80 MiB staging bounds
      * visible as descriptor boundaries.
      */
-    efi_add_memory_range(&index, EfiConventionalMemory, firmware_end,
-                         FW_LOW_RECLAIM_BASE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiACPIMemoryNVS, ACPI_RECLAIM_BASE,
-                         ACPI_RECLAIM_TABLE_BASE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiACPIReclaimMemory,
-                         ACPI_RECLAIM_TABLE_BASE, ACPI_RECLAIM_END,
-                         EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiConventionalMemory, ACPI_RECLAIM_END,
-                         FW_LOW_FREE_BASE, EFI_MEMORY_WB);
+    if (fw_map_quirk_enabled(IA64_FW_QUIRK_ACPI_LOW_ISLAND)) {
+        efi_add_memory_range(&index, EfiConventionalMemory, firmware_end,
+                             FW_LOW_ACPI_ISLAND_BASE, EFI_MEMORY_WB);
+        efi_add_memory_range(&index, EfiACPIMemoryNVS, ACPI_RECLAIM_BASE,
+                             ACPI_RECLAIM_TABLE_BASE, EFI_MEMORY_WB);
+        efi_add_memory_range(&index, EfiACPIReclaimMemory,
+                             ACPI_RECLAIM_TABLE_BASE, ACPI_RECLAIM_END,
+                             EFI_MEMORY_WB);
+        efi_add_memory_range(&index, EfiConventionalMemory, ACPI_RECLAIM_END,
+                             FW_LOW_FREE_BASE, EFI_MEMORY_WB);
+    } else {
+        /*
+         * ACPI staging lives in the RAM-top firmware block (emitted by
+         * efi_add_boot_stack_low_ram) and low RAM stays contiguous here,
+         * as on real hardware.
+         */
+        efi_add_memory_range(&index, EfiConventionalMemory, firmware_end,
+                             FW_LOW_FREE_BASE, EFI_MEMORY_WB);
+    }
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_FREE_BASE,
                          FW_LOADER_HEAP_SPLIT_BASE,
                          EFI_MEMORY_WB);
