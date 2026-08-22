@@ -11,6 +11,16 @@
 #include "fw-efi-types.h"
 #include "hw/ia64/ia64_vpc_abi.h"
 
+#define IA64_PSR_AC     (1ULL << 3)
+#define IA64_PSR_DT     (1ULL << 17)
+#define IA64_PSR_DFL    (1ULL << 18)
+#define IA64_PSR_DFH    (1ULL << 19)
+#define IA64_PSR_RT     (1ULL << 27)
+#define IA64_PSR_CPL_MASK (3ULL << 32)
+#define IA64_PSR_IT     (1ULL << 36)
+#define IA64_PSR_BN     (1ULL << 44)
+
+#define IA64_DCR_LC     (1ULL << 2)
 #define IA64_PSR_IC (1ULL << 13)
 #define IA64_PSR_I  (1ULL << 14)
 
@@ -142,6 +152,33 @@ BOOLEAN efi_find_allocation_overlap(UINT64 Start, UINT64 End,
                                     UINT64 *FirstEnd, UINT64 *LastStart);
 UINT64 efi_memory_type_allocation_granularity(EFI_MEMORY_TYPE Type);
 UINT8 table_checksum8(const void *buf, UINTN len);
+
+/* platform.c */
+void fw_platform_decode_topology(void);
+UINTN fw_handoff_processor_count(void);
+extern UINTN fw_call_efi_entry(UINTN (*Entry)(EFI_HANDLE, EFI_SYSTEM_TABLE *),
+                               EFI_HANDLE ImageHandle,
+                               EFI_SYSTEM_TABLE *SystemTable,
+                               UINT64 SavedPsr,
+                               UINT64 EntryPsrLow);
+BOOLEAN sal_set_vectors_selftest(void);
+BOOLEAN sal_state_info_selftest(void);
+BOOLEAN sal_cache_services_selftest(void);
+BOOLEAN sal_mc_rendez_selftest(void);
+BOOLEAN sal_mc_set_params_selftest(void);
+BOOLEAN sal_freq_base_selftest(void);
+BOOLEAN sal_physical_services_selftest(void);
+BOOLEAN sal_update_pal_selftest(void);
+BOOLEAN sal_pci_config_selftest(void);
+BOOLEAN sal_proc_dispatch_selftest(void);
+BOOLEAN sal_loader_handoff_selftest(void);
+BOOLEAN efi_entry_handoff_selftest(void);
+void prepare_sal_loader_handoff(void);
+UINT64 sal_loader_psr_low(void);
+UINT64 fw_read_rsc(void);
+void fw_restore_rsc(UINT64 rsc);
+void fw_restore_psr(UINT64 psr);
+UINT64 fw_guest_high_ram_total(void);
 
 /* smbios.c */
 void smbios_init_table(void);

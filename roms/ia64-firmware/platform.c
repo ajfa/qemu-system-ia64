@@ -1,0 +1,1950 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * The platform half of the firmware: guest state decoded from the
+ * machine handoff block, the SAL procedure set and dispatcher, PCI
+ * config-space access, the CPU register / SAL-handoff assembly bridge,
+ * and AP bring-up.  Together with efi_memmap.c and platform_tables.c
+ * this is the producer side of the plan's milestone-6
+ * SALEFIHANDOFF-shaped platform boundary; firmware.c retains the EFI
+ * core (allocator, events, protocol database, services).
+ */
+
+#include "fw-base.h"
+#include "fw-services.h"
+#include "fw-efi-types.h"
+#include "fw-acpi.h"
+#include "fw-memmap.h"
+#include "fw-storage.h"
+#include "fw-platform-layout.h"
+#include "linker-symbols.h"
+#include "fw-platform-handoff.h"
+
+typedef struct {
+    UINT64 Status;
+    UINT64 Value0;
+    UINT64 Value1;
+    UINT64 Value2;
+} SAL_RETURN_VALUE;
+
+#define SAL_STATUS_SUCCESS          0
+#define SAL_STATUS_INVALID_ARGUMENT ((UINT64)-2)
+#define SAL_STATUS_ERROR            ((UINT64)-3)
+#define SAL_STATUS_NO_INFORMATION   ((UINT64)-5)
+#define SAL_STATUS_NOT_IMPLEMENTED  ((UINT64)-1)
+#define SAL_STATUS_INSUFFICIENT_SCRATCH ((UINT64)-9)
+#define SAL_SET_VECTORS             0x01000000ULL
+#define SAL_GET_STATE_INFO          0x01000001ULL
+#define SAL_GET_STATE_INFO_SIZE     0x01000002ULL
+#define SAL_CLEAR_STATE_INFO        0x01000003ULL
+#define SAL_MC_RENDEZ               0x01000004ULL
+#define SAL_MC_SET_PARAMS           0x01000005ULL
+#define SAL_REGISTER_PHYSICAL_ADDR  0x01000006ULL
+#define SAL_CACHE_FLUSH             0x01000008ULL
+#define SAL_CACHE_INIT              0x01000009ULL
+#define SAL_PCI_CONFIG_READ         0x01000010ULL
+#define SAL_PCI_CONFIG_WRITE        0x01000011ULL
+#define SAL_FREQ_BASE               0x01000012ULL
+#define SAL_PHYSICAL_ID_INFO        0x01000013ULL
+#define SAL_UPDATE_PAL              0x01000020ULL
+#define SAL_FREQ_BASE_PLATFORM      0
+#define PLATFORM_BASE_FREQUENCY     100000000ULL
+#define SAL_UPDATE_PAL_WRITE_FAILURE ((UINT64)-10)
+
+#define SAL_VECTOR_OS_MCA           0
+#define SAL_VECTOR_OS_INIT          1
+#define SAL_VECTOR_OS_BOOT_RENDEZ   2
+#define SAL_VECTOR_COUNT            3
+#define SAL_VECTOR_LENGTH_MASK      0xffffffffULL
+#define SAL_VECTOR_CHECKSUM_VALID   (1ULL << 32)
+#define SAL_VECTOR_LENGTH_RESERVED_MASK \
+    ((((1ULL << 7) - 1) << 33) | (0xffffULL << 48))
+
+#define SAL_PHYSICAL_ENTITY_PAL_PROC 0
+
+#define SAL_MC_PARAM_RENDEZ_INT     1
+#define SAL_MC_PARAM_RENDEZ_WAKEUP  2
+#define SAL_MC_PARAM_CPE_INT        3
+#define SAL_MC_PARAM_COUNT          4
+
+#define SAL_MC_PARAM_MECHANISM_INT  1
+#define SAL_MC_PARAM_MECHANISM_MEM  2
+#define SAL_MC_OPTION_MASK          0x3ULL
+
+#define SAL_STATE_TYPE_MCA          0
+#define SAL_STATE_TYPE_INIT         1
+#define SAL_STATE_TYPE_CMC          2
+#define SAL_STATE_TYPE_CPE          3
+#define SAL_STATE_TYPE_DECONFIG     4
+#define SAL_ERROR_RECORD_HEADER_SIZE 40
+#define SAL_ERROR_SECTION_HEADER_SIZE 24
+#define SAL_ERROR_RECORD_MIN_SIZE \
+    (SAL_ERROR_RECORD_HEADER_SIZE + SAL_ERROR_SECTION_HEADER_SIZE)
+
+typedef struct {
+    UINT64 Psr;
+    UINT64 Rsc;
+    UINT64 Dcr;
+    UINT64 Iva;
+    UINT64 Pta;
+    UINT64 Sp;
+    UINT64 Bsp;
+    UINT64 BspStore;
+    UINT64 Rr[8];
+    UINT64 Pkr[16];
+} IA64_SAL_HANDOFF_PROBE;
+
+#define SAL_RR_PREFERRED_PAGE_SHIFT  12U
+#define SAL_RR_FIRST_RID             0x1000U
+#define SAL_PTA_DISABLED_VALUE       (15ULL << 2)
+#define SAL_RR_VALUE(Rid) \
+    (((UINT64)(Rid) << 8) | ((UINT64)SAL_RR_PREFERRED_PAGE_SHIFT << 2))
+#define SAL_BACKING_STORE_BASE       (mCpuAssistBase + IA64_FW_EARLY_RSE_OFFSET)
+#define SAL_BACKING_STORE_END        (mCpuAssistBase + IA64_FW_EARLY_RSE_END_OFFSET)
+#define IA64_REGION6_BASE             0xC000000000000000ULL
+
+static IA64_SAL_HANDOFF_PROBE mSalHandoffProbe;
+extern UINT64 mResetFloatingPointDisableBits;
+extern UINTN mRuntimePciConfigEcam;
+extern BOOLEAN mVirtualAddressMapApplied;
+extern UINTN fw_sal_handoff_probe(EFI_HANDLE ImageHandle,
+                                  EFI_SYSTEM_TABLE *SystemTable);
+void fw_set_mem(VOID *Buffer, UINTN Size, UINT8 Value);
+
+UINT64                        mGuestRamSize = FW_LOW_RAM_LIMIT;
+UINT64                        mGuestLowRamEnd = FW_LOW_RAM_LIMIT;
+static UINTN                  mProcessorCount = 1;
+static UINTN                  mSocketCount = 1;
+static UINTN                  mCoresPerSocket = 1;
+static UINTN                  mThreadsPerCore = 1;
+
+
+/* FW_RAM_RANGE lives in fw-acpi.h. */
+
+static FW_RAM_RANGE           mGuestHighRam[FW_HIGH_RAM_RANGE_MAX];
+static UINTN                  mGuestHighRamCount;
+
+typedef struct {
+    UINT64 Magic;
+    UINT64 Version;
+    UINT64 RamSize;
+} FW_HANDOFF_HEADER;
+
+typedef struct {
+    FW_HANDOFF_HEADER Header;
+    UINT64 TimeValid;
+    UINT64 Year;
+    UINT64 Month;
+    UINT64 Day;
+    UINT64 Hour;
+    UINT64 Minute;
+    UINT64 Second;
+    UINT64 ConsolePolicy;
+    UINT64 IdeDmaEnabled;
+    UINT64 DebugPortFlags;
+    UINT64 DebugPortBase;
+} FW_HANDOFF_LEGACY;
+
+FW_STATIC_ASSERT(sizeof(IA64VpcHandoff) == 112, fw_handoff_size);
+FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, ProcessorCount) == 64,
+                 fw_handoff_processor_count_offset);
+FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, NvramPersistent) == 72,
+                 fw_handoff_nvram_persistent_offset);
+FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, SocketCount) == 80,
+                 fw_handoff_socket_count_offset);
+FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, CoresPerSocket) == 88,
+                 fw_handoff_cores_per_socket_offset);
+FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, ThreadsPerCore) == 96,
+                 fw_handoff_threads_per_core_offset);
+
+static BOOLEAN fw_handoff_valid(const FW_HANDOFF_HEADER *Handoff)
+{
+    return Handoff->Magic == IA64_FW_HANDOFF_MAGIC &&
+           Handoff->Version >= 1 &&
+           Handoff->Version <= IA64_FW_HANDOFF_VERSION;
+}
+
+static BOOLEAN fw_handoff_ram_size(UINT64 *RamSize)
+{
+    FW_HANDOFF_HEADER *handoff =
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    UINT64 ram_size;
+
+    if (!fw_handoff_valid(handoff)) {
+        return 0;
+    }
+
+    ram_size = handoff->RamSize & ~0xfffULL;
+    *RamSize = ram_size;
+    return 1;
+}
+
+static BOOLEAN fw_handoff_low_ram_end(UINT64 *LowRamEnd)
+{
+    UINT64 ram_size;
+
+    if (!fw_handoff_ram_size(&ram_size)) {
+        return 0;
+    }
+
+    if (ram_size > FW_LOW_RAM_LIMIT) {
+        ram_size = FW_LOW_RAM_LIMIT;
+    }
+    *LowRamEnd = ram_size;
+    return 1;
+}
+
+UINT64 fw_guest_low_ram_end(void)
+{
+    UINT64 low_ram_end;
+
+    return fw_handoff_low_ram_end(&low_ram_end) ?
+        low_ram_end : FW_LOW_RAM_LIMIT;
+}
+
+UINT64 fw_guest_ram_size(void)
+{
+    UINT64 ram_size;
+
+    return fw_handoff_ram_size(&ram_size) ?
+        ram_size : FW_LOW_RAM_LIMIT;
+}
+
+static void fw_add_guest_high_ram_range(UINT64 Base, UINT64 Limit,
+                                        UINT64 *Remaining)
+{
+    FW_RAM_RANGE *range;
+    UINT64 size;
+    UINT64 end;
+
+    if (mGuestHighRamCount >= FW_HIGH_RAM_RANGE_MAX ||
+        Remaining == NULL || *Remaining == 0 || Limit <= Base) {
+        return;
+    }
+
+    size = *Remaining < Limit - Base ? *Remaining : Limit - Base;
+    end = Base + size;
+
+    range = &mGuestHighRam[mGuestHighRamCount++];
+    range->Base = Base;
+    range->End = end;
+    *Remaining -= size;
+}
+
+void fw_init_guest_high_ram_ranges(UINT64 RamSize)
+{
+    UINT64 remaining;
+    UINTN i;
+
+    mGuestHighRamCount = 0;
+    for (i = 0; i < FW_HIGH_RAM_RANGE_MAX; i++) {
+        mGuestHighRam[i].Base = 0;
+        mGuestHighRam[i].End = 0;
+    }
+
+    /*
+     * Match real 460GX: low DRAM is contiguous from 0 to the PCI/MMIO aperture
+     * (mGuestLowRamEnd), and anything displaced by the top-of-memory gap is
+     * remapped ABOVE 4 GiB.  There is no sub-4 GiB DRAM island above the
+     * aperture.  (Keep this in lockstep with ia64_vpc_map_ram() in
+     * hw/ia64/ia64_vpc.c.)
+     */
+    remaining = RamSize > mGuestLowRamEnd ? RamSize - mGuestLowRamEnd : 0;
+    fw_add_guest_high_ram_range(FW_FIRMWARE_ADDRESS_SPACE_END,
+                                ~0ULL, &remaining);
+}
+
+UINTN fw_guest_processor_count(void)
+{
+    return mProcessorCount;
+}
+
+UINTN fw_guest_socket_count(void)
+{
+    return mSocketCount;
+}
+
+UINTN fw_guest_cores_per_socket(void)
+{
+    return mCoresPerSocket;
+}
+
+UINTN fw_guest_threads_per_core(void)
+{
+    return mThreadsPerCore;
+}
+
+UINTN fw_guest_high_ram_count(void)
+{
+    return mGuestHighRamCount;
+}
+
+UINT64 fw_guest_high_ram_base(UINTN Index)
+{
+    return Index < mGuestHighRamCount ? mGuestHighRam[Index].Base : 0;
+}
+
+UINT64 fw_guest_high_ram_end(UINTN Index)
+{
+    return Index < mGuestHighRamCount ? mGuestHighRam[Index].End : 0;
+}
+
+UINT64 fw_guest_high_ram_total(void)
+{
+    UINT64 total = 0;
+    UINTN i;
+
+    for (i = 0; i < mGuestHighRamCount; i++) {
+        total += mGuestHighRam[i].End - mGuestHighRam[i].Base;
+    }
+    return total;
+}
+
+UINT64 fw_boot_stack_top(void)
+{
+    UINT64 low_ram_end;
+
+    /*
+     * The entry trampoline initially uses the minimum-machine stack.  Only
+     * move it after validating the machine handoff, since this function is
+     * itself called on that bootstrap stack.
+     */
+    if (!fw_handoff_low_ram_end(&low_ram_end) ||
+        low_ram_end < IA64_FW_LOW_RAM_MIN) {
+        return IA64_FW_LOW_RAM_MIN;
+    }
+    return low_ram_end & ~(IA64_EFI_MEMORY_ALIGN - 1U);
+}
+
+BOOLEAN fw_handoff_vga_console_primary(void)
+{
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+
+    if (!fw_handoff_valid(header) || header->Version < 3) {
+        return 0;
+    }
+    if (header->Version >= 6) {
+        IA64VpcHandoff *handoff =
+            (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+
+        return handoff->ConsolePolicy == IA64_FW_CONSOLE_VGA;
+    } else {
+        FW_HANDOFF_LEGACY *handoff =
+            (FW_HANDOFF_LEGACY *)(UINTN)IA64_FW_HANDOFF_ADDR;
+
+        return handoff->ConsolePolicy == IA64_FW_CONSOLE_VGA;
+    }
+}
+
+BOOLEAN fw_handoff_ide_dma_enabled(void)
+{
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+
+    if (!fw_handoff_valid(header) || header->Version < 4) {
+        return 1;
+    }
+    if (header->Version >= 6) {
+        IA64VpcHandoff *handoff =
+            (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+
+        return handoff->IdeDmaEnabled != 0;
+    } else {
+        FW_HANDOFF_LEGACY *handoff =
+            (FW_HANDOFF_LEGACY *)(UINTN)IA64_FW_HANDOFF_ADDR;
+
+        return handoff->IdeDmaEnabled != 0;
+    }
+}
+
+UINT64 fw_handoff_debug_port_base(void)
+{
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    UINT64 flags;
+    UINT64 base;
+
+    if (!fw_handoff_valid(header) || header->Version < 5) {
+        return 0;
+    }
+    if (header->Version >= 6) {
+        IA64VpcHandoff *handoff =
+            (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+
+        flags = handoff->DebugPortFlags;
+        base = handoff->DebugPortBase;
+    } else {
+        FW_HANDOFF_LEGACY *handoff =
+            (FW_HANDOFF_LEGACY *)(UINTN)IA64_FW_HANDOFF_ADDR;
+
+        flags = handoff->DebugPortFlags;
+        base = handoff->DebugPortBase;
+    }
+    return (flags & IA64_FW_DEBUG_PORT_PRESENT) != 0 ? base : 0;
+}
+
+BOOLEAN fw_handoff_i8042_enabled(void)
+{
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    IA64VpcHandoff *handoff;
+
+    if (!fw_handoff_valid(header) || header->Version < 7) {
+        return 1;
+    }
+    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    return handoff->I8042Enabled != 0;
+}
+
+UINTN fw_handoff_processor_count(void)
+{
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    IA64VpcHandoff *handoff;
+    UINT64 count;
+
+    if (!fw_handoff_valid(header) || header->Version < 8) {
+        return 1;
+    }
+    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    count = handoff->ProcessorCount;
+    if (count == 0 || count > FW_MAX_CPUS) {
+        return 1;
+    }
+    return (UINTN)count;
+}
+
+UINT64 fw_handoff_map_quirk_disable(void)
+{
+    const FW_HANDOFF_HEADER *header =
+        (const FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    const IA64VpcHandoff *handoff =
+        (const IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+
+    if (!fw_handoff_valid(header) || header->Version < 11) {
+        return 0;
+    }
+    return handoff->MapQuirkDisable & IA64_FW_QUIRK_ALL;
+}
+
+static void fw_handoff_processor_topology(UINTN ProcessorCount)
+{
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    IA64VpcHandoff *handoff;
+    UINT64 sockets;
+    UINT64 cores;
+    UINT64 threads;
+    UINT64 capacity;
+
+    /*
+     * Version 9 and older described only a processor count.  Preserve their
+     * historical one-package interpretation when an old handoff is used.
+     */
+    mSocketCount = 1;
+    mCoresPerSocket = ProcessorCount;
+    mThreadsPerCore = 1;
+
+    if (!fw_handoff_valid(header) || header->Version < 10) {
+        return;
+    }
+
+    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    sockets = handoff->SocketCount;
+    cores = handoff->CoresPerSocket;
+    threads = handoff->ThreadsPerCore;
+    if (sockets == 0 || sockets > FW_MAX_CPUS ||
+        cores == 0 || cores > FW_MAX_CPUS ||
+        threads == 0 || threads > FW_MAX_CPUS ||
+        sockets > FW_MAX_CPUS / cores ||
+        sockets * cores > FW_MAX_CPUS / threads) {
+        return;
+    }
+
+    capacity = sockets * cores * threads;
+    if (capacity < ProcessorCount || capacity > FW_MAX_CPUS) {
+        return;
+    }
+
+    mSocketCount = (UINTN)sockets;
+    mCoresPerSocket = (UINTN)cores;
+    mThreadsPerCore = (UINTN)threads;
+}
+
+BOOLEAN fw_handoff_nvram_persistent(void)
+{
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    IA64VpcHandoff *handoff;
+
+    if (!fw_handoff_valid(header) || header->Version < 9) {
+        return 0;
+    }
+    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    return handoff->NvramPersistent != 0;
+}
+
+UINT64 fw_ap_stack_top(UINT64 ProcessorId)
+{
+    if (ProcessorId == 0 || ProcessorId >= FW_MAX_CPUS) {
+        return fw_boot_stack_top();
+    }
+    return fw_boot_stack_top() - ProcessorId * FW_AP_STACK_SIZE;
+}
+
+UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
+                                           UINT64 BootStackBase,
+                                           UINT64 BootStackTop)
+{
+    UINT64 base;
+
+    if (LowRamEnd <= FW_LOW_IMAGE_END + FW_SYSTEM_TABLE_POINTER_SIZE) {
+        return 0;
+    }
+
+    base = (LowRamEnd - 1U) & ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
+    if (base < BootStackTop &&
+        base + FW_SYSTEM_TABLE_POINTER_SIZE > BootStackBase) {
+        base = (BootStackBase - FW_SYSTEM_TABLE_POINTER_SIZE) &
+               ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
+    }
+    if (base < mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE &&
+        base + FW_SYSTEM_TABLE_POINTER_SIZE > mCpuAssistBase) {
+        base = (mCpuAssistBase - FW_SYSTEM_TABLE_POINTER_SIZE) &
+               ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
+    }
+    if (base <= FW_LOW_IMAGE_END ||
+        base + FW_SYSTEM_TABLE_POINTER_SIZE > LowRamEnd) {
+        return 0;
+    }
+    return base;
+}
+
+/*
+ * SAL revision advertised in the SST, chosen from the processor this machine
+ * is impersonating.  See the SAL_REVISION_* definitions for the rationale and
+ * the hardware cross-check.  It also selects the procedure set: a call that
+ * post-dates the advertised revision must not be offered.
+ */
+UINT16 fw_sal_revision(void)
+{
+    UINT64 family = (fw_read_cpuid3() >> IA64_CPUID3_FAMILY_SHIFT) &
+                    IA64_CPUID3_FAMILY_MASK;
+
+    return family == IA64_CPUID3_FAMILY_MERCED ? SAL_REVISION_3_0 :
+                                                 SAL_REVISION_3_2;
+}
+
+static SAL_RETURN_VALUE sal_proc_entry(UINT64 Index, UINT64 Arg1, UINT64 Arg2,
+                                        UINT64 Arg3, UINT64 Arg4, UINT64 Arg5,
+                                        UINT64 Arg6, UINT64 Arg7);
+
+UINT64 fw_sal_proc_function_entry(void)
+{
+    return fw_function_entry((UINTN)sal_proc_entry);
+}
+
+typedef struct {
+    UINT64 HandlerAddr1;
+    UINT64 Gp1;
+    UINT64 HandlerLen1;
+    UINT64 HandlerAddr2;
+    UINT64 Gp2;
+    UINT64 HandlerLen2;
+    BOOLEAN Valid;
+} SAL_VECTOR_REGISTRATION;
+
+typedef struct {
+    UINT64 Mechanism;
+    UINT64 Value;
+    UINT64 Timeout;
+    UINT64 Options;
+    BOOLEAN Valid;
+} SAL_MC_PARAM_REGISTRATION;
+
+static SAL_VECTOR_REGISTRATION mSalVectors[SAL_VECTOR_COUNT];
+static SAL_MC_PARAM_REGISTRATION mSalMcParams[SAL_MC_PARAM_COUNT];
+static UINT64 mSalPalProcPhysicalAddress __attribute__((used));
+
+static SAL_RETURN_VALUE sal_return(UINT64 Status, UINT64 Value0,
+                                   UINT64 Value1, UINT64 Value2)
+{
+    SAL_RETURN_VALUE Ret;
+
+    Ret.Status = Status;
+    Ret.Value0 = Value0;
+    Ret.Value1 = Value1;
+    Ret.Value2 = Value2;
+    return Ret;
+}
+
+static BOOLEAN sal_vector_length_cs_valid(UINT64 LengthCs)
+{
+    if ((LengthCs & SAL_VECTOR_CHECKSUM_VALID) == 0) {
+        return 1;
+    }
+
+    if ((LengthCs & SAL_VECTOR_LENGTH_RESERVED_MASK) != 0) {
+        return 0;
+    }
+
+    return (LengthCs & SAL_VECTOR_LENGTH_MASK) != 0 &&
+           (LengthCs & 0xfU) == 0;
+}
+
+static BOOLEAN sal_vector_entry_valid(UINT64 Address, UINT64 LengthCs)
+{
+    if ((Address & 0xfU) != 0) {
+        return 0;
+    }
+
+    return sal_vector_length_cs_valid(LengthCs);
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_set_vectors(UINT64 VectorType, UINT64 PhysAddr1, UINT64 Gp1,
+                UINT64 LengthCs1, UINT64 PhysAddr2, UINT64 Gp2,
+                UINT64 LengthCs2)
+{
+    SAL_VECTOR_REGISTRATION *entry;
+
+    if (VectorType >= SAL_VECTOR_COUNT ||
+        !sal_vector_entry_valid(PhysAddr1, LengthCs1) ||
+        (VectorType == SAL_VECTOR_OS_INIT &&
+         ((PhysAddr1 == 0) != (PhysAddr2 == 0) ||
+          !sal_vector_entry_valid(PhysAddr2, LengthCs2))) ||
+        (VectorType != SAL_VECTOR_OS_INIT &&
+         (PhysAddr2 != 0 || Gp2 != 0 || LengthCs2 != 0))) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+    }
+
+    entry = &mSalVectors[VectorType];
+    entry->HandlerAddr1 = PhysAddr1;
+    entry->Gp1 = Gp1;
+    entry->HandlerLen1 = LengthCs1;
+    entry->HandlerAddr2 = PhysAddr2;
+    entry->Gp2 = Gp2;
+    entry->HandlerLen2 = LengthCs2;
+    entry->Valid = 1;
+    return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
+}
+
+BOOLEAN __attribute__((noinline)) sal_set_vectors_selftest(void)
+{
+    SAL_VECTOR_REGISTRATION saved[SAL_VECTOR_COUNT];
+    SAL_RETURN_VALUE mca_valid;
+    SAL_RETURN_VALUE bad_secondary;
+    SAL_RETURN_VALUE bad_type;
+    SAL_RETURN_VALUE init_mismatch;
+    SAL_RETURN_VALUE init_checksum_valid;
+    SAL_RETURN_VALUE bad_checksum_reserved;
+    SAL_RETURN_VALUE bad_checksum_length;
+    UINT64 length_cs = 0x20U | SAL_VECTOR_CHECKSUM_VALID | (0x80ULL << 40);
+    UINTN i;
+    BOOLEAN ok;
+
+    for (i = 0; i < SAL_VECTOR_COUNT; i++) {
+        saved[i] = mSalVectors[i];
+    }
+
+    mca_valid = sal_set_vectors(SAL_VECTOR_OS_MCA, 0x2000, 0x1000, 0,
+                                0, 0, 0);
+    bad_secondary = sal_set_vectors(SAL_VECTOR_OS_MCA, 0x2000, 0x1000, 0,
+                                    0x3000, 0, 0);
+    bad_type = sal_set_vectors(3, 0, 0, 0, 0, 0, 0);
+    init_mismatch = sal_set_vectors(SAL_VECTOR_OS_INIT, 0, 0, 0,
+                                    0x3000, 0, 0);
+    init_checksum_valid = sal_set_vectors(SAL_VECTOR_OS_INIT, 0x2000, 0x1000,
+                                          length_cs, 0x3000, 0x1000,
+                                          length_cs);
+    bad_checksum_reserved =
+        sal_set_vectors(SAL_VECTOR_OS_BOOT_RENDEZ, 0x2000, 0x1000,
+                        length_cs | (1ULL << 33), 0, 0, 0);
+    bad_checksum_length =
+        sal_set_vectors(SAL_VECTOR_OS_BOOT_RENDEZ, 0x2000, 0x1000,
+                        SAL_VECTOR_CHECKSUM_VALID | 0x18U, 0, 0, 0);
+
+    ok = mca_valid.Status == SAL_STATUS_SUCCESS &&
+         bad_secondary.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         bad_type.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         init_mismatch.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         init_checksum_valid.Status == SAL_STATUS_SUCCESS &&
+         bad_checksum_reserved.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         bad_checksum_length.Status == SAL_STATUS_INVALID_ARGUMENT;
+
+    for (i = 0; i < SAL_VECTOR_COUNT; i++) {
+        mSalVectors[i] = saved[i];
+    }
+
+    return ok;
+}
+
+static BOOLEAN sal_state_type_valid(UINT64 Type)
+{
+    return Type <= SAL_STATE_TYPE_DECONFIG;
+}
+
+static BOOLEAN sal_reserved_args_are_zero(UINT64 Arg1, UINT64 Arg2,
+                                          UINT64 Arg3, UINT64 Arg4,
+                                          UINT64 Arg5, UINT64 Arg6)
+{
+    return Arg1 == 0 && Arg2 == 0 && Arg3 == 0 &&
+           Arg4 == 0 && Arg5 == 0 && Arg6 == 0;
+}
+
+static BOOLEAN sal_interrupt_vector_valid(UINT64 Vector, BOOLEAN AllowZero)
+{
+    return (AllowZero && Vector == 0) || (Vector >= 0x10 && Vector <= 0xff);
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_get_state_info_size(UINT64 Type, UINT64 Reserved1, UINT64 Reserved2,
+                        UINT64 Reserved3, UINT64 Reserved4, UINT64 Reserved5,
+                        UINT64 Reserved6)
+{
+    if (!sal_state_type_valid(Type) ||
+        !sal_reserved_args_are_zero(Reserved1, Reserved2, Reserved3,
+                                    Reserved4, Reserved5, Reserved6)) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+    }
+
+    /*
+     * Advertise room for the generic record header and one section header.
+     * This also accommodates consumers that initialize first-section
+     * metadata before requesting a record when none is pending.
+     */
+    return sal_return(SAL_STATUS_SUCCESS, SAL_ERROR_RECORD_MIN_SIZE,
+                      0, 0);
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_get_state_info(UINT64 Type, UINT64 Reserved1, UINT64 MemAddr,
+                   UINT64 Reserved2, UINT64 Reserved3, UINT64 Reserved4,
+                   UINT64 Reserved5)
+{
+    (void)MemAddr;
+
+    if (!sal_state_type_valid(Type) ||
+        Reserved1 != 0 ||
+        !sal_reserved_args_are_zero(Reserved2, Reserved3, Reserved4,
+                                    Reserved5, 0, 0)) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+    }
+
+    return sal_return(SAL_STATUS_NO_INFORMATION, 0, 0, 0);
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_clear_state_info(UINT64 Type, UINT64 Reserved1, UINT64 Reserved2,
+                     UINT64 Reserved3, UINT64 Reserved4, UINT64 Reserved5,
+                     UINT64 Reserved6)
+{
+    if (!sal_state_type_valid(Type) ||
+        !sal_reserved_args_are_zero(Reserved1, Reserved2, Reserved3,
+                                    Reserved4, Reserved5, Reserved6)) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+    }
+
+    return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
+}
+
+BOOLEAN __attribute__((noinline)) sal_state_info_selftest(void)
+{
+    SAL_RETURN_VALUE size_valid;
+    SAL_RETURN_VALUE size_bad_reserved;
+    SAL_RETURN_VALUE info_empty;
+    SAL_RETURN_VALUE info_bad_type;
+    SAL_RETURN_VALUE clear_valid;
+    SAL_RETURN_VALUE clear_bad_reserved;
+
+    size_valid = sal_get_state_info_size(SAL_STATE_TYPE_MCA,
+                                         0, 0, 0, 0, 0, 0);
+    size_bad_reserved = sal_get_state_info_size(SAL_STATE_TYPE_MCA,
+                                                0, 0, 0, 0, 1, 0);
+    info_empty = sal_get_state_info(SAL_STATE_TYPE_CPE,
+                                    0, 0x2000, 0, 0, 0, 0);
+    info_bad_type = sal_get_state_info(5, 0, 0x2000, 0, 0, 0, 0);
+    clear_valid = sal_clear_state_info(SAL_STATE_TYPE_INIT,
+                                       0, 0, 0, 0, 0, 0);
+    clear_bad_reserved = sal_clear_state_info(SAL_STATE_TYPE_INIT,
+                                              0, 0, 0, 0, 0, 1);
+
+    return size_valid.Status == SAL_STATUS_SUCCESS &&
+           size_valid.Value0 == SAL_ERROR_RECORD_MIN_SIZE &&
+           size_bad_reserved.Status == SAL_STATUS_INVALID_ARGUMENT &&
+           info_empty.Status == SAL_STATUS_NO_INFORMATION &&
+           info_empty.Value0 == 0 &&
+           info_bad_type.Status == SAL_STATUS_INVALID_ARGUMENT &&
+           clear_valid.Status == SAL_STATUS_SUCCESS &&
+           clear_bad_reserved.Status == SAL_STATUS_INVALID_ARGUMENT;
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_cache_flush(UINT64 IorD, UINT64 Reserved1, UINT64 Reserved2,
+                UINT64 Reserved3, UINT64 Reserved4, UINT64 Reserved5,
+                UINT64 Reserved6)
+{
+    if (IorD < 1 || IorD > 4 ||
+        !sal_reserved_args_are_zero(Reserved1, Reserved2, Reserved3,
+                                    Reserved4, Reserved5, Reserved6)) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+    }
+
+    return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_cache_init(UINT64 Reserved1, UINT64 Reserved2, UINT64 Reserved3,
+               UINT64 Reserved4, UINT64 Reserved5, UINT64 Reserved6,
+               UINT64 Reserved7)
+{
+    if (Reserved7 != 0 ||
+        !sal_reserved_args_are_zero(Reserved1, Reserved2, Reserved3,
+                                    Reserved4, Reserved5, Reserved6)) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+    }
+
+    return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
+}
+
+BOOLEAN __attribute__((noinline)) sal_cache_services_selftest(void)
+{
+    SAL_RETURN_VALUE flush_valid;
+    SAL_RETURN_VALUE flush_bad_type;
+    SAL_RETURN_VALUE flush_bad_reserved;
+    SAL_RETURN_VALUE init_valid;
+    SAL_RETURN_VALUE init_bad_reserved;
+
+    flush_valid = sal_cache_flush(4, 0, 0, 0, 0, 0, 0);
+    flush_bad_type = sal_cache_flush(5, 0, 0, 0, 0, 0, 0);
+    flush_bad_reserved = sal_cache_flush(1, 0, 1, 0, 0, 0, 0);
+    init_valid = sal_cache_init(0, 0, 0, 0, 0, 0, 0);
+    init_bad_reserved = sal_cache_init(0, 0, 0, 0, 0, 0, 1);
+
+    return flush_valid.Status == SAL_STATUS_SUCCESS &&
+           flush_bad_type.Status == SAL_STATUS_INVALID_ARGUMENT &&
+           flush_bad_reserved.Status == SAL_STATUS_INVALID_ARGUMENT &&
+           init_valid.Status == SAL_STATUS_SUCCESS &&
+           init_bad_reserved.Status == SAL_STATUS_INVALID_ARGUMENT;
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_mc_rendez(UINT64 Reserved1, UINT64 Reserved2, UINT64 Reserved3,
+              UINT64 Reserved4, UINT64 Reserved5, UINT64 Reserved6,
+              UINT64 Reserved7)
+{
+    if (Reserved1 != 0 || Reserved2 != 0 || Reserved3 != 0 ||
+        Reserved4 != 0 || Reserved5 != 0 || Reserved6 != 0 ||
+        Reserved7 != 0) {
+        return sal_return(SAL_STATUS_ERROR, 0, 0, 0);
+    }
+
+    return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
+}
+
+BOOLEAN __attribute__((noinline)) sal_mc_rendez_selftest(void)
+{
+    SAL_RETURN_VALUE valid;
+    SAL_RETURN_VALUE invalid;
+
+    valid = sal_mc_rendez(0, 0, 0, 0, 0, 0, 0);
+    if (valid.Status != SAL_STATUS_SUCCESS ||
+        valid.Value0 != 0 || valid.Value1 != 0 || valid.Value2 != 0) {
+        return 0;
+    }
+
+    invalid = sal_mc_rendez(1, 0, 0, 0, 0, 0, 0);
+    return invalid.Status == SAL_STATUS_ERROR &&
+           invalid.Value0 == 0 && invalid.Value1 == 0 && invalid.Value2 == 0;
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_mc_set_params(UINT64 ParamType, UINT64 IorM, UINT64 IorMVal,
+                  UINT64 Timeout, UINT64 McaOpt, UINT64 Reserved1,
+                  UINT64 Reserved2)
+{
+    SAL_MC_PARAM_REGISTRATION *entry;
+
+    if (Reserved1 != 0 || Reserved2 != 0 ||
+        ParamType < SAL_MC_PARAM_RENDEZ_INT ||
+        ParamType > SAL_MC_PARAM_CPE_INT) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+    }
+
+    if (ParamType == SAL_MC_PARAM_RENDEZ_INT) {
+        if (IorM != SAL_MC_PARAM_MECHANISM_INT ||
+            !sal_interrupt_vector_valid(IorMVal, 1) ||
+            (McaOpt & ~SAL_MC_OPTION_MASK) != 0) {
+            return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+        }
+    } else if (ParamType == SAL_MC_PARAM_RENDEZ_WAKEUP) {
+        if (McaOpt != 0 ||
+            (IorM == SAL_MC_PARAM_MECHANISM_INT &&
+             !sal_interrupt_vector_valid(IorMVal, 1)) ||
+            (IorM == SAL_MC_PARAM_MECHANISM_MEM && (IorMVal & 0x7U) != 0) ||
+            (IorM != SAL_MC_PARAM_MECHANISM_INT &&
+             IorM != SAL_MC_PARAM_MECHANISM_MEM)) {
+            return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+        }
+    } else {
+        if (IorM != SAL_MC_PARAM_MECHANISM_INT ||
+            !sal_interrupt_vector_valid(IorMVal, 1) ||
+            McaOpt != 0) {
+            return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+        }
+    }
+
+    entry = &mSalMcParams[ParamType];
+    entry->Mechanism = IorM;
+    entry->Value = IorMVal;
+    entry->Timeout = Timeout;
+    entry->Options = McaOpt;
+    entry->Valid = 1;
+    return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
+}
+
+BOOLEAN __attribute__((noinline)) sal_mc_set_params_selftest(void)
+{
+    SAL_MC_PARAM_REGISTRATION saved[SAL_MC_PARAM_COUNT];
+    SAL_RETURN_VALUE rendez;
+    SAL_RETURN_VALUE wake_mem;
+    SAL_RETURN_VALUE cpe_deregister;
+    SAL_RETURN_VALUE bad_reserved;
+    SAL_RETURN_VALUE bad_vector;
+    SAL_RETURN_VALUE bad_mem_align;
+    SAL_RETURN_VALUE bad_options;
+    BOOLEAN ok;
+    UINTN i;
+
+    for (i = 0; i < SAL_MC_PARAM_COUNT; i++) {
+        saved[i] = mSalMcParams[i];
+    }
+
+    rendez = sal_mc_set_params(SAL_MC_PARAM_RENDEZ_INT,
+                               SAL_MC_PARAM_MECHANISM_INT, 0xf0, 250,
+                               SAL_MC_OPTION_MASK, 0, 0);
+    wake_mem = sal_mc_set_params(SAL_MC_PARAM_RENDEZ_WAKEUP,
+                                 SAL_MC_PARAM_MECHANISM_MEM, 0x2000, 0,
+                                 0, 0, 0);
+    cpe_deregister = sal_mc_set_params(SAL_MC_PARAM_CPE_INT,
+                                       SAL_MC_PARAM_MECHANISM_INT, 0, 0,
+                                       0, 0, 0);
+    bad_reserved = sal_mc_set_params(SAL_MC_PARAM_RENDEZ_INT,
+                                     SAL_MC_PARAM_MECHANISM_INT, 0x20, 0,
+                                     0, 1, 0);
+    bad_vector = sal_mc_set_params(SAL_MC_PARAM_CPE_INT,
+                                   SAL_MC_PARAM_MECHANISM_INT, 0xf, 0,
+                                   0, 0, 0);
+    bad_mem_align = sal_mc_set_params(SAL_MC_PARAM_RENDEZ_WAKEUP,
+                                      SAL_MC_PARAM_MECHANISM_MEM, 0x2004, 0,
+                                      0, 0, 0);
+    bad_options = sal_mc_set_params(SAL_MC_PARAM_RENDEZ_INT,
+                                    SAL_MC_PARAM_MECHANISM_INT, 0x20, 0,
+                                    1ULL << 2, 0, 0);
+
+    ok = rendez.Status == SAL_STATUS_SUCCESS &&
+         wake_mem.Status == SAL_STATUS_SUCCESS &&
+         cpe_deregister.Status == SAL_STATUS_SUCCESS &&
+         bad_reserved.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         bad_vector.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         bad_mem_align.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         bad_options.Status == SAL_STATUS_INVALID_ARGUMENT;
+
+    for (i = 0; i < SAL_MC_PARAM_COUNT; i++) {
+        mSalMcParams[i] = saved[i];
+    }
+
+    return ok;
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_freq_base(UINT64 ClockType, UINT64 Reserved1, UINT64 Reserved2,
+              UINT64 Reserved3, UINT64 Reserved4, UINT64 Reserved5,
+              UINT64 Reserved6)
+{
+    if (ClockType > 2 ||
+        !sal_reserved_args_are_zero(Reserved1, Reserved2, Reserved3,
+                                    Reserved4, Reserved5, Reserved6)) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, (UINT64)-1,
+                          (UINT64)-1, 0);
+    }
+
+    if (ClockType == SAL_FREQ_BASE_PLATFORM) {
+        return sal_return(SAL_STATUS_SUCCESS, PLATFORM_BASE_FREQUENCY,
+                          (UINT64)-1, 0);
+    }
+
+    return sal_return(SAL_STATUS_SUCCESS, (UINT64)-1, (UINT64)-1, 0);
+}
+
+BOOLEAN __attribute__((noinline)) sal_freq_base_selftest(void)
+{
+    SAL_RETURN_VALUE platform;
+    SAL_RETURN_VALUE optional;
+    SAL_RETURN_VALUE invalid_type;
+    SAL_RETURN_VALUE invalid_reserved;
+
+    platform = sal_freq_base(0, 0, 0, 0, 0, 0, 0);
+    optional = sal_freq_base(1, 0, 0, 0, 0, 0, 0);
+    invalid_type = sal_freq_base(3, 0, 0, 0, 0, 0, 0);
+    invalid_reserved = sal_freq_base(0, 0, 0, 1, 0, 0, 0);
+
+    return platform.Status == SAL_STATUS_SUCCESS &&
+           platform.Value0 == PLATFORM_BASE_FREQUENCY &&
+           platform.Value1 == (UINT64)-1 &&
+           optional.Status == SAL_STATUS_SUCCESS &&
+           optional.Value0 == (UINT64)-1 && optional.Value1 == (UINT64)-1 &&
+           invalid_type.Status == SAL_STATUS_INVALID_ARGUMENT &&
+           invalid_reserved.Status == SAL_STATUS_INVALID_ARGUMENT;
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_physical_id_info(UINT64 Reserved1, UINT64 Reserved2, UINT64 Reserved3,
+                     UINT64 Reserved4, UINT64 Reserved5, UINT64 Reserved6,
+                     UINT64 Reserved7)
+{
+    if (Reserved7 != 0 ||
+        !sal_reserved_args_are_zero(Reserved1, Reserved2, Reserved3,
+                                    Reserved4, Reserved5, Reserved6)) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+    }
+
+    return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_register_physical_addr(UINT64 Entity, UINT64 Address, UINT64 Reserved1,
+                           UINT64 Reserved2, UINT64 Reserved3,
+                           UINT64 Reserved4, UINT64 Reserved5)
+{
+    if (Entity != SAL_PHYSICAL_ENTITY_PAL_PROC ||
+        !sal_reserved_args_are_zero(Reserved1, Reserved2, Reserved3,
+                                    Reserved4, Reserved5, 0)) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+    }
+    mSalPalProcPhysicalAddress = Address;
+    return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
+}
+
+BOOLEAN __attribute__((noinline)) sal_physical_services_selftest(void)
+{
+    UINT64 saved = mSalPalProcPhysicalAddress;
+    SAL_RETURN_VALUE id;
+    SAL_RETURN_VALUE id_bad_reserved;
+    SAL_RETURN_VALUE reg;
+    SAL_RETURN_VALUE reg_bad_entity;
+    SAL_RETURN_VALUE reg_bad_reserved;
+    BOOLEAN ok;
+
+    id = sal_physical_id_info(0, 0, 0, 0, 0, 0, 0);
+    id_bad_reserved = sal_physical_id_info(0, 0, 0, 0, 0, 0, 1);
+    reg = sal_register_physical_addr(SAL_PHYSICAL_ENTITY_PAL_PROC,
+                                     0x2000, 0, 0, 0, 0, 0);
+    reg_bad_entity = sal_register_physical_addr(1, 0x2000, 0, 0, 0, 0, 0);
+    reg_bad_reserved =
+        sal_register_physical_addr(SAL_PHYSICAL_ENTITY_PAL_PROC,
+                                   0x2000, 0, 0, 1, 0, 0);
+
+    ok = id.Status == SAL_STATUS_SUCCESS && id.Value0 == 0 &&
+         id_bad_reserved.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         reg.Status == SAL_STATUS_SUCCESS &&
+         reg_bad_entity.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         reg_bad_reserved.Status == SAL_STATUS_INVALID_ARGUMENT;
+
+    mSalPalProcPhysicalAddress = saved;
+    return ok;
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_update_pal(UINT64 ParamBuf, UINT64 ScratchBuf, UINT64 ScratchBufSize,
+               UINT64 Reserved1, UINT64 Reserved2, UINT64 Reserved3,
+               UINT64 Reserved4)
+{
+    if (ParamBuf == 0 || (ParamBuf & 0xfU) != 0 ||
+        (ScratchBuf == 0 && ScratchBufSize != 0) ||
+        Reserved1 != 0 || Reserved2 != 0 ||
+        Reserved3 != 0 || Reserved4 != 0) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+    }
+
+    /*
+     * The VM firmware image is immutable: report the architectural storage
+     * write failure instead of advertising the procedure as absent.
+     */
+    return sal_return(SAL_STATUS_ERROR, SAL_UPDATE_PAL_WRITE_FAILURE, 0, 0);
+}
+
+BOOLEAN __attribute__((noinline)) sal_update_pal_selftest(void)
+{
+    SAL_RETURN_VALUE invalid;
+    SAL_RETURN_VALUE readonly;
+
+    invalid = sal_update_pal(0x2001, 0, 0, 0, 0, 0, 0);
+    if (invalid.Status != SAL_STATUS_INVALID_ARGUMENT) {
+        return 0;
+    }
+
+    readonly = sal_update_pal(0x2000, 0, 0, 0, 0, 0, 0);
+    return readonly.Status == SAL_STATUS_ERROR &&
+           readonly.Value0 == SAL_UPDATE_PAL_WRITE_FAILURE &&
+           readonly.Value1 == 0 && readonly.Value2 == 0;
+}
+
+static UINT64 pci_config_cpu_base_for_mode(BOOLEAN Translated)
+{
+    if (!Translated) {
+        return PCI_CONFIG_ECAM_BASE;
+    }
+    if (mVirtualAddressMapApplied) {
+        return mRuntimePciConfigEcam;
+    }
+    return IA64_REGION6_BASE | PCI_CONFIG_ECAM_BASE;
+}
+
+static UINT64 pci_config_cpu_base(void)
+{
+    return pci_config_cpu_base_for_mode(fw_data_translation_enabled());
+}
+
+static UINT64 pci_config_all_ones(UINTN Size)
+{
+    if (Size >= 8) {
+        return ~(UINT64)0;
+    }
+    return (1ULL << (Size * 8U)) - 1U;
+}
+
+static UINT64 pci_config_ecam_addr_from_base(UINT64 Base, UINT64 Segment,
+                                             UINT64 Bus, UINT64 Device,
+                                             UINT64 Function, UINT64 Offset)
+{
+    if (Segment != 0 || Bus > 0xff || Device > 0x1f || Function > 7 ||
+        Offset >= 0x1000) {
+        return 0;
+    }
+
+    /* EFI virtual mappings are page-aligned, not ECAM-aperture-aligned. */
+    return Base + (Bus << 20) + (Device << 15) +
+           (Function << 12) + Offset;
+}
+
+static UINT64 __attribute__((noinline))
+pci_config_ecam_addr(UINT64 Segment, UINT64 Bus, UINT64 Device,
+                     UINT64 Function, UINT64 Offset)
+{
+    return pci_config_ecam_addr_from_base(pci_config_cpu_base(), Segment, Bus,
+                                          Device, Function, Offset);
+}
+
+UINT64 pci_config_read_value(UINT64 Segment, UINT64 Bus, UINT64 Device,
+                                    UINT64 Function, UINT64 Offset,
+                                    UINTN Size)
+{
+    volatile UINT8 *p8;
+    volatile UINT16 *p16;
+    volatile UINT32 *p32;
+    UINT64 addr = pci_config_ecam_addr(Segment, Bus, Device, Function, Offset);
+
+    if (addr == 0) {
+        return pci_config_all_ones(Size);
+    }
+
+    switch (Size) {
+    case 1:
+        p8 = (volatile UINT8 *)(UINTN)addr;
+        return *p8;
+    case 2:
+        p16 = (volatile UINT16 *)(UINTN)addr;
+        return *p16;
+    default:
+        p32 = (volatile UINT32 *)(UINTN)addr;
+        return *p32;
+    }
+}
+
+void pci_config_write_value(UINT64 Segment, UINT64 Bus, UINT64 Device,
+                                   UINT64 Function, UINT64 Offset,
+                                   UINTN Size, UINT64 Value)
+{
+    volatile UINT8 *p8;
+    volatile UINT16 *p16;
+    volatile UINT32 *p32;
+    UINT64 addr = pci_config_ecam_addr(Segment, Bus, Device, Function, Offset);
+
+    if (addr == 0) {
+        return;
+    }
+
+    switch (Size) {
+    case 1:
+        p8 = (volatile UINT8 *)(UINTN)addr;
+        *p8 = (UINT8)Value;
+        break;
+    case 2:
+        p16 = (volatile UINT16 *)(UINTN)addr;
+        *p16 = (UINT16)Value;
+        break;
+    default:
+        p32 = (volatile UINT32 *)(UINTN)addr;
+        *p32 = (UINT32)Value;
+        break;
+    }
+}
+
+static BOOLEAN __attribute__((noinline))
+sal_pci_config_decode(UINT64 Address, UINT64 Size, UINT64 AddressType,
+                      UINT64 *Segment, UINT64 *Bus, UINT64 *Device,
+                      UINT64 *Function, UINT64 *Offset)
+{
+    if ((Size != 1 && Size != 2 && Size != 4) ||
+        AddressType > 1) {
+        return 0;
+    }
+
+    if (AddressType == 0) {
+        if ((Address >> 32) != 0) {
+            return 0;
+        }
+        *Offset = Address & 0xffU;
+        *Function = (Address >> 8) & 0x7U;
+        *Device = (Address >> 11) & 0x1fU;
+        *Bus = (Address >> 16) & 0xffU;
+        *Segment = (Address >> 24) & 0xffU;
+    } else {
+        if ((Address >> 44) != 0) {
+            return 0;
+        }
+        *Offset = (Address & 0xffU) | (((Address >> 8) & 0xfU) << 8);
+        *Function = (Address >> 12) & 0x7U;
+        *Device = (Address >> 15) & 0x1fU;
+        *Bus = (Address >> 20) & 0xffU;
+        *Segment = (Address >> 28) & 0xffffU;
+    }
+
+    return ((*Offset & (Size - 1U)) == 0 && *Offset + Size <= 0x1000);
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_pci_config_read(UINT64 Address, UINT64 Size, UINT64 AddressType,
+                    UINT64 Reserved1, UINT64 Reserved2, UINT64 Reserved3,
+                    UINT64 Reserved4)
+{
+    UINT64 segment;
+    UINT64 bus;
+    UINT64 device;
+    UINT64 function;
+    UINT64 offset;
+    UINT64 value;
+
+    if (!sal_reserved_args_are_zero(Reserved1, Reserved2, Reserved3,
+                                    Reserved4, 0, 0) ||
+        !sal_pci_config_decode(Address, Size, AddressType, &segment, &bus,
+                               &device, &function, &offset)) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+    }
+
+    value = pci_config_read_value(segment, bus, device, function, offset,
+                                  (UINTN)Size);
+    return sal_return(SAL_STATUS_SUCCESS, value, 0, 0);
+}
+
+static SAL_RETURN_VALUE __attribute__((noinline))
+sal_pci_config_write(UINT64 Address, UINT64 Size, UINT64 Value,
+                     UINT64 AddressType, UINT64 Reserved1,
+                     UINT64 Reserved2, UINT64 Reserved3)
+{
+    UINT64 segment;
+    UINT64 bus;
+    UINT64 device;
+    UINT64 function;
+    UINT64 offset;
+
+    if (!sal_reserved_args_are_zero(Reserved1, Reserved2, Reserved3,
+                                    0, 0, 0) ||
+        !sal_pci_config_decode(Address, Size, AddressType, &segment, &bus,
+                               &device, &function, &offset)) {
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
+    }
+
+    pci_config_write_value(segment, bus, device, function, offset,
+                           (UINTN)Size, Value);
+    return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
+}
+
+BOOLEAN __attribute__((noinline)) sal_pci_config_selftest(void)
+{
+    SAL_RETURN_VALUE id;
+    SAL_RETURN_VALUE id_ext;
+    SAL_RETURN_VALUE command;
+    SAL_RETURN_VALUE write_status;
+    SAL_RETURN_VALUE bad_read_reserved;
+    SAL_RETURN_VALUE bad_write_reserved;
+    SAL_RETURN_VALUE bad_alignment;
+    UINTN saved_runtime_ecam = mRuntimePciConfigEcam;
+    BOOLEAN saved_virtual_map_applied = mVirtualAddressMapApplied;
+    UINTN virtual_ecam = 0xe0000000d0018000ULL;
+
+    mVirtualAddressMapApplied = 0;
+    if (pci_config_cpu_base_for_mode(0) != PCI_CONFIG_ECAM_BASE ||
+        pci_config_cpu_base_for_mode(1) !=
+            (IA64_REGION6_BASE | PCI_CONFIG_ECAM_BASE)) {
+        mRuntimePciConfigEcam = saved_runtime_ecam;
+        mVirtualAddressMapApplied = saved_virtual_map_applied;
+        return 0;
+    }
+    mRuntimePciConfigEcam = virtual_ecam;
+    mVirtualAddressMapApplied = 1;
+    if (pci_config_cpu_base_for_mode(1) != virtual_ecam ||
+        pci_config_ecam_addr_from_base(virtual_ecam, 0, 0, 4, 0, 0) !=
+            virtual_ecam + (4U << 15) ||
+        pci_config_ecam_addr_from_base(virtual_ecam, 0, 0, 7, 0, 0) !=
+            virtual_ecam + (7U << 15)) {
+        mRuntimePciConfigEcam = saved_runtime_ecam;
+        mVirtualAddressMapApplied = saved_virtual_map_applied;
+        return 0;
+    }
+    mRuntimePciConfigEcam = saved_runtime_ecam;
+    mVirtualAddressMapApplied = saved_virtual_map_applied;
+
+    id = sal_pci_config_read(0, 4, 0, 0, 0, 0, 0);
+    if (id.Status != SAL_STATUS_SUCCESS) {
+        return 0;
+    }
+
+    id_ext = sal_pci_config_read(0, 4, 1, 0, 0, 0, 0);
+    if (id_ext.Status != SAL_STATUS_SUCCESS ||
+        (UINT32)id_ext.Value0 != (UINT32)id.Value0) {
+        return 0;
+    }
+
+    command = sal_pci_config_read(4, 2, 0, 0, 0, 0, 0);
+    if (command.Status != SAL_STATUS_SUCCESS) {
+        return 0;
+    }
+
+    write_status = sal_pci_config_write(4, 2, command.Value0, 0, 0, 0, 0);
+    bad_read_reserved = sal_pci_config_read(0, 4, 0, 1, 0, 0, 0);
+    bad_write_reserved = sal_pci_config_write(4, 2, command.Value0,
+                                              0, 0, 1, 0);
+    bad_alignment = sal_pci_config_read(1, 2, 0, 0, 0, 0, 0);
+    return write_status.Status == SAL_STATUS_SUCCESS &&
+           bad_read_reserved.Status == SAL_STATUS_INVALID_ARGUMENT &&
+           bad_write_reserved.Status == SAL_STATUS_INVALID_ARGUMENT &&
+           bad_alignment.Status == SAL_STATUS_INVALID_ARGUMENT;
+}
+
+static BOOLEAN sal_runtime_state_valid(void)
+{
+    UINT64 psr = fw_read_psr();
+    UINT64 translation = psr & (IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT);
+
+    if ((psr & IA64_PSR_CPL_MASK) != 0) {
+        return 0;
+    }
+
+    return translation == 0 ||
+           translation == (IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT);
+}
+
+static SAL_RETURN_VALUE sal_proc_entry(UINT64 Index, UINT64 Arg1, UINT64 Arg2,
+                                       UINT64 Arg3, UINT64 Arg4, UINT64 Arg5,
+                                       UINT64 Arg6, UINT64 Arg7)
+{
+    UINT64 FunctionId = (UINT32)Index;
+    SAL_RETURN_VALUE ret;
+
+    if (!sal_runtime_state_valid()) {
+        ret = sal_return(SAL_STATUS_ERROR, 0, 0, 0);
+        goto out;
+    }
+
+    if (FunctionId == SAL_SET_VECTORS) {
+        ret = sal_set_vectors(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    if (FunctionId == SAL_GET_STATE_INFO_SIZE) {
+        ret = sal_get_state_info_size(Arg1, Arg2, Arg3, Arg4,
+                                      Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    if (FunctionId == SAL_GET_STATE_INFO) {
+        ret = sal_get_state_info(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    if (FunctionId == SAL_CLEAR_STATE_INFO) {
+        ret = sal_clear_state_info(Arg1, Arg2, Arg3, Arg4,
+                                   Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    if (FunctionId == SAL_MC_RENDEZ) {
+        ret = sal_mc_rendez(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    if (FunctionId == SAL_MC_SET_PARAMS) {
+        ret = sal_mc_set_params(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    if (FunctionId == SAL_REGISTER_PHYSICAL_ADDR) {
+        ret = sal_register_physical_addr(Arg1, Arg2, Arg3, Arg4,
+                                         Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    if (FunctionId == SAL_CACHE_FLUSH) {
+        ret = sal_cache_flush(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    if (FunctionId == SAL_CACHE_INIT) {
+        ret = sal_cache_init(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    if (FunctionId == SAL_PCI_CONFIG_READ) {
+        ret = sal_pci_config_read(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    if (FunctionId == SAL_PCI_CONFIG_WRITE) {
+        ret = sal_pci_config_write(Arg1, Arg2, Arg3, Arg4,
+                                   Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    if (FunctionId == SAL_FREQ_BASE) {
+        ret = sal_freq_base(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    /*
+     * SAL_PHYSICAL_ID_INFO arrived with the December 2003 specification
+     * (245359-007 revision history, "Added SAL_PHYSICAL_ID_INFO call"), so it
+     * exists only on a platform advertising SAL 3.2.  A SAL 3.0 platform --
+     * the Merced persona -- must report it as unimplemented rather than
+     * offering a call its own SST revision predates.
+     */
+    if (FunctionId == SAL_PHYSICAL_ID_INFO) {
+        if (fw_sal_revision() < SAL_REVISION_3_2) {
+            ret = sal_return(SAL_STATUS_NOT_IMPLEMENTED, 0, 0, 0);
+            goto out;
+        }
+        ret = sal_physical_id_info(Arg1, Arg2, Arg3, Arg4,
+                                   Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    if (FunctionId == SAL_UPDATE_PAL) {
+        ret = sal_update_pal(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
+        goto out;
+    }
+
+    ret = sal_return(SAL_STATUS_NOT_IMPLEMENTED, 0, 0, 0);
+
+out:
+    return ret;
+}
+
+BOOLEAN __attribute__((noinline)) sal_proc_dispatch_selftest(void)
+{
+    SAL_RETURN_VALUE masked;
+    SAL_RETURN_VALUE unimplemented;
+
+    masked = sal_proc_entry(0xfeedface00000000ULL | SAL_FREQ_BASE,
+                            SAL_FREQ_BASE_PLATFORM, 0, 0, 0, 0, 0, 0);
+    unimplemented = sal_proc_entry(0xfeedface04000000ULL,
+                                   0, 0, 0, 0, 0, 0, 0);
+
+    return sal_runtime_state_valid() &&
+           masked.Status == SAL_STATUS_SUCCESS &&
+           masked.Value0 == PLATFORM_BASE_FREQUENCY &&
+           masked.Value1 == (UINT64)-1 &&
+           masked.Value2 == 0 &&
+           unimplemented.Status == SAL_STATUS_NOT_IMPLEMENTED &&
+           unimplemented.Value0 == 0 &&
+           unimplemented.Value1 == 0 &&
+           unimplemented.Value2 == 0;
+}
+
+
+/* --- UART/VGA-text/ConOut/ConIn console stack lives in console.c --------- */
+
+UINT64 __attribute__((noinline)) fw_read_rsc(void)
+{
+    UINT64 rsc;
+
+    __asm__ volatile ("mov %0 = ar.rsc" : "=r"(rsc));
+    return rsc;
+}
+
+void __attribute__((noinline)) fw_restore_rsc(UINT64 rsc)
+{
+    __asm__ volatile ("mov ar.rsc = %0;;" : : "r"(rsc) : "memory");
+}
+
+void fw_restore_psr(UINT64 psr)
+{
+    __asm__ volatile (
+        "rsm psr.ic;;\n\t"
+        "srlz.d;;\n\t"
+        "movl r14 = 1f;;\n\t"
+        "mov cr.ipsr = %0;;\n\t"
+        "mov cr.iip = r14\n\t"
+        "mov cr.ifs = r0;;\n\t"
+        "rfi;;\n\t"
+        "1:\n\t"
+        "srlz.i;;"
+        :
+        : "r"(psr)
+        : "r14", "memory");
+}
+
+extern UINTN fw_call_efi_entry(UINTN (*Entry)(EFI_HANDLE, EFI_SYSTEM_TABLE *),
+                               EFI_HANDLE ImageHandle,
+                               EFI_SYSTEM_TABLE *SystemTable,
+                               UINT64 SavedPsr,
+                               UINT64 EntryPsrLow);
+extern VOID fw_call_ap_rendezvous(const UINT64 *Descriptor,
+                                  UINT64 EntryPsrLow,
+                                  UINT64 SavedPsrLow,
+                                  UINT64 SavedRsc);
+extern VOID fw_prepare_sal_handoff_registers(VOID);
+extern UINTN fw_efi_entry_abi_probe(EFI_HANDLE ImageHandle,
+                                    EFI_SYSTEM_TABLE *SystemTable);
+extern UINTN fw_sal_handoff_probe(EFI_HANDLE ImageHandle,
+                                  EFI_SYSTEM_TABLE *SystemTable);
+
+__asm__(
+".text\n"
+".macro FW_SET_RR address, value\n"
+"    movl r14 = \\address\n"
+"    movl r15 = \\value\n"
+"    ;;\n"
+"    mov rr[r14] = r15\n"
+"    ;;\n"
+".endm\n"
+".macro FW_CLEAR_PKR index\n"
+"    adds r14 = \\index, r0\n"
+"    ;;\n"
+"    mov pkr[r14] = r0\n"
+"    ;;\n"
+".endm\n"
+".macro FW_PROBE_RR address\n"
+"    movl r16 = \\address\n"
+"    ;;\n"
+"    mov r15 = rr[r16]\n"
+"    ;;\n"
+"    st8 [r14] = r15, 8\n"
+".endm\n"
+".macro FW_PROBE_PKR index\n"
+"    adds r16 = \\index, r0\n"
+"    ;;\n"
+"    mov r15 = pkr[r16]\n"
+"    ;;\n"
+"    st8 [r14] = r15, 8\n"
+".endm\n"
+".align 16\n"
+".global fw_prepare_sal_handoff_registers\n"
+".type fw_prepare_sal_handoff_registers, @function\n"
+".proc fw_prepare_sal_handoff_registers\n"
+"fw_prepare_sal_handoff_registers:\n"
+"    rsm psr.ic\n"
+"    ;;\n"
+"    srlz.d\n"
+"    ;;\n"
+"    movl r14 = 0x4\n"
+"    ;;\n"
+"    mov cr.dcr = r14\n"
+"    movl r14 = 0x10000\n"
+"    ;;\n"
+"    mov cr.iva = r14\n"
+"    movl r14 = 0x3c\n"
+"    ;;\n"
+"    mov cr.pta = r14\n"
+"    ;;\n"
+"    FW_SET_RR 0x0000000000000000, 0x100030\n"
+"    FW_SET_RR 0x2000000000000000, 0x100130\n"
+"    FW_SET_RR 0x4000000000000000, 0x100230\n"
+"    FW_SET_RR 0x6000000000000000, 0x100330\n"
+"    FW_SET_RR 0x8000000000000000, 0x100430\n"
+"    FW_SET_RR 0xa000000000000000, 0x100530\n"
+"    FW_SET_RR 0xc000000000000000, 0x100630\n"
+"    FW_SET_RR 0xe000000000000000, 0x100730\n"
+".irp index, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15\n"
+"    FW_CLEAR_PKR \\index\n"
+".endr\n"
+"    srlz.d\n"
+"    ;;\n"
+"    srlz.i\n"
+"    ;;\n"
+"    mov cr.ifa = r0\n"
+"    movl r15 = 0x58\n"
+"    movl r16 = 0x661\n"
+"    ;;\n"
+"    mov cr.itir = r15\n"
+"    mov r14 = r0\n"
+"    ;;\n"
+"    itr.i itr[r14] = r16\n"
+"    ;;\n"
+"    srlz.i\n"
+"    ;;\n"
+"    mov ar.rsc = r0\n"
+"    br.ret.sptk.many b0\n"
+".endp fw_prepare_sal_handoff_registers\n"
+"\n"
+".align 16\n"
+".global fw_call_efi_entry\n"
+".type fw_call_efi_entry, @function\n"
+".proc fw_call_efi_entry\n"
+"fw_call_efi_entry:\n"
+"    .prologue\n"
+"    .save ar.pfs, r37\n"
+"    alloc r37 = ar.pfs, 5, 7, 2, 0\n"
+"    .save rp, r38\n"
+"    mov r38 = b0\n"
+"    mov r39 = gp\n"
+"    mov r40 = r35\n"
+"    mov r41 = sp\n"
+"    mov r43 = ar.rsc\n"
+"    adds sp = -16, sp\n"
+"    ;;\n"
+"    adds r14 = 8, sp\n"
+"    ;;\n"
+"    st8 [sp] = r33\n"
+"    st8 [r14] = r34\n"
+"    mov r14 = r32\n"
+"    ;;\n"
+"    ld8 r15 = [r14], 8\n"
+"    ;;\n"
+"    ld8 gp = [r14]\n"
+"    cmp.eq p6, p7 = r36, r0\n"
+"    ;;\n"
+"(p6) br.cond.sptk.few 3f\n"
+"    ;;\n"
+"    mov psr.l = r36\n"
+"    ;;\n"
+"    srlz.i\n"
+"    ;;\n"
+"3:\n"
+"    mov ar.rsc = r0\n"
+"    ;;\n"
+"    bsw.1\n"
+"    ;;\n"
+"    mov r44 = r33\n"
+"    mov r45 = r34\n"
+"    mov b6 = r15\n"
+"    br.call.sptk.many b0 = b6\n"
+"    ;;\n"
+"    mov r42 = r8\n"
+"    mov ar.rsc = r43\n"
+"    mov sp = r41\n"
+"    mov gp = r39\n"
+"    rsm psr.ic\n"
+"    ;;\n"
+"    srlz.d\n"
+"    ;;\n"
+"    movl r14 = 4f\n"
+"    ;;\n"
+"    mov cr.ipsr = r40\n"
+"    ;;\n"
+"    mov cr.iip = r14\n"
+"    mov cr.ifs = r0\n"
+"    ;;\n"
+"    rfi\n"
+"    ;;\n"
+"4:\n"
+"    srlz.i\n"
+"    ;;\n"
+"    mov r8 = r42\n"
+"    mov b0 = r38\n"
+"    mov ar.pfs = r37\n"
+"    br.ret.sptk.many b0\n"
+".endp fw_call_efi_entry\n"
+"\n"
+".align 16\n"
+".global fw_call_ap_rendezvous\n"
+".type fw_call_ap_rendezvous, @function\n"
+".proc fw_call_ap_rendezvous\n"
+"fw_call_ap_rendezvous:\n"
+"    .prologue\n"
+"    .save ar.pfs, r36\n"
+"    alloc r36 = ar.pfs, 4, 5, 0, 0\n"
+"    .save rp, r37\n"
+"    mov r37 = b0\n"
+"    mov r38 = gp\n"
+"    mov r39 = r34\n"
+"    mov r40 = r35\n"
+"    mov r14 = r32\n"
+"    ;;\n"
+"    ld8 r15 = [r14], 8\n"
+"    ;;\n"
+"    ld8 gp = [r14]\n"
+"    ;;\n"
+"    mov psr.l = r33\n"
+"    ;;\n"
+"    srlz.i\n"
+"    ;;\n"
+"    mov ar.rsc = r0\n"
+"    ;;\n"
+"    bsw.1\n"
+"    ;;\n"
+"    mov b6 = r15\n"
+"    ;;\n"
+"    br.call.sptk.many b0 = b6\n"
+"    ;;\n"
+"    rsm psr.ic\n"
+"    ;;\n"
+"    srlz.d\n"
+"    ;;\n"
+"    bsw.0\n"
+"    ;;\n"
+"    mov psr.l = r39\n"
+"    ;;\n"
+"    srlz.i\n"
+"    ;;\n"
+"    mov ar.rsc = r40\n"
+"    mov gp = r38\n"
+"    mov b0 = r37\n"
+"    mov ar.pfs = r36\n"
+"    ;;\n"
+"    br.ret.sptk.many b0\n"
+".endp fw_call_ap_rendezvous\n"
+"\n"
+".align 16\n"
+".global fw_efi_entry_abi_probe\n"
+".type fw_efi_entry_abi_probe, @function\n"
+".proc fw_efi_entry_abi_probe\n"
+"fw_efi_entry_abi_probe:\n"
+"    alloc r34 = ar.pfs, 2, 1, 0, 0\n"
+"    adds r14 = 8, sp\n"
+"    ;;\n"
+"    ld8 r15 = [sp]\n"
+"    ld8 r16 = [r14]\n"
+"    ;;\n"
+"    xor r15 = r15, r32\n"
+"    xor r16 = r16, r33\n"
+"    ;;\n"
+"    or r15 = r15, r16\n"
+"    mov r17 = ar.rsc\n"
+"    ;;\n"
+"    or r15 = r15, r17\n"
+"    ;;\n"
+"    cmp.eq p6, p7 = r15, r0\n"
+"    ;;\n"
+"(p6) adds r8 = 1, r0\n"
+"(p7) mov r8 = r0\n"
+"    mov ar.pfs = r34\n"
+"    br.ret.sptk.many b0\n"
+".endp fw_efi_entry_abi_probe\n"
+"\n"
+".align 16\n"
+".global fw_sal_handoff_probe\n"
+".type fw_sal_handoff_probe, @function\n"
+".proc fw_sal_handoff_probe\n"
+"fw_sal_handoff_probe:\n"
+"    movl r14 = mSalHandoffProbe\n"
+"    ;;\n"
+"    mov r15 = psr\n"
+"    ;;\n"
+"    st8 [r14] = r15, 8\n"
+"    mov r15 = ar.rsc\n"
+"    ;;\n"
+"    st8 [r14] = r15, 8\n"
+"    mov r15 = cr.dcr\n"
+"    ;;\n"
+"    st8 [r14] = r15, 8\n"
+"    mov r15 = cr.iva\n"
+"    ;;\n"
+"    st8 [r14] = r15, 8\n"
+"    mov r15 = cr.pta\n"
+"    ;;\n"
+"    st8 [r14] = r15, 8\n"
+"    mov r15 = sp\n"
+"    ;;\n"
+"    st8 [r14] = r15, 8\n"
+"    mov r15 = ar.bsp\n"
+"    ;;\n"
+"    st8 [r14] = r15, 8\n"
+"    mov r15 = ar.bspstore\n"
+"    ;;\n"
+"    st8 [r14] = r15, 8\n"
+"    FW_PROBE_RR 0x0000000000000000\n"
+"    FW_PROBE_RR 0x2000000000000000\n"
+"    FW_PROBE_RR 0x4000000000000000\n"
+"    FW_PROBE_RR 0x6000000000000000\n"
+"    FW_PROBE_RR 0x8000000000000000\n"
+"    FW_PROBE_RR 0xa000000000000000\n"
+"    FW_PROBE_RR 0xc000000000000000\n"
+"    FW_PROBE_RR 0xe000000000000000\n"
+".irp index, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15\n"
+"    FW_PROBE_PKR \\index\n"
+".endr\n"
+"    ;;\n"
+"    adds r8 = 1, r0\n"
+"    br.ret.sptk.many b0\n"
+".endp fw_sal_handoff_probe\n"
+".purgem FW_SET_RR\n"
+".purgem FW_CLEAR_PKR\n"
+".purgem FW_PROBE_RR\n"
+".purgem FW_PROBE_PKR\n");
+
+BOOLEAN __attribute__((noinline)) efi_entry_handoff_selftest(void)
+{
+    return fw_call_efi_entry(fw_efi_entry_abi_probe, mImageHandle,
+                             &mSystemTable, fw_read_psr(), 0) == 1;
+}
+
+UINT64 sal_loader_psr_low(void)
+{
+    return IA64_PSR_AC | IA64_PSR_IC |
+           mResetFloatingPointDisableBits;
+}
+
+void prepare_sal_loader_handoff(void)
+{
+    fw_prepare_sal_handoff_registers();
+}
+
+BOOLEAN __attribute__((noinline)) sal_loader_handoff_selftest(void)
+{
+    UINT64 expected_psr = sal_loader_psr_low() | IA64_PSR_BN;
+    UINTN i;
+
+    fw_set_mem(&mSalHandoffProbe, sizeof(mSalHandoffProbe), 0xff);
+    if (fw_call_efi_entry(fw_sal_handoff_probe, mImageHandle, &mSystemTable,
+                          fw_read_psr(), sal_loader_psr_low()) != 1) {
+        return 0;
+    }
+
+    if (mSalHandoffProbe.Psr != expected_psr ||
+        mSalHandoffProbe.Rsc != 0 ||
+        mSalHandoffProbe.Dcr != IA64_DCR_LC ||
+        mSalHandoffProbe.Iva != SAL_IVT_BASE ||
+        mSalHandoffProbe.Pta != SAL_PTA_DISABLED_VALUE ||
+        mSalHandoffProbe.Sp < mBootStackBase +
+                              IA64_EFI_MIN_STACK_BYTES ||
+        mSalHandoffProbe.Sp >= mBootStackTop ||
+        mSalHandoffProbe.Bsp < SAL_BACKING_STORE_BASE ||
+        mSalHandoffProbe.Bsp + IA64_EFI_MIN_BACKING_BYTES >
+            SAL_BACKING_STORE_END ||
+        mSalHandoffProbe.BspStore < SAL_BACKING_STORE_BASE ||
+        mSalHandoffProbe.BspStore > mSalHandoffProbe.Bsp) {
+        return 0;
+    }
+
+    for (i = 0; i < 8; i++) {
+        if (mSalHandoffProbe.Rr[i] !=
+            SAL_RR_VALUE(SAL_RR_FIRST_RID + i)) {
+            return 0;
+        }
+    }
+    for (i = 0; i < 16; i++) {
+        if (mSalHandoffProbe.Pkr[i] != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+extern VOID fw_pal_halt_light(VOID);
+
+UINT64 fw_read_ivr(void)
+{
+    UINT64 vector;
+
+    __asm__ volatile ("mov %0 = cr.ivr;;\n\tsrlz.d;;"
+                      : "=r"(vector) : : "memory");
+    return vector & 0xffU;
+}
+
+void fw_write_eoi(void)
+{
+    __asm__ volatile ("mov cr.eoi = r0;;\n\tsrlz.d;;" : : : "memory");
+}
+
+static void fw_clear_tpr(void)
+{
+    __asm__ volatile ("mov cr.tpr = r0;;\n\tsrlz.d;;" : : : "memory");
+}
+
+static void fw_ap_rendezvous(void)
+{
+    /* The BSP publishes this registration before issuing the wake IPI. */
+    volatile SAL_VECTOR_REGISTRATION *registration =
+        &mSalVectors[SAL_VECTOR_OS_BOOT_RENDEZ];
+    UINT64 descriptor[2] __attribute__((aligned(16)));
+    UINT64 saved_psr;
+    UINT64 saved_rsc;
+
+    if (fw_read_ivr() != 0xff) {
+        fw_write_eoi();
+        return;
+    }
+    fw_write_eoi();
+
+    __asm__ volatile ("mf;;" : : : "memory");
+    if (!registration->Valid || registration->HandlerAddr1 == 0) {
+        return;
+    }
+    descriptor[0] = registration->HandlerAddr1;
+    descriptor[1] = registration->Gp1;
+    saved_psr = fw_read_psr();
+    saved_rsc = fw_read_rsc();
+    prepare_sal_loader_handoff();
+    fw_call_ap_rendezvous(descriptor, sal_loader_psr_low(),
+                          saved_psr, saved_rsc);
+}
+
+void firmware_ap_main(UINT64 ProcessorId)
+{
+    (void)ProcessorId;
+
+    fw_ap_rendezvous();
+    for (;;) {
+        /* TPR is scratch on return from OS_BOOT_RENDEZ. */
+        fw_clear_tpr();
+        fw_pal_halt_light();
+        fw_ap_rendezvous();
+    }
+}
+
+BOOLEAN fw_data_translation_enabled(void)
+{
+    UINT64 psr = fw_read_psr();
+
+    return (psr & IA64_PSR_DT) != 0;
+}
+
+
+void fw_platform_decode_topology(void)
+{
+    mProcessorCount = fw_handoff_processor_count();
+    fw_handoff_processor_topology(mProcessorCount);
+}
+
+static FW_PLATFORM_HANDOFF mPlatformHandoff = {
+    .MemDesc = mMemoryMap,
+    .MemDescCount = &mMemoryMapEntries,
+    .MapKey = &mMapKey,
+    .DecodeTopology = fw_platform_decode_topology,
+    .InitMemoryMap = efi_init_memory_map,
+    .InitPlatformTables = efi_init_platform_tables,
+    .SalProcFunctionEntry = fw_sal_proc_function_entry,
+};
+
+const FW_PLATFORM_HANDOFF *fw_platform(void)
+{
+    return &mPlatformHandoff;
+}
+
+void fw_platform_publish_tables(VOID *SalSystemTable, VOID *AcpiRsdp)
+{
+    mPlatformHandoff.SalSystemTable = SalSystemTable;
+    mPlatformHandoff.AcpiRsdp = AcpiRsdp;
+}

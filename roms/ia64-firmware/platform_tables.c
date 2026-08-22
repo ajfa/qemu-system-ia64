@@ -14,6 +14,7 @@
 #include "fw-acpi.h"
 #include "fw-memmap.h"
 #include "fw-storage.h"
+#include "fw-platform-handoff.h"
 #include "fw-platform-layout.h"
 #include "linker-symbols.h"
 #include "ia64-fw-acpi-aml.h"
@@ -873,6 +874,7 @@ void efi_init_platform_tables(void)
     efi_init_sal_system_table();
     efi_init_acpi_tables();
     efi_publish_config_tables();
+    fw_platform_publish_tables(&mSalSystemTable, mAcpiRsdp);
 }
 
 static BOOLEAN acpi_sdt_integrity_valid(const ACPI_SDT_HEADER *Hdr,

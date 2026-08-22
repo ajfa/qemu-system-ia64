@@ -11,6 +11,7 @@ udf.c
 filesystem.c
 boot.c
 platform_tables.c
+platform.c
 ohci.c
 decompress.c
 debug_protocols.c
