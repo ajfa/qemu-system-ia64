@@ -6106,13 +6106,17 @@ BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                         FW_LOADER_HEAP_SPLIT_BASE,
                                         FW_LOW_IMAGE_BASE,
                                         EFI_MEMORY_WB)) ||
-        /* [32MB,80MB) is a single free descriptor ending exactly at the 80 MB
-         * line (XP-era sumain straddle rule), and conventional RAM continues
-         * right above it with no reserved guard page (Server 2003 SP1's 64 MB
-         * kernel large page at [64MB,128MB)). */
-        !efi_memory_map_has_descriptor(EfiConventionalMemory,
-                                       FW_LOW_IMAGE_BASE,
-                                       FW_LOW_IMAGE_END, EFI_MEMORY_WB) ||
+        /* With the low-boundaries quirk armed, [32MB,80MB) is a single free
+         * descriptor ending exactly at the 80 MB line (XP-era sumain
+         * straddle rule); with it retired the run coalesces freely and only
+         * coverage is asserted. */
+        (fw_map_quirk_enabled(IA64_FW_QUIRK_LOW_BOUNDARIES) ?
+         !efi_memory_map_has_descriptor(EfiConventionalMemory,
+                                        FW_LOW_IMAGE_BASE,
+                                        FW_LOW_IMAGE_END, EFI_MEMORY_WB) :
+         !efi_memory_map_covers_range(EfiConventionalMemory,
+                                      FW_LOW_IMAGE_BASE,
+                                      FW_LOW_IMAGE_END, EFI_MEMORY_WB)) ||
         (fw_map_quirk_enabled(IA64_FW_QUIRK_LOW_ANCHOR) &&
          !efi_memory_map_has_descriptor(EfiReservedMemoryType,
                                         fw_low_anchor_base(),
@@ -6161,9 +6165,15 @@ BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         !efi_memory_map_covers_range(EfiRuntimeServicesCode,
                                      runtime_code_start, firmware_end,
                                      EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
-        efi_memory_descriptors_can_merge(&before, &preserved) ||
-        efi_memory_descriptors_can_merge(&preserved, &legacy) ||
-        efi_memory_descriptors_can_merge(&legacy, &aligned) ||
+        /* The 32/48/64/80 MB no-coalesce rule only holds with its quirk. */
+        (fw_map_quirk_enabled(IA64_FW_QUIRK_LOW_BOUNDARIES) &&
+         (efi_memory_descriptors_can_merge(&before, &preserved) ||
+          efi_memory_descriptors_can_merge(&preserved, &legacy) ||
+          efi_memory_descriptors_can_merge(&legacy, &aligned))) ||
+        (!fw_map_quirk_enabled(IA64_FW_QUIRK_LOW_BOUNDARIES) &&
+         (!efi_memory_descriptors_can_merge(&before, &preserved) ||
+          !efi_memory_descriptors_can_merge(&preserved, &legacy) ||
+          !efi_memory_descriptors_can_merge(&legacy, &aligned))) ||
         !efi_memory_descriptors_can_merge(&ordinary, &ordinary_next)) {
         ok = 0;
         goto out;
