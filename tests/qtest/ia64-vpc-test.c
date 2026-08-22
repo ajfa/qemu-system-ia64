@@ -1720,7 +1720,7 @@ static void test_sparse_io_pm_register(void)
                             ia64_sparse_io_offset(port);
     QTestState *qts = ia64_vpc_start(NULL);
 
-    g_assert_cmphex(sparse, ==, 0x000000800010801004ULL);
+    g_assert_cmphex(sparse, ==, 0x00000ffffc801004ULL);
 
     qtest_writew(qts, dense, 0);
     g_assert_cmphex(qtest_readw(qts, sparse) & 1, ==, 0);

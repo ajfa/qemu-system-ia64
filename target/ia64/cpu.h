@@ -199,7 +199,10 @@
  */
 #define IA64_FW_REGION7_DIRECTMAP_SIZE 0x0000000020000000ULL
 #define IA64_LOCAL_SAPIC_PA   IA64_LOCAL_SAPIC_BASE
-#define IA64_PAL_IO_BLOCK_PA  0x000080000c000000ULL
+/* The architected I/O block: top 64 MB of the 44-bit PA space.  Matches the
+ * machine's IA64_PCI_IO_BASE so PAL_PLATFORM_ADDR agrees with the EFI
+ * EfiMemoryMappedIOPortSpace descriptor (rework D6/D10). */
+#define IA64_PAL_IO_BLOCK_PA  0x00000ffffc000000ULL
 
 #define IA64_SAPIC_LID_ID_SHIFT   24
 #define IA64_SAPIC_LID_EID_SHIFT  16

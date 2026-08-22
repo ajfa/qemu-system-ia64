@@ -172,11 +172,13 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 
 /*
  * IA-64 legacy I/O port block and PCI config space.  (Deviation from real
- * hardware, kept for now: the architected default I/O block sits at the top
- * of the 44-bit PA space, 0xFFFFC000000, and the 460GX has no MMCFG at all
- * -- see plans/firmware-rework-target-model.md D6/D7.)
+ * hardware for the CONFIG space: the 460GX has no MMCFG at all -- see
+ * plans/firmware-rework-target-model.md D7.)  The I/O port block sits at the
+ * architected default: the top 64 MB of the 44-bit PA space (rework D6,
+ * phase 3; formerly the invented 0x800010000000, which needed 48 PA bits no
+ * real Merced or Madison implements).
  */
-#define IA64_PCI_IO_BASE              IA64_U64(0x000000800010000000)
+#define IA64_PCI_IO_BASE              IA64_U64(0x00000ffffc000000)
 #define IA64_PCI_IO_SIZE              IA64_U64(0x0000000001000000)
 #define IA64_PCI_IO_SPARSE_SKIP       IA64_U64(0x0000000000001000)
 /* Sparse IA-64 port encoding expands the legacy 16-bit I/O port space. */
