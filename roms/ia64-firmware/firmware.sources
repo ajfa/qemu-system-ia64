@@ -10,6 +10,7 @@ pe_loader.c
 udf.c
 filesystem.c
 boot.c
+platform_tables.c
 ohci.c
 decompress.c
 debug_protocols.c

@@ -483,4 +483,29 @@ struct _EFI_COMPONENT_NAME_PROTOCOL {
     CHAR8 *SupportedLanguages;
 };
 
+/* --- EFI Debug Support Table --------------------------------------------- */
+
+/* EFI_SYSTEM_TABLE_POINTER lives in fw-efi-types.h. */
+
+#define EFI_DEBUG_IMAGE_INFO_UPDATE_IN_PROGRESS 0x01U
+#define EFI_DEBUG_IMAGE_INFO_TABLE_MODIFIED     0x02U
+#define EFI_DEBUG_IMAGE_INFO_TYPE_NORMAL        0x01U
+
+typedef struct {
+    UINT32                    ImageInfoType;
+    EFI_LOADED_IMAGE_PROTOCOL *LoadedImageProtocolInstance;
+    EFI_HANDLE                ImageHandle;
+} EFI_DEBUG_IMAGE_INFO_NORMAL;
+
+typedef union {
+    UINT32                      *ImageInfoType;
+    EFI_DEBUG_IMAGE_INFO_NORMAL *NormalImage;
+} EFI_DEBUG_IMAGE_INFO;
+
+typedef struct {
+    volatile UINT32       UpdateStatus;
+    UINT32                TableSize;
+    EFI_DEBUG_IMAGE_INFO *EfiDebugImageInfoTable;
+} EFI_DEBUG_IMAGE_INFO_TABLE_HEADER;
+
 #endif /* IA64_FIRMWARE_FW_EFI_TYPES_H */
