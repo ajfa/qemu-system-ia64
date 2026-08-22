@@ -3,9 +3,18 @@
 
 ENTRY(_start)
 
+/*
+ * The link base is overridable (ld --defsym FW_LINK_BASE=...) so the build
+ * can produce alternate links whose binary diff yields the self-relocation
+ * fixup table (see fw-fixups.py) - phase 2.2 of the firmware rework.  The
+ * shipping image stays linked at the historical 0x100000.
+ */
+PROVIDE(FW_LINK_BASE = 0x100000);
+__fw_link_base = FW_LINK_BASE;
+
 SECTIONS
 {
-    . = 0x100000;
+    . = __fw_link_base;
 
     .text.boot : {
         *(.text._start)
@@ -61,6 +70,21 @@ SECTIONS
         *(.IA_64.unwind*)
     }
 
+    /*
+     * Reserved space for the self-relocation fixup table.  The three build
+     * links leave it zero; fw-fixups.py injects the table into the final
+     * binary at this offset, so the table's presence never perturbs the
+     * layout it describes.  Its content is offsets, not addresses, hence
+     * position-independent.
+     */
+    . = ALIGN(16);
+    .fw_fixups : {
+        __fw_fixups_start = .;
+        QUAD(0);
+        . = __fw_fixups_start + 0x6000;
+        __fw_fixups_end = .;
+    }
+
     .data : {
         *(.data*)
     }
@@ -85,10 +109,13 @@ SECTIONS
     _end = .;
 }
 
-/* The machine hardcodes the SAL runtime stub addresses (target/ia64/cpu.h). */
-ASSERT(sal_runtime_entry == 0x102000,
-       "sal_runtime_entry must sit at IA64_FW_SAL_RUNTIME_ENTRY_PA (0x102000)")
-ASSERT(sal_runtime_return == 0x102020,
-       "sal_runtime_return must sit at IA64_FW_SAL_RUNTIME_RETURN_PA (0x102020)")
-ASSERT(sal_dispatch_block == 0x102040,
-       "sal_dispatch_block must sit at IA64_FW_SAL_DISPATCH_BLOCK_PA (0x102040)")
+/*
+ * The machine hardcodes the SAL runtime stub addresses (target/ia64/cpu.h),
+ * expressed link-base-relative so the alternate fixup-extraction links pass.
+ */
+ASSERT(sal_runtime_entry == __fw_link_base + 0x2000,
+       "sal_runtime_entry must sit at IA64_FW_SAL_RUNTIME_ENTRY_PA (base+0x2000)")
+ASSERT(sal_runtime_return == __fw_link_base + 0x2020,
+       "sal_runtime_return must sit at IA64_FW_SAL_RUNTIME_RETURN_PA (base+0x2020)")
+ASSERT(sal_dispatch_block == __fw_link_base + 0x2040,
+       "sal_dispatch_block must sit at IA64_FW_SAL_DISPATCH_BLOCK_PA (base+0x2040)")

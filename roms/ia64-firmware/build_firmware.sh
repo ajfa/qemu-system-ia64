@@ -119,13 +119,39 @@ fi
 
 "$LD" -nostdlib -static -T "$LINKER_SCRIPT" -Map="$FW_MAP" \
     -o "$FW_ELF" "$@" "$LIBGCC"
-"$OBJCOPY" -O binary "$FW_ELF" "$OUT_BIN"
+"$OBJCOPY" -O binary "$FW_ELF" "${OUT_BIN}.raw"
 "$SIZE" -A "$FW_ELF" > "$FW_SECTIONS"
+
+# Self-relocation fixup table (rework phase 2.2): link twice more at shifted
+# bases, derive the table from the binary diffs, prove it by reconstruction,
+# and inject it into the reserved .fw_fixups region.  See fw-fixups.py.
+FW_ALT1_DELTA=0x80000
+FW_ALT2_DELTA=0x200000
+"$LD" -nostdlib -static -T "$LINKER_SCRIPT" \
+    --defsym FW_LINK_BASE=$((0x100000 + FW_ALT1_DELTA)) \
+    -o "${FW_ELF}.alt1" "$@" "$LIBGCC"
+"$LD" -nostdlib -static -T "$LINKER_SCRIPT" \
+    --defsym FW_LINK_BASE=$((0x100000 + FW_ALT2_DELTA)) \
+    -o "${FW_ELF}.alt2" "$@" "$LIBGCC"
+"$OBJCOPY" -O binary "${FW_ELF}.alt1" "${OUT_BIN}.alt1"
+"$OBJCOPY" -O binary "${FW_ELF}.alt2" "${OUT_BIN}.alt2"
+FIXUPS_VA="$("${NM:-ia64-linux-gnu-nm}" "$FW_ELF" | \
+    awk '$3 == "__fw_fixups_start" { print "0x" $1 }')"
+if [ -z "$FIXUPS_VA" ]; then
+    echo "__fw_fixups_start not found in $FW_ELF" >&2
+    exit 2
+fi
+python3 "${SRC_DIR}/fw-fixups.py" "${OUT_BIN}.raw" \
+    "${OUT_BIN}.alt1" "$FW_ALT1_DELTA" \
+    "${OUT_BIN}.alt2" "$FW_ALT2_DELTA" \
+    "$(( FIXUPS_VA - 0x100000 ))" "$OUT_BIN"
+rm -f "${OUT_BIN}.raw" "${OUT_BIN}.alt1" "${OUT_BIN}.alt2" \
+    "${FW_ELF}.alt1" "${FW_ELF}.alt2"
 
 {
     for dependency in $DEPFILES; do
         command cat "$dependency"
     done
     echo "$OUT_BIN: $MANIFEST $LINKER_SCRIPT $SRC_DIR/build_firmware.sh" \
-        "$ASL_SOURCES"
+        "$SRC_DIR/fw-fixups.py" "$ASL_SOURCES"
 } > "$DEPFILE"
