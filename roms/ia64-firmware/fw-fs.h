@@ -372,4 +372,13 @@ extern FW_SATA_RAW_BLOCK_DEVICE_PATH mSataDiskDevicePath;
 extern FW_SATA_RAW_BLOCK_DEVICE_PATH mSataRawDevicePath;
 extern EFI_SIMPLE_FILE_SYSTEM_PROTOCOL mSimpleFsProto;
 
+extern BOOLEAN mBootServicesExited;
+extern BOOLEAN mSalLoaderHandoffPending;
+VOID rs_reset_system(UINTN ResetType, EFI_STATUS ResetStatus,
+                     UINTN DataSize, VOID *ResetData);
+
+/* boot.c */
+EFI_STATUS boot_image_from_boot_order(void);
+EFI_STATUS boot_image_from_disk(void);
+
 #endif /* IA64_FIRMWARE_FW_FS_H */

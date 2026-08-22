@@ -59,6 +59,11 @@
 #define EVT_TIMER       0x80000000U
 #define EVT_NOTIFY_SIGNAL 0x00000200U
 
+#define EFI_RESET_COLD                0U
+#define EFI_RESET_WARM                1U
+#define EFI_RESET_SHUTDOWN            2U
+#define EFI_RESET_PLATFORM_SPECIFIC   3U
+
 #define TIMER_CANCEL   0U
 #define TIMER_PERIODIC 1U
 #define TIMER_RELATIVE 2U
