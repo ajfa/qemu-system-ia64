@@ -434,35 +434,51 @@ void efi_init_memory_map(void)
     }
 
     /*
-     * Legacy low memory, with the VGA aperture decoded as UC MMIO.
+     * The sub-1 MB compatibility area, published the way real 460GX/E8870
+     * firmware does (target-model doc sec 1.3/2): the whole megabyte is
+     * DRAM-capable, and only the VGA aperture is genuine MMIO.
      *
-     * The C0000h-FFFFFFh option-ROM/BIOS segment must be UC as well: Windows'
-     * videoprt maps the video BIOS shadow at C0000h uncached
-     * (VideoPortGetDeviceBase), and the IA-64 kernel refuses to create a UC
-     * mapping over memory the EFI map declares WB (attribute aliasing is
-     * architecturally forbidden, SDM vol 2).  With this range declared WB,
-     * that mapping returns NULL and the inbox ATI miniport fails its
-     * HwFindAdapter with event 0xC1010002 UniqueId 25 -> Code 10.
+     * [0, 0x18000)      reserved WB DRAM: the IA-32 IVT/BDA (the INT10
+     *                   vector at 0:0x40 is live - ia64_vpc_install_int10)
+     *                   plus the firmware IVT at IA64_IVT_BASE, which stays
+     *                   here until phase 2.2 moves it into the RAM-top
+     *                   firmware block.  Real firmware reserves only a small
+     *                   sliver at 0; ours is 96 KB for now.
+     * [0x18000, 0xA0000) conventional WB, as on real hardware (SAL spec
+     *                   Table 2-3: "0x500-0x9FFFF memory").  The allocator
+     *                   only reaches below mNextPageAddr on its wrap pass,
+     *                   so boot-services allocations do not land here.
+     * [0xA0000, 0xC0000) UC MMIO while a VGA device decodes it (VGASE=1).
+     * [0xC0000, 0x100000) the shadowed IA-32 option-ROM/system-BIOS DRAM,
+     *                   firmware-owned.  EfiReservedMemoryType becomes
+     *                   LoaderFirmwarePermanent (WXPSP1 memdesc.c:103),
+     *                   which is exactly what the 3790 HAL's video-BIOS
+     *                   scan needs over pages 0x60-0x67 (WSRV03
+     *                   halia64/ia64/i64krnl.c:1212) and what keeps the
+     *                   kernel from ever WB-mapping it, so videoprt's UC
+     *                   MmMapIoSpace of the shadow has no WB alias to
+     *                   collide with (iosup.c:7261 takes the I/O path for
+     *                   non-PFN-database frames).  The attribute mask
+     *                   advertises the full DRAM capability set per EFI
+     *                   1.10 sec 3.2.3 (capabilities, not current setting).
      *
-     * NOTE: this range and the 0xA0000 VGA aperture now share a type and
-     * attribute, so efi_add_memory_range() coalesces them into a single
-     * descriptor covering 0xA0000-0xFFFFF (verified by dumping the map from
-     * the firmware).  That changes the sub-1MB descriptor count, which the
-     * Whistler 2462 regression showed the Windows loader is sensitive to -
-     * revalidate build 2462 when touching this.
-     *
-     * This alone does NOT make VideoPortGetDeviceBase(0xC0000) succeed:
-     * measured, the descriptor is correct and MmMapIoSpace still returns
-     * NULL, so a further cause remains open.
+     * Descriptor-geometry warning: the sub-1 MB descriptor count changes
+     * the loader-visible map, which Whistler 2462 is sensitive to -
+     * revalidate 2462 whenever this block is touched.
      */
     efi_add_memory_range(&index, EfiReservedMemoryType, 0x00000000,
+                         IA64_IVT_BASE + IA64_IVT_SIZE, EFI_MEMORY_WB);
+    efi_add_memory_range(&index, EfiConventionalMemory,
+                         IA64_IVT_BASE + IA64_IVT_SIZE,
                          VGA_LEGACY_FB_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiMemoryMappedIO, VGA_LEGACY_FB_BASE,
                          VGA_LEGACY_FB_BASE + VGA_LEGACY_FB_SIZE,
                          EFI_MEMORY_UC);
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
+    efi_add_memory_range(&index, EfiReservedMemoryType,
                          VGA_LEGACY_FB_BASE + VGA_LEGACY_FB_SIZE,
-                         0x00100000, EFI_MEMORY_UC);
+                         0x00100000,
+                         EFI_MEMORY_UC | EFI_MEMORY_WC |
+                         EFI_MEMORY_WT | EFI_MEMORY_WB);
 
     /*
      * Keep the resident firmware image out of loader allocations.  Linux
