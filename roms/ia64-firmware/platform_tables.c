@@ -511,8 +511,11 @@ static void efi_init_acpi_tables(void)
     UINT32 vga_id = (UINT32)pci_config_read_value(0, 0, 5, 0, 0, 4);
     UINT64 debug_port_base = fw_handoff_debug_port_base();
     BOOLEAN debug_port_present = debug_port_base != 0;
-    UINT32 xsdt_length = 36 + (debug_port_present ? 8U : 7U) * 8U;
-    UINT32 rsdt_length = 36 + (debug_port_present ? 8U : 7U) * 4U;
+    BOOLEAN is_460gx = fw_platform_is_460gx();
+    UINTN acpi_entries = 6U + (is_460gx ? 0U : 1U) +
+                         (debug_port_present ? 1U : 0U);
+    UINT32 xsdt_length = 36 + (UINT32)acpi_entries * 8U;
+    UINT32 rsdt_length = 36 + (UINT32)acpi_entries * 4U;
 
     mFacs.Signature = EFI_SIGNATURE_32('F', 'A', 'C', 'S');
     mFacs.Length = sizeof(mFacs);
@@ -622,26 +625,49 @@ static void efi_init_acpi_tables(void)
 
     init_sdt_header(&mXsdt.Hdr, EFI_SIGNATURE_32('X', 'S', 'D', 'T'),
                     xsdt_length);
-    mXsdt.Entry[0] = (UINT64)(UINTN)mAcpiFadt;
-    mXsdt.Entry[1] = (UINT64)(UINTN)mAcpiMadt;
-    mXsdt.Entry[2] = (UINT64)(UINTN)mAcpiSrat;
-    mXsdt.Entry[3] = (UINT64)(UINTN)mAcpiSlit;
-    mXsdt.Entry[4] = (UINT64)(UINTN)mAcpiHcdp;
-    mXsdt.Entry[5] = (UINT64)(UINTN)mAcpiMcfg;
-    mXsdt.Entry[6] = (UINT64)(UINTN)mAcpiSsdt;
-    mXsdt.Entry[7] = debug_port_present ? (UINT64)(UINTN)mAcpiDbgp : 0;
+    {
+        UINTN xe = 0;
+
+        mXsdt.Entry[xe++] = (UINT64)(UINTN)mAcpiFadt;
+        mXsdt.Entry[xe++] = (UINT64)(UINTN)mAcpiMadt;
+        mXsdt.Entry[xe++] = (UINT64)(UINTN)mAcpiSrat;
+        mXsdt.Entry[xe++] = (UINT64)(UINTN)mAcpiSlit;
+        mXsdt.Entry[xe++] = (UINT64)(UINTN)mAcpiHcdp;
+        /* No MCFG on the 460GX profile: config space is SAL_PCI_CONFIG. */
+        if (!is_460gx) {
+            mXsdt.Entry[xe++] = (UINT64)(UINTN)mAcpiMcfg;
+        }
+        mXsdt.Entry[xe++] = (UINT64)(UINTN)mAcpiSsdt;
+        if (debug_port_present) {
+            mXsdt.Entry[xe++] = (UINT64)(UINTN)mAcpiDbgp;
+        }
+        while (xe < sizeof(mXsdt.Entry) / sizeof(mXsdt.Entry[0])) {
+            mXsdt.Entry[xe++] = 0;
+        }
+    }
     mXsdt.Hdr.Checksum = table_checksum8(&mXsdt, mXsdt.Hdr.Length);
 
     init_sdt_header(&mRsdt.Hdr, EFI_SIGNATURE_32('R', 'S', 'D', 'T'),
                     rsdt_length);
-    mRsdt.Entry[0] = (UINT32)(UINTN)mAcpiFadt;
-    mRsdt.Entry[1] = (UINT32)(UINTN)mAcpiMadt;
-    mRsdt.Entry[2] = (UINT32)(UINTN)mAcpiSrat;
-    mRsdt.Entry[3] = (UINT32)(UINTN)mAcpiSlit;
-    mRsdt.Entry[4] = (UINT32)(UINTN)mAcpiHcdp;
-    mRsdt.Entry[5] = (UINT32)(UINTN)mAcpiMcfg;
-    mRsdt.Entry[6] = (UINT32)(UINTN)mAcpiSsdt;
-    mRsdt.Entry[7] = debug_port_present ? (UINT32)(UINTN)mAcpiDbgp : 0;
+    {
+        UINTN re = 0;
+
+        mRsdt.Entry[re++] = (UINT32)(UINTN)mAcpiFadt;
+        mRsdt.Entry[re++] = (UINT32)(UINTN)mAcpiMadt;
+        mRsdt.Entry[re++] = (UINT32)(UINTN)mAcpiSrat;
+        mRsdt.Entry[re++] = (UINT32)(UINTN)mAcpiSlit;
+        mRsdt.Entry[re++] = (UINT32)(UINTN)mAcpiHcdp;
+        if (!is_460gx) {
+            mRsdt.Entry[re++] = (UINT32)(UINTN)mAcpiMcfg;
+        }
+        mRsdt.Entry[re++] = (UINT32)(UINTN)mAcpiSsdt;
+        if (debug_port_present) {
+            mRsdt.Entry[re++] = (UINT32)(UINTN)mAcpiDbgp;
+        }
+        while (re < sizeof(mRsdt.Entry) / sizeof(mRsdt.Entry[0])) {
+            mRsdt.Entry[re++] = 0;
+        }
+    }
     mRsdt.Hdr.Checksum = table_checksum8(&mRsdt, mRsdt.Hdr.Length);
 
     init_sdt_header(&mMcfg.Hdr, EFI_SIGNATURE_32('M', 'C', 'F', 'G'),
@@ -651,7 +677,8 @@ static void efi_init_acpi_tables(void)
     mMcfg.Allocation[0].BaseAddress = PCI_CONFIG_ECAM_BASE;
     mMcfg.Allocation[0].PciSegmentGroup = 0;
     mMcfg.Allocation[0].StartBusNumber = 0;
-    mMcfg.Allocation[0].EndBusNumber = 255;
+    mMcfg.Allocation[0].EndBusNumber =
+        (UINT8)(PCI_CONFIG_ECAM_SIZE / 0x100000U - 1U);
     mMcfg.Allocation[0].Reserved = 0;
     mMcfg.Hdr.Checksum = table_checksum8(&mMcfg, sizeof(mMcfg));
 
@@ -950,8 +977,11 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
     UINTN i;
     UINT64 debug_port_base = fw_handoff_debug_port_base();
     BOOLEAN debug_port_present = debug_port_base != 0;
-    UINT32 xsdt_length = 36 + (debug_port_present ? 8U : 7U) * 8U;
-    UINT32 rsdt_length = 36 + (debug_port_present ? 8U : 7U) * 4U;
+    BOOLEAN is_460gx = fw_platform_is_460gx();
+    UINTN acpi_entries = 6U + (is_460gx ? 0U : 1U) +
+                         (debug_port_present ? 1U : 0U);
+    UINT32 xsdt_length = 36 + (UINT32)acpi_entries * 8U;
+    UINT32 rsdt_length = 36 + (UINT32)acpi_entries * 4U;
 
     if (mSalSystemTable.Signature != EFI_SIGNATURE_32('S', 'S', 'T', '_') ||
         mSalSystemTable.Length != sizeof(mSalSystemTable) ||
@@ -1111,28 +1141,46 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         return 0;
     }
 
-    if (mAcpiXsdt->Entry[0] != (UINT64)(UINTN)mAcpiFadt ||
-        mAcpiXsdt->Entry[1] != (UINT64)(UINTN)mAcpiMadt ||
-        mAcpiXsdt->Entry[2] != (UINT64)(UINTN)mAcpiSrat ||
-        mAcpiXsdt->Entry[3] != (UINT64)(UINTN)mAcpiSlit ||
-        mAcpiXsdt->Entry[4] != (UINT64)(UINTN)mAcpiHcdp ||
-        mAcpiXsdt->Entry[5] != (UINT64)(UINTN)mAcpiMcfg ||
-        mAcpiXsdt->Entry[6] != (UINT64)(UINTN)mAcpiSsdt ||
-        mAcpiXsdt->Entry[7] !=
-            (debug_port_present ? (UINT64)(UINTN)mAcpiDbgp : 0)) {
-        return 0;
-    }
+    {
+        BOOLEAN is_460gx = fw_platform_is_460gx();
+        UINTN e = 5;
 
-    if (mAcpiRsdt->Entry[0] != (UINT32)(UINTN)mAcpiFadt ||
-        mAcpiRsdt->Entry[1] != (UINT32)(UINTN)mAcpiMadt ||
-        mAcpiRsdt->Entry[2] != (UINT32)(UINTN)mAcpiSrat ||
-        mAcpiRsdt->Entry[3] != (UINT32)(UINTN)mAcpiSlit ||
-        mAcpiRsdt->Entry[4] != (UINT32)(UINTN)mAcpiHcdp ||
-        mAcpiRsdt->Entry[5] != (UINT32)(UINTN)mAcpiMcfg ||
-        mAcpiRsdt->Entry[6] != (UINT32)(UINTN)mAcpiSsdt ||
-        mAcpiRsdt->Entry[7] !=
-            (debug_port_present ? (UINT32)(UINTN)mAcpiDbgp : 0)) {
-        return 0;
+        if (mAcpiXsdt->Entry[0] != (UINT64)(UINTN)mAcpiFadt ||
+            mAcpiXsdt->Entry[1] != (UINT64)(UINTN)mAcpiMadt ||
+            mAcpiXsdt->Entry[2] != (UINT64)(UINTN)mAcpiSrat ||
+            mAcpiXsdt->Entry[3] != (UINT64)(UINTN)mAcpiSlit ||
+            mAcpiXsdt->Entry[4] != (UINT64)(UINTN)mAcpiHcdp ||
+            (!is_460gx &&
+             mAcpiXsdt->Entry[e] != (UINT64)(UINTN)mAcpiMcfg)) {
+            return 0;
+        }
+        if (!is_460gx) {
+            e++;
+        }
+        if (mAcpiXsdt->Entry[e] != (UINT64)(UINTN)mAcpiSsdt ||
+            mAcpiXsdt->Entry[e + 1U] !=
+                (debug_port_present ? (UINT64)(UINTN)mAcpiDbgp : 0)) {
+            return 0;
+        }
+
+        e = 5;
+        if (mAcpiRsdt->Entry[0] != (UINT32)(UINTN)mAcpiFadt ||
+            mAcpiRsdt->Entry[1] != (UINT32)(UINTN)mAcpiMadt ||
+            mAcpiRsdt->Entry[2] != (UINT32)(UINTN)mAcpiSrat ||
+            mAcpiRsdt->Entry[3] != (UINT32)(UINTN)mAcpiSlit ||
+            mAcpiRsdt->Entry[4] != (UINT32)(UINTN)mAcpiHcdp ||
+            (!is_460gx &&
+             mAcpiRsdt->Entry[e] != (UINT32)(UINTN)mAcpiMcfg)) {
+            return 0;
+        }
+        if (!is_460gx) {
+            e++;
+        }
+        if (mAcpiRsdt->Entry[e] != (UINT32)(UINTN)mAcpiSsdt ||
+            mAcpiRsdt->Entry[e + 1U] !=
+                (debug_port_present ? (UINT32)(UINTN)mAcpiDbgp : 0)) {
+            return 0;
+        }
     }
 
     if (mAcpiDbgp->InterfaceType != ACPI_DBGP_INTERFACE_16550_FULL ||

@@ -24,6 +24,7 @@
 #define IA64_PSR_IC (1ULL << 13)
 #define IA64_PSR_I  (1ULL << 14)
 
+BOOLEAN fw_platform_is_460gx(void);
 extern char __fw_ivt[];
 #define SAL_IVT_BASE ((UINTN)__fw_ivt)
 

@@ -183,8 +183,15 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PCI_IO_SPARSE_SKIP       IA64_U64(0x0000000000001000)
 /* Sparse IA-64 port encoding expands the legacy 16-bit I/O port space. */
 #define IA64_PCI_IO_SPARSE_SIZE       IA64_U64(0x0000000004000000)
-#define IA64_PCI_CONFIG_BASE          IA64_U64(0x0000007ff0000000)
-#define IA64_PCI_CONFIG_SIZE          IA64_U64(0x0000000010000000)
+/*
+ * PCI config window at the E8870's MMCFG home (SR870BH2 reference: 64 MB at
+ * 0xFFFF8000000, directly below the architected I/O block).  ECAM semantics
+ * are an interim simplification (real E8870 encodes 16 bytes per dword);
+ * the 460GX profile does not advertise it at all - no MCFG, no descriptor -
+ * so 460GX-profile guests use SAL_PCI_CONFIG, as on real hardware (D7).
+ */
+#define IA64_PCI_CONFIG_BASE          IA64_U64(0x00000ffff8000000)
+#define IA64_PCI_CONFIG_SIZE          IA64_U64(0x0000000004000000)
 
 /*
  * Fixed platform device and interrupt-block addresses.  Single source for

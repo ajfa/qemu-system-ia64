@@ -543,6 +543,20 @@ UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
  * the hardware cross-check.  It also selects the procedure set: a call that
  * post-dates the advertised revision must not be offered.
  */
+/*
+ * Platform personality (rework phase 3): Merced machines model the 460GX
+ * (i2000/SDV) and everything else the E8870 (SR870BH2).  Currently keyed
+ * off the CPU family alone; a machine option can override later if a
+ * profile ever needs to diverge from the CPU model.
+ */
+BOOLEAN fw_platform_is_460gx(void)
+{
+    UINT64 family = (fw_read_cpuid3() >> IA64_CPUID3_FAMILY_SHIFT) &
+                    IA64_CPUID3_FAMILY_MASK;
+
+    return family == IA64_CPUID3_FAMILY_MERCED;
+}
+
 UINT16 fw_sal_revision(void)
 {
     UINT64 family = (fw_read_cpuid3() >> IA64_CPUID3_FAMILY_SHIFT) &

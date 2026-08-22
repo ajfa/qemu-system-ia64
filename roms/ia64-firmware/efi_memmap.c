@@ -674,6 +674,14 @@ void efi_init_memory_map(void)
                          EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
 
     /* Firmware SAL uses this ECAM aperture for runtime PCI config services. */
+    /*
+     * The config window sits at the E8870 MMCFG home.  It stays described
+     * (RUNTIME) on both profiles: the firmware's own SAL_PCI_CONFIG
+     * implementation reaches it through a SetVirtualAddressMap-relocated
+     * pointer (mRuntimePciConfigEcam).  What steers the GUEST's config
+     * mechanism is the MCFG table, which the 460GX profile omits - its
+     * guests then use SAL_PCI_CONFIG, as on real hardware (rework D7).
+     */
     efi_add_memory_range(&index, EfiMemoryMappedIO, PCI_CONFIG_ECAM_BASE,
                          PCI_CONFIG_ECAM_BASE + PCI_CONFIG_ECAM_SIZE,
                          EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
