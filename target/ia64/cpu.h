@@ -169,7 +169,8 @@
 #define IA64_FW_SAL_RUNTIME_ENTRY_PA  (IA64_FW_IDENTITY_BASE + 0x2000)
 #define IA64_FW_SAL_RUNTIME_RETURN_PA (IA64_FW_IDENTITY_BASE + 0x2020)
 #define IA64_FW_SAL_DISPATCH_BLOCK_PA (IA64_FW_IDENTITY_BASE + 0x2040)
-#define IA64_FIRMWARE_IVT_BASE IA64_IVT_BASE
+/* The firmware IVT sits inside the image at IA64_FW_IVT_OFFSET. */
+#define IA64_FIRMWARE_IVT_BASE (IA64_FW_IDENTITY_BASE + IA64_FW_IVT_OFFSET)
 #define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
 /*
  * IA-64 OS loaders alias physical memory through region 7 with a fixed
@@ -220,9 +221,9 @@ static inline uint32_t ia64_rr_rid(uint64_t rr)
     return (rr & IA64_RR_RID_MASK) >> IA64_RR_RID_SHIFT;
 }
 
-static inline bool ia64_firmware_owns_iva(uint64_t iva)
+static inline bool ia64_firmware_owns_iva(uint64_t fw_base, uint64_t iva)
 {
-    return iva == 0 || iva == IA64_FIRMWARE_IVT_BASE;
+    return iva == 0 || iva == fw_base + IA64_FW_IVT_OFFSET;
 }
 
 static inline bool ia64_firmware_identity_pa(uint64_t fw_base, uint64_t iva,
@@ -231,7 +232,7 @@ static inline bool ia64_firmware_identity_pa(uint64_t fw_base, uint64_t iva,
 {
     bool firmware_context =
         (psr & IA64_PSR_CPL_MASK) == 0 &&
-        (ia64_firmware_owns_iva(iva) ||
+        (ia64_firmware_owns_iva(fw_base, iva) ||
          (ip >= fw_base && ip < fw_base + IA64_FW_IDENTITY_SIZE));
 
     if (firmware_context &&
@@ -1352,7 +1353,7 @@ static inline uint64_t ia64_region_itir(const CPUIA64State *env, uint64_t va)
 
 static inline bool ia64_sal_boot_environment_active(const CPUIA64State *env)
 {
-    return env->cr_iva == IA64_FIRMWARE_IVT_BASE &&
+    return env->cr_iva == env->fw_image_base + IA64_FW_IVT_OFFSET &&
            (env->psr & IA64_PSR_IC) != 0;
 }
 

@@ -111,7 +111,8 @@ void ia64_firmware_debug_capture(CPUIA64State *env, uint16_t vector,
     }
     debug->context_valid = false;
     debug->rse_valid = false;
-    if (!collected || env->cr_iva != IA64_FIRMWARE_IVT_BASE) {
+    if (!collected ||
+        env->cr_iva != env->fw_image_base + IA64_FW_IVT_OFFSET) {
         return;
     }
 
@@ -213,7 +214,7 @@ uint32_t ia64_firmware_debug_enter(CPUIA64State *env, uint64_t address)
     unsigned exception_type;
 
     if (!debug->context_valid || debug->handler_active ||
-        vector_base != IA64_FIRMWARE_IVT_BASE ||
+        vector_base != env->fw_image_base + IA64_FW_IVT_OFFSET ||
         address < vector_address || address >= vector_address + 0x100 ||
         handler < env->fw_image_base ||
         handler >= env->fw_image_base + IA64_FW_IDENTITY_SIZE ||
@@ -724,7 +725,7 @@ bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
      * installed its own IVA.  Page-spanning and semaphore references remain
      * architectural faults.
      */
-    if (env->cr_iva != IA64_FIRMWARE_IVT_BASE ||
+    if (env->cr_iva != env->fw_image_base + IA64_FW_IVT_OFFSET ||
         !(env->psr & IA64_PSR_IC) ||
         fault_slot > 2) {
         return false;

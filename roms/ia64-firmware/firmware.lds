@@ -39,6 +39,21 @@ SECTIONS
         *(.text.sal_runtime)
     }
 
+    /*
+     * The firmware IVT, pinned at image base + 0x8000 (naturally 32 KB
+     * aligned since the shadow base is 1 MB aligned) so the machine can
+     * seed cr.iva as base + IA64_FW_IVT_OFFSET without knowing the link
+     * layout.  Zero-filled: an all-zero bundle is a break instruction, the
+     * historical machine-side IVT fill.  Lives inside the runtime-code
+     * descriptor (handlers execute here).
+     */
+    . = __fw_link_base + 0x8000;
+    .fw_ivt : {
+        __fw_ivt = .;
+        QUAD(0);
+        . = __fw_ivt + 0x8000;
+    }
+
     .text : {
         *(.text*)
         *(.plt*)
@@ -120,6 +135,8 @@ ASSERT(sal_runtime_return == __fw_link_base + 0x2020,
        "sal_runtime_return must sit at IA64_FW_SAL_RUNTIME_RETURN_PA (base+0x2020)")
 ASSERT(sal_dispatch_block == __fw_link_base + 0x2040,
        "sal_dispatch_block must sit at IA64_FW_SAL_DISPATCH_BLOCK_PA (base+0x2040)")
+ASSERT(__fw_ivt == __fw_link_base + 0x8000,
+       "the firmware IVT must sit at image base + IA64_FW_IVT_OFFSET")
 /* The machine reserves IA64_FW_IMAGE_SPAN (4 MiB) for image + bss. */
 ASSERT(_end - __fw_link_base <= 0x400000,
        "firmware image + bss exceed IA64_FW_IMAGE_SPAN")

@@ -24,7 +24,8 @@
 #define IA64_PSR_IC (1ULL << 13)
 #define IA64_PSR_I  (1ULL << 14)
 
-#define SAL_IVT_BASE IA64_IVT_BASE
+extern char __fw_ivt[];
+#define SAL_IVT_BASE ((UINTN)__fw_ivt)
 
 #define FW_MAX_CPUS IA64_VPC_MAX_CPUS
 #define EFI_PAGE_SIZE 0x1000U

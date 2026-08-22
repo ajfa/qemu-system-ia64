@@ -1577,7 +1577,7 @@ __asm__(
 "    movl r14 = 0x4\n"
 "    ;;\n"
 "    mov cr.dcr = r14\n"
-"    movl r14 = 0x10000\n"
+"    movl r14 = __fw_ivt\n"
 "    ;;\n"
 "    mov cr.iva = r14\n"
 "    movl r14 = 0x3c\n"

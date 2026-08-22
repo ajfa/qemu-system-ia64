@@ -3091,7 +3091,7 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
         .firmware_base = firmware_base,
         .firmware_entry = entry,
         .global_pointer = global_pointer,
-        .iva = IA64_IVT_BASE,
+        .iva = firmware_base + IA64_FW_IVT_OFFSET,
         .bsp = assist_base + IA64_FW_EARLY_RSE_OFFSET +
             cpu_index * IA64_FW_EARLY_RSE_SIZE,
         .stack_pointer = assist_base + IA64_FW_CPU_ASSIST_SIZE - 16 -
@@ -3452,16 +3452,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         return false;
     }
 
-    /* Fill IVT with break bundles (one-time, before any reset) */
-    {
-        uint64_t break_bundle[2] = {0, 0};
-        hwaddr offset;
-
-        for (offset = 0; offset < IA64_IVT_SIZE; offset += 16) {
-            cpu_physical_memory_write(IA64_IVT_BASE + offset,
-                                      break_bundle, 16);
-        }
-    }
+    /*
+     * The firmware IVT now lives inside the image (.fw_ivt, zero-filled =
+     * break bundles), so the historical machine-side fill is gone.
+     */
 
     /* Defer PE32+ plabel parsing until after ROM content is loaded */
     s->done_notifier.notify = ia64_vpc_machine_done;

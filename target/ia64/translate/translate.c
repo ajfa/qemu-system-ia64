@@ -182,8 +182,9 @@ bool ia64_is_firmware_debug_break(CPUIA64State *env, uint64_t address,
                                   uint64_t imm)
 {
     if (imm == 0x100002) {
-        return address >= IA64_FIRMWARE_IVT_BASE &&
-               address < IA64_FIRMWARE_IVT_BASE + 0x8000;
+        uint64_t ivt = env->fw_image_base + IA64_FW_IVT_OFFSET;
+
+        return address >= ivt && address < ivt + 0x8000;
     }
     if (imm == 0x100003 || imm == 0x100004) {
         return address >= env->fw_image_base &&

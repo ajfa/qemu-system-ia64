@@ -130,6 +130,8 @@
  * shadows itself near the top of memory.
  */
 #define IA64_FW_IMAGE_SPAN            IA64_U64(0x0000000000400000)
+/* The firmware IVT lives inside the image at this fixed link offset. */
+#define IA64_FW_IVT_OFFSET            IA64_U64(0x0000000000008000)
 #define IA64_FW_ACPI_REGION_SIZE      IA64_U64(0x0000000000020000)
 
 /* low_ram_end for an installed RAM size, as both QEMU and the firmware see it. */

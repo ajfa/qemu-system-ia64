@@ -516,13 +516,10 @@ void efi_init_memory_map(void)
      * firmware does (target-model doc sec 1.3/2): the whole megabyte is
      * DRAM-capable, and only the VGA aperture is genuine MMIO.
      *
-     * [0, 0x18000)      reserved WB DRAM: the IA-32 IVT/BDA (the INT10
-     *                   vector at 0:0x40 is live - ia64_vpc_install_int10)
-     *                   plus the firmware IVT at IA64_IVT_BASE, which stays
-     *                   here until phase 2.2 moves it into the RAM-top
-     *                   firmware block.  Real firmware reserves only a small
-     *                   sliver at 0; ours is 96 KB for now.
-     * [0x18000, 0xA0000) conventional WB, as on real hardware (SAL spec
+     * [0, 0x2000)       reserved WB DRAM: the IA-32 IVT/BDA (the INT10
+     *                   vector at 0:0x40 is live - ia64_vpc_install_int10).
+     *                   The firmware IVT moved into the image (.fw_ivt).
+     * [0x2000, 0xA0000)  conventional WB, as on real hardware (SAL spec
      *                   Table 2-3: "0x500-0x9FFFF memory").  The allocator
      *                   only reaches below mNextPageAddr on its wrap pass,
      *                   so boot-services allocations do not land here.
@@ -545,9 +542,8 @@ void efi_init_memory_map(void)
      * revalidate 2462 whenever this block is touched.
      */
     efi_add_memory_range(&index, EfiReservedMemoryType, 0x00000000,
-                         IA64_IVT_BASE + IA64_IVT_SIZE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiConventionalMemory,
-                         IA64_IVT_BASE + IA64_IVT_SIZE,
+                         0x2000, EFI_MEMORY_WB);
+    efi_add_memory_range(&index, EfiConventionalMemory, 0x2000,
                          VGA_LEGACY_FB_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiMemoryMappedIO, VGA_LEGACY_FB_BASE,
                          VGA_LEGACY_FB_BASE + VGA_LEGACY_FB_SIZE,
