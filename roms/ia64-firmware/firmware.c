@@ -15509,9 +15509,15 @@ EFI_HANDLE fw_scsi_controller_handle(VOID)
 
 /* --- Firmware Entry Point (updated) --------------------------------------- */
 
-void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
+/*
+ * firmware_main phases.  Pure mechanical split of the former 700-line
+ * script -- call order is unchanged.  This is the seam a replaceable EFI
+ * core (or the SALEFIHANDOFF-shaped platform boundary, plan milestone 6)
+ * slots into: platform state -> EFI core init -> device/storage bring-up
+ * -> protocol/selftest battery -> boot policy.
+ */
+static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 {
-    BOOLEAN nvram_variable_selftest_ok;
 
     /*
      * stack_top is the aligned top of the boot-stack region; the entry
@@ -15571,6 +15577,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     uart_puts(fw_copy_mem_selftest() ?
               "aligned and overlapping copies verified\r\n" :
               "verification failed\r\n");
+}
+
+static void fw_phase_efi_core_init(void)
+{
     efi_init_boot_services();
     efi_init_runtime_services();
     uart_puts("UEFI Time Services:   ");
@@ -15609,6 +15619,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     efi_refresh_table_crc32s();
     efi_init_system_table_pointer();
 
+}
+
+static void fw_phase_storage_bringup(void)
+{
     /* Install Block I/O protocol */
     ide_probe_primary_devices();
     mBootIdeDevice = ide_pick_boot_device();
@@ -15856,6 +15870,12 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     mOpticalSimpleFsProto.OpenVolume = optical_open_volume;
     mLoadedImageProto.FilePath = &mEndDevicePath;
     mFpswaLoadedImageProto.FilePath = &mEndDevicePath;
+}
+
+static void fw_phase_protocols_and_selftests(void)
+{
+    BOOLEAN nvram_variable_selftest_ok;
+
     if (!fpswa_install_protocols()) {
         mFpswaHandle = NULL;
     }
@@ -16168,6 +16188,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
               "verification failed\r\n");
     uart_puts("BOOT path:            SCSI/SATA/ATA Block I/O + FAT resolver\r\n");
     uart_puts("\r\nFirmware ready.\r\n");
+}
+
+static void fw_phase_boot(void)
+{
 
     if (fw_boot_shell_hotkey_window()) {
         fw_boot_shell_run();
@@ -16215,4 +16239,13 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
         fw_boot_shell_run();
     }
     while (1) {}
+}
+
+void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
+{
+    fw_phase_platform_init(gp, stack_top, boot_b0);
+    fw_phase_efi_core_init();
+    fw_phase_storage_bringup();
+    fw_phase_protocols_and_selftests();
+    fw_phase_boot();
 }
