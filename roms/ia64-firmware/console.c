@@ -39,7 +39,6 @@ static UINT8                  mPs2KeyboardRaw[32];
 static UINTN                  mPs2KeyboardRawRead;
 static UINTN                  mPs2KeyboardRawWrite;
 static UINTN                  mPs2KeyboardRawCount;
-    __attribute__((aligned(16)));
 static CHAR16                 mTextChars[VGA_TEXT_ROWS][VGA_TEXT_COLUMNS];
 static UINT8                  mTextAttrs[VGA_TEXT_ROWS][VGA_TEXT_COLUMNS];
 static BOOLEAN                mTextWrapPending;

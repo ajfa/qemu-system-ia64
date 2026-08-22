@@ -8,6 +8,7 @@ ide.c
 console.c
 pe_loader.c
 udf.c
+filesystem.c
 ohci.c
 decompress.c
 debug_protocols.c

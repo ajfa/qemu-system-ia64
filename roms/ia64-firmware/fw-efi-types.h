@@ -407,4 +407,80 @@ struct _EFI_BLOCK_IO_PROTOCOL {
     EFI_BLOCK_FLUSH     FlushBlocks;
 };
 
+typedef struct _EFI_DRIVER_BINDING_PROTOCOL EFI_DRIVER_BINDING_PROTOCOL;
+
+typedef EFI_STATUS (*EFI_DRIVER_BINDING_SUPPORTED)(
+    EFI_DRIVER_BINDING_PROTOCOL *This, EFI_HANDLE ControllerHandle,
+    VOID *RemainingDevicePath);
+typedef EFI_STATUS (*EFI_DRIVER_BINDING_START)(
+    EFI_DRIVER_BINDING_PROTOCOL *This, EFI_HANDLE ControllerHandle,
+    VOID *RemainingDevicePath);
+typedef EFI_STATUS (*EFI_DRIVER_BINDING_STOP)(
+    EFI_DRIVER_BINDING_PROTOCOL *This, EFI_HANDLE ControllerHandle,
+    UINTN NumberOfChildren, EFI_HANDLE *ChildHandleBuffer);
+
+struct _EFI_DRIVER_BINDING_PROTOCOL {
+    EFI_DRIVER_BINDING_SUPPORTED Supported;
+    EFI_DRIVER_BINDING_START Start;
+    EFI_DRIVER_BINDING_STOP Stop;
+    UINT32 Version;
+    EFI_HANDLE ImageHandle;
+    EFI_HANDLE DriverBindingHandle;
+};
+
+typedef struct _EFI_PLATFORM_DRIVER_OVERRIDE_PROTOCOL
+    EFI_PLATFORM_DRIVER_OVERRIDE_PROTOCOL;
+
+struct _EFI_PLATFORM_DRIVER_OVERRIDE_PROTOCOL {
+    EFI_STATUS (*GetDriver)(EFI_PLATFORM_DRIVER_OVERRIDE_PROTOCOL *This,
+                            EFI_HANDLE ControllerHandle,
+                            EFI_HANDLE *DriverImageHandle);
+    EFI_STATUS (*GetDriverPath)(EFI_PLATFORM_DRIVER_OVERRIDE_PROTOCOL *This,
+                                EFI_HANDLE ControllerHandle,
+                                VOID **DriverImagePath);
+    EFI_STATUS (*DriverLoaded)(EFI_PLATFORM_DRIVER_OVERRIDE_PROTOCOL *This,
+                               EFI_HANDLE ControllerHandle,
+                               VOID *DriverImagePath,
+                               EFI_HANDLE DriverImageHandle);
+};
+
+typedef struct _EFI_BUS_SPECIFIC_DRIVER_OVERRIDE_PROTOCOL
+    EFI_BUS_SPECIFIC_DRIVER_OVERRIDE_PROTOCOL;
+
+struct _EFI_BUS_SPECIFIC_DRIVER_OVERRIDE_PROTOCOL {
+    EFI_STATUS (*GetDriver)(
+        EFI_BUS_SPECIFIC_DRIVER_OVERRIDE_PROTOCOL *This,
+        EFI_HANDLE *DriverImageHandle);
+};
+
+typedef struct _EFI_DRIVER_FAMILY_OVERRIDE_PROTOCOL
+    EFI_DRIVER_FAMILY_OVERRIDE_PROTOCOL;
+
+struct _EFI_DRIVER_FAMILY_OVERRIDE_PROTOCOL {
+    UINT32 (*GetVersion)(EFI_DRIVER_FAMILY_OVERRIDE_PROTOCOL *This);
+};
+
+typedef struct _EFI_LOAD_FILE_PROTOCOL EFI_LOAD_FILE_PROTOCOL;
+
+struct _EFI_LOAD_FILE_PROTOCOL {
+    EFI_STATUS (*LoadFile)(EFI_LOAD_FILE_PROTOCOL *This, VOID *FilePath,
+                           BOOLEAN BootPolicy, UINTN *BufferSize,
+                           VOID *Buffer);
+};
+
+typedef struct _EFI_COMPONENT_NAME_PROTOCOL EFI_COMPONENT_NAME_PROTOCOL;
+
+typedef EFI_STATUS (*EFI_COMPONENT_NAME_GET_DRIVER_NAME)(
+    EFI_COMPONENT_NAME_PROTOCOL *This, CHAR8 *Language,
+    CHAR16 **DriverName);
+typedef EFI_STATUS (*EFI_COMPONENT_NAME_GET_CONTROLLER_NAME)(
+    EFI_COMPONENT_NAME_PROTOCOL *This, EFI_HANDLE ControllerHandle,
+    EFI_HANDLE ChildHandle, CHAR8 *Language, CHAR16 **ControllerName);
+
+struct _EFI_COMPONENT_NAME_PROTOCOL {
+    EFI_COMPONENT_NAME_GET_DRIVER_NAME GetDriverName;
+    EFI_COMPONENT_NAME_GET_CONTROLLER_NAME GetControllerName;
+    CHAR8 *SupportedLanguages;
+};
+
 #endif /* IA64_FIRMWARE_FW_EFI_TYPES_H */

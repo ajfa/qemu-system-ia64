@@ -143,6 +143,65 @@ void smbios_init_table(void);
 BOOLEAN smbios_table_integrity_selftest(void);
 UINTN fw_smbios_entry_point_address(void);
 
+typedef struct {
+    BOOLEAN in_use;
+    EFI_HANDLE handle;
+    UINT8 guid[16];
+    VOID *interface;
+    UINT64 modification_generation;
+} EFI_PROTOCOL_RECORD;
+
+#define PROTOCOL_RECORD_MAX 1024
+
+typedef struct {
+    BOOLEAN in_use;
+    EFI_HANDLE handle;
+    UINT8 guid[16];
+    EFI_HANDLE agent_handle;
+    EFI_HANDLE controller_handle;
+    UINT32 attributes;
+    UINT32 open_count;
+} EFI_OPEN_PROTOCOL_RECORD;
+
+#define OPEN_PROTOCOL_RECORD_MAX 512
+
+#define EFI_OPEN_PROTOCOL_BY_CHILD_CONTROLLER 0x00000008U
+#define EFI_OPEN_PROTOCOL_BY_DRIVER           0x00000010U
+
+EFI_STATUS bs_calculate_crc32(VOID *Data, UINTN DataSize, UINT32 *Crc32);
+EFI_STATUS bs_close_protocol(EFI_HANDLE Handle, void *Protocol,
+                             EFI_HANDLE AgentHandle,
+                             EFI_HANDLE ControllerHandle);
+EFI_STATUS bs_install_multiple_protocol_interfaces(EFI_HANDLE *Handle, ...);
+EFI_STATUS bs_open_protocol(EFI_HANDLE Handle, void *Protocol,
+                            VOID **Interface, EFI_HANDLE AgentHandle,
+                            EFI_HANDLE ControllerHandle, UINT32 Attributes);
+EFI_STATUS bs_uninstall_multiple_protocol_interfaces(EFI_HANDLE Handle, ...);
+BOOLEAN fw_guid_equal(const UINT8 *A, const UINT8 *B);
+const void *fw_pci_io_device_from_handle_opaque(EFI_HANDLE Handle);
+BOOLEAN guid_matches(const void *Protocol, const UINT8 *Guid);
+BOOLEAN handle_supports_protocol(EFI_HANDLE Handle, void *Protocol,
+                                        VOID **Interface);
+EFI_STATUS rs_get_boot0000_variable(UINT32 *Attributes,
+                                           UINTN *DataSize, VOID *Data);
+extern EFI_HANDLE mBlockIoHandle;
+extern const UINT8 mBlockIoProtocolGuid[16];
+extern EFI_BOOT_SERVICES    mBootServices;
+extern const UINT8 mComponentNameProtocolGuid[16];
+extern EFI_HANDLE mDiskBlockIoHandle;
+extern const UINT8 mDiskIoProtocolGuid[16];
+extern const UINT8 mDriverBindingProtocolGuid[16];
+extern EFI_HANDLE mGraphicsHandle;
+extern EFI_HANDLE mImageHandle;
+extern EFI_LOADED_IMAGE_PROTOCOL mLoadedImageProto;
+extern const UINT8 mLoadedImageProtocolGuid[16];
+extern EFI_OPEN_PROTOCOL_RECORD mOpenProtocolRecords[OPEN_PROTOCOL_RECORD_MAX];
+extern EFI_HANDLE mPciRootBridgeHandle;
+extern EFI_PROTOCOL_RECORD mProtocolRecords[PROTOCOL_RECORD_MAX];
+extern EFI_HANDLE mRawBlockIoHandle;
+extern EFI_HANDLE mStorageDriverHandle;
+extern EFI_HANDLE mUnicodeCollationHandle;
+
 /* console.c */
 extern EFI_SIMPLE_TEXT_OUT_PROTOCOL mConOutProto;
 extern EFI_SIMPLE_TEXT_INPUT_PROTOCOL mConInProto;
