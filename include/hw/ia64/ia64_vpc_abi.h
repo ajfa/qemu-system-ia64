@@ -20,9 +20,18 @@
 #define IA64_U64(x) x##ULL
 #endif
 
-#define IA64_FW_HANDOFF_ADDR          IA64_U64(0x00000000000ff000)
+/*
+ * The QEMU->firmware handoff block lives in the machine-RAM-backed firmware
+ * address-space window [0xFF000000, 4 GiB), not in guest low RAM: its old
+ * home at 0xFF000 sat inside the sub-1 MB compatibility area, which real
+ * firmware hands to the OS (shadowed IA-32 BIOS DRAM), and which the Phase 2
+ * map rework publishes accordingly.  0xFF0FF000 is below every device in the
+ * window (watchdog 0xFFEE0000, RTC 0xFFEF0000, NVRAM 0xFFF00000) and clear
+ * of the 0xFFC00000+ area a future flash-resident firmware would claim.
+ */
+#define IA64_FW_HANDOFF_ADDR          IA64_U64(0x00000000ff0ff000)
 #define IA64_FW_HANDOFF_MAGIC         IA64_U64(0x4d41523436414951) /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION       11ULL
+#define IA64_FW_HANDOFF_VERSION       12ULL
 /* Offset of IA64VpcHandoff.RamSize, re-derived by entry.S. */
 #define IA64_FW_HANDOFF_RAMSIZE_OFFSET 16
 

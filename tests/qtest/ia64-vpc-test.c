@@ -665,9 +665,9 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
 
 static void test_firmware_handoff_defaults(void)
 {
-    static const uint8_t expected_v11[sizeof(IA64VpcHandoff)] = {
+    static const uint8_t expected_v12[sizeof(IA64VpcHandoff)] = {
         0x51, 0x49, 0x41, 0x36, 0x34, 0x52, 0x41, 0x4d,
-        0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -687,7 +687,7 @@ static void test_firmware_handoff_defaults(void)
     assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, actual, sizeof(actual));
     g_assert_cmpmem(actual, sizeof(actual),
-                    expected_v11, sizeof(expected_v11));
+                    expected_v12, sizeof(expected_v12));
     qtest_quit(qts);
 }
 
