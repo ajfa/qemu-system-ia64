@@ -1901,12 +1901,17 @@ static const struct {
 };
 
 /*
- * Quirks disabled by default.  The 8 MB ACPI island was retired in phase 2.2
- * of the firmware rework: ACPI staging now sits in the RAM-top firmware
- * block, validated on 2462/XP2600/XP2002-installer/checked-3790
- * (plans/firmware-rework-plan.md; re-enable with fw-quirks=+acpi-low-island).
+ * Quirks disabled by default (plans/firmware-rework-plan.md; re-enable any
+ * of them with fw-quirks=+name):
+ *  - acpi-low-island: retired in phase 2.2 - ACPI staging now sits in the
+ *    RAM-top firmware block, validated on 2462/XP2600/XP2002-installer/
+ *    checked-3790.
+ *  - 2g-scratch: retired in phase 2.3 - experiment E2 showed the XP 2600
+ *    SMP deadlock it once papered over no longer reproduces (3/3 SMP boots
+ *    to desktop with the page removed, control green).
  */
-#define IA64_VPC_FW_QUIRK_DEFAULT_DISABLE IA64_FW_QUIRK_ACPI_LOW_ISLAND
+#define IA64_VPC_FW_QUIRK_DEFAULT_DISABLE \
+    (IA64_FW_QUIRK_ACPI_LOW_ISLAND | IA64_FW_QUIRK_SCRATCH_2G)
 
 static char *ia64_vpc_get_fw_quirks(Object *obj, Error **errp)
 {
@@ -3633,9 +3638,9 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Comma list of firmware memory-map quirks to toggle: '-name' "
         "disables, '+name'/'name' re-enables, 'default' resets.  Names: "
         "split-page, low-boundaries, low-anchor, anchor-version-sniff, "
-        "2g-scratch, pal-8k-page, acpi-low-island.  All quirks except "
-        "acpi-low-island (retired: ACPI stages in the RAM-top block) "
-        "default on; toggling changes the guest-visible EFI memory map -- "
+        "2g-scratch, pal-8k-page, acpi-low-island.  Retired quirks "
+        "(acpi-low-island, 2g-scratch) default off, the rest default on; "
+        "toggling changes the guest-visible EFI memory map -- "
         "A/B rig for plans/firmware-rework-plan.md Phase 2");
     object_class_property_add_str(oc, "firmware-console",
                                   ia64_vpc_get_firmware_console,
