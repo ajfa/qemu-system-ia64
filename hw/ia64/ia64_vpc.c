@@ -1900,6 +1900,14 @@ static const struct {
     { "acpi-low-island",     IA64_FW_QUIRK_ACPI_LOW_ISLAND },
 };
 
+/*
+ * Quirks disabled by default.  The 8 MB ACPI island was retired in phase 2.2
+ * of the firmware rework: ACPI staging now sits in the RAM-top firmware
+ * block, validated on 2462/XP2600/XP2002-installer/checked-3790
+ * (plans/firmware-rework-plan.md; re-enable with fw-quirks=+acpi-low-island).
+ */
+#define IA64_VPC_FW_QUIRK_DEFAULT_DISABLE IA64_FW_QUIRK_ACPI_LOW_ISLAND
+
 static char *ia64_vpc_get_fw_quirks(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -1944,7 +1952,7 @@ static void ia64_vpc_set_fw_quirks(Object *obj, const char *value,
             continue;
         }
         if (g_strcmp0(name, "default") == 0) {
-            disable = 0;
+            disable = IA64_VPC_FW_QUIRK_DEFAULT_DISABLE;
             continue;
         }
         off = name[0] == '-';
@@ -3503,6 +3511,8 @@ static void ia64_vpc_machine_instance_init(Object *obj)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
+    s->fw_map_quirk_disable = IA64_VPC_FW_QUIRK_DEFAULT_DISABLE;
+
 #ifdef CONFIG_IA64_VPC_PS2
     s->i8042_enabled = true;
 #endif
@@ -3623,9 +3633,9 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Comma list of firmware memory-map quirks to toggle: '-name' "
         "disables, '+name'/'name' re-enables, 'default' resets.  Names: "
         "split-page, low-boundaries, low-anchor, anchor-version-sniff, "
-        "2g-scratch, pal-8k-page, acpi-low-island.  All quirks default on "
-        "(the validated "
-        "map); disabling changes the guest-visible EFI memory map -- "
+        "2g-scratch, pal-8k-page, acpi-low-island.  All quirks except "
+        "acpi-low-island (retired: ACPI stages in the RAM-top block) "
+        "default on; toggling changes the guest-visible EFI memory map -- "
         "A/B rig for plans/firmware-rework-plan.md Phase 2");
     object_class_property_add_str(oc, "firmware-console",
                                   ia64_vpc_get_firmware_console,
