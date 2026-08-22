@@ -1937,9 +1937,16 @@ static const struct {
  *  - 2g-scratch: retired in phase 2.3 - experiment E2 showed the XP 2600
  *    SMP deadlock it once papered over no longer reproduces (3/3 SMP boots
  *    to desktop with the page removed, control green).
+ *  - low-boundaries: retired in phase 2.3 on the relocated map - the
+ *    32/48/64/80 MB no-coalesce boundaries' motivating lanes (XP 2600
+ *    ntoskrnl-missing class; 2003 SP1 installer error 16) pass without
+ *    them.  NOTE: split-page is NOT retired - the XP 2002 installer
+ *    wedges in kernel-init memmove without it (see the expected-state
+ *    ledger).
  */
 #define IA64_VPC_FW_QUIRK_DEFAULT_DISABLE \
-    (IA64_FW_QUIRK_ACPI_LOW_ISLAND | IA64_FW_QUIRK_SCRATCH_2G)
+    (IA64_FW_QUIRK_ACPI_LOW_ISLAND | IA64_FW_QUIRK_SCRATCH_2G | \
+     IA64_FW_QUIRK_LOW_BOUNDARIES)
 
 static char *ia64_vpc_get_fw_quirks(Object *obj, Error **errp)
 {
@@ -3807,7 +3814,8 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "disables, '+name'/'name' re-enables, 'default' resets.  Names: "
         "split-page, low-boundaries, low-anchor, anchor-version-sniff, "
         "2g-scratch, pal-8k-page, acpi-low-island.  Retired quirks "
-        "(acpi-low-island, 2g-scratch) default off, the rest default on; "
+        "(acpi-low-island, 2g-scratch, low-boundaries) default off, the "
+        "rest default on; "
         "toggling changes the guest-visible EFI memory map -- "
         "A/B rig for plans/firmware-rework-plan.md Phase 2");
     object_class_property_add_str(oc, "firmware-console",
