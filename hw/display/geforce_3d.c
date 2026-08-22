@@ -80,7 +80,7 @@ static uint32_t swizzle(uint32_t x, uint32_t y, uint32_t width, uint32_t height)
   return r;
 }
 
-static double edge_function(float v0[4], float v1[4], float v2[4])
+static double edge_function(const float *v0, const float *v1, const float *v2)
 {
   return ((double)v1[0] - v0[0]) * ((double)v2[1] - v0[1]) -
          ((double)v1[1] - v0[1]) * ((double)v2[0] - v0[0]);
@@ -215,7 +215,9 @@ static void normalize_to(float in[3], float out[3])
   out[2] = in[2] * scale;
 }
 
-static void position_to_view3(gf_channel *ch, float p[3], float pt[3])
+/* p is a homogeneous 4-vector (callers pass a 4-element array); only the
+ * first three transformed components are produced. */
+static void position_to_view3(gf_channel *ch, float *p, float pt[3])
 {
   float *m = ch->d3d_model_view_matrix[0];
   pt[0] = p[0] * m[0]  + p[1] * m[1]  + p[2] * m[2]  + p[3] * m[3];
@@ -1468,16 +1470,16 @@ static void d3d_vertex_shader(NV15State *s, gf_channel *ch, float in[16][4], flo
 
 static void d3d_register_combiners(NV15State *s, gf_channel *ch, float regs[16][4], float out[4])
 {
-  for (uint32_t s = 0; s < ch->d3d_combiner_control_num_stages; s++) {
+  for (uint32_t st = 0; st < ch->d3d_combiner_control_num_stages; st++) {
     uint32_t icws[2] = {
-      ch->d3d_combiner_color_icw[s],
-      ch->d3d_combiner_alpha_icw[s]
+      ch->d3d_combiner_color_icw[st],
+      ch->d3d_combiner_alpha_icw[st]
     };
     if (icws[0] == 0 && icws[1] == 0)
       continue;
     for (uint32_t ci = 0; ci < 4; ci++) {
-      regs[1][ci] = ch->d3d_combiner_const_color[s][0][ci];
-      regs[2][ci] = ch->d3d_combiner_const_color[s][1][ci];
+      regs[1][ci] = ch->d3d_combiner_const_color[st][0][ci];
+      regs[2][ci] = ch->d3d_combiner_const_color[st][1][ci];
     }
     float vars[4][4];
     for (uint32_t civ = 0; civ < 4; civ++) {
@@ -1487,7 +1489,7 @@ static void d3d_register_combiners(NV15State *s, gf_channel *ch, float regs[16][
       vars[2][civ] = rc_get_var(icw, 8, regs, civ);
       vars[3][civ] = rc_get_var(icw, 0, regs, civ);
     }
-    uint32_t color_ocw = ch->d3d_combiner_color_ocw[s];
+    uint32_t color_ocw = ch->d3d_combiner_color_ocw[st];
     uint32_t color_cd = color_ocw & 0xf;
     uint32_t color_ab = (color_ocw >> 4) & 0xf;
     uint32_t color_muxsum = (color_ocw >> 8) & 0xf;
@@ -1518,7 +1520,7 @@ static void d3d_register_combiners(NV15State *s, gf_channel *ch, float regs[16][
     if (color_muxsum != 0)
       for (uint32_t ci = 0; ci < 3; ci++)
         regs[color_muxsum][ci] = vars[0][ci] * vars[1][ci] + vars[2][ci] * vars[3][ci];
-    uint32_t alpha_ocw = ch->d3d_combiner_alpha_ocw[s];
+    uint32_t alpha_ocw = ch->d3d_combiner_alpha_ocw[st];
     uint32_t alpha_cd = alpha_ocw & 0xf;
     uint32_t alpha_ab = (alpha_ocw >> 4) & 0xf;
     uint32_t alpha_muxsum = (alpha_ocw >> 8) & 0xf;
@@ -1702,8 +1704,8 @@ static bool d3d_pixel_shader(NV15State *s, gf_channel *ch,
           params[0][0] *= winv;
           params[0][1] *= winv;
           params[0][2] *= winv;
-          // fallthrough
         }
+        /* fallthrough */
         case 0x2f: // TXL
           // Level of detail parameter is not implemented
         case 0x31: // TXB
@@ -2307,7 +2309,7 @@ static void d3d_triangle_clipped(NV15State *s, gf_channel *ch, float v0[16][4], 
       float z = sp0[2] * b0 + sp1[2] * b1 + sp2[2] * b2;
       if (z > ch->d3d_clip_max)
         continue;
-      uint32_t z_new;
+      uint32_t z_new = 0;
       uint8_t stencil = 0x00;
       if (zstencil_enable) {
         uint32_t z_prev;
@@ -3481,7 +3483,7 @@ static void d3d_mh_light(NV15State *s, gf_channel *ch, uint32_t cls, uint32_t me
     light_method = (method & 0x00f) | ((method & 0x080) >> 3);
   }
   gf_light *light = &ch->d3d_light[light_index];
-  if (light_method >= 0x00 && light_method <= 0x02) {
+  if (light_method <= 0x02) {
     light->ambient_color[light_method] = uint32_as_float(param);
   } else if (light_method >= 0x03 && light_method <= 0x05) {
     uint32_t i = light_method - 0x03;
@@ -3579,7 +3581,7 @@ static void d3d_mh_texcoord(NV15State *s, gf_channel *ch, uint32_t cls, uint32_t
   float *texcoord = ch->d3d_vertex_data_imm[
     ch->d3d_attrib_in_tex_coord[texcoord_index]];
   // TEXCOORD3_4F/4S may require special handling
-  if (texcoord_method >= 0 && texcoord_method <= 1) {
+  if (texcoord_method <= 1) {
     if (texcoord_method == 1) {
       texcoord[2] = 0.0f;
       texcoord[3] = 1.0f;
