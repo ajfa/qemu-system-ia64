@@ -140,6 +140,16 @@ config MACH64_VGA
     select I2C
     select DDC
 
+config NV15_VGA
+    bool
+    default y if PCI_DEVICES
+    depends on PCI
+    select VGA
+    select FRAMEBUFFER
+    select I2C
+    select BITBANG_I2C
+    select DDC
+
 config MACFB
     bool
     select FRAMEBUFFER

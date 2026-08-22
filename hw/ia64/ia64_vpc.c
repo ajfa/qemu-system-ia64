@@ -165,6 +165,19 @@
 #define IA64_VGA_FB_PCI_BASE    (IA64_PCI_MMIO_BASE + 0x02000000ULL)
 #define IA64_VGA_MMIO_PCI_BASE  (IA64_PCI_MMIO_BASE + 0x07000000ULL)
 #define IA64_VGA_ROM_PCI_BASE   (IA64_PCI_MMIO_BASE + 0x08000000ULL)
+/*
+ * The NVIDIA NV15GL (vga=nv15gl) uses a different, larger BAR layout than the
+ * ATI adapters: BAR0 is a 16 MiB MMIO register aperture and BAR1 is a 128 MiB
+ * prefetchable framebuffer aperture.  Its 128 MiB FB does not fit the ATI
+ * fixed-window spacing, so it gets its own naturally aligned bases inside the
+ * PCI0 MMIO window [0xEE000000, 0xFE000000): FB at 0xF0000000 (128 MiB,
+ * shared with the firmware's fixed FB address), MMIO at 0xF8000000 (16 MiB),
+ * expansion ROM at 0xF9000000.
+ */
+#define IA64_NV_FB_PCI_BASE     (IA64_PCI_MMIO_BASE + 0x02000000ULL)
+#define IA64_NV_MMIO_PCI_BASE   (IA64_PCI_MMIO_BASE + 0x0A000000ULL)
+#define IA64_NV_ROM_PCI_BASE    (IA64_PCI_MMIO_BASE + 0x0B000000ULL)
+#define IA64_NV_VENDOR_ID       0x10deU
 #define IA64_VGA_LEGACY_BASE   0x000a0000U
 #define IA64_VGA_LEGACY_SIZE   0x00020000U
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -2308,8 +2321,10 @@ static void ia64_vpc_set_vga(Object *obj, const char *value, Error **errp)
 
     if (g_strcmp0(value, "rage128") != 0 &&
         g_strcmp0(value, "mach64") != 0 &&
+        g_strcmp0(value, "nv15gl") != 0 &&
         g_strcmp0(value, "std") != 0) {
-        error_setg(errp, "vga must be 'rage128', 'mach64' or 'std'");
+        error_setg(errp,
+                   "vga must be 'rage128', 'mach64', 'nv15gl' or 'std'");
         return;
     }
     g_free(s->vga_model);
@@ -2970,6 +2985,26 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev, uint32_t io_base)
     }
 
     /*
+     * The NVIDIA NV15GL keeps its own subsystem id (10de:006d, programmed by
+     * the device) and a distinct BAR layout: BAR0 is the 16 MiB MMIO register
+     * aperture and BAR1 is the 128 MiB prefetchable framebuffer.  It carries no
+     * ATI BIOS tables, so bypass the Rage-specific ROM patching entirely.
+     */
+    if (pci_get_word(pci_dev->config + PCI_VENDOR_ID) == IA64_NV_VENDOR_ID) {
+        pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
+                                 IA64_NV_MMIO_PCI_BASE, 4);
+        pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
+                                 IA64_NV_FB_PCI_BASE, 4);
+        if (pci_dev->io_regions[PCI_ROM_SLOT].size != 0) {
+            pci_default_write_config(pci_dev, PCI_ROM_ADDRESS,
+                                     IA64_NV_ROM_PCI_BASE, 4);
+        }
+        pci_default_write_config(pci_dev, PCI_COMMAND,
+                                 PCI_COMMAND_IO | PCI_COMMAND_MEMORY, 2);
+        return;
+    }
+
+    /*
      * QEMU's generic 1af4:1100 subsystem ID is not a value this chip can
      * report.  A Rage 128 loads the subsystem ID from the video BIOS on an
      * add-in card; with none loaded the documented hardware fallback is
@@ -3239,8 +3274,17 @@ static void ia64_vpc_map_vga_fixed_windows(IA64VpcMachineState *s,
         return;
     }
 
-    fb = &pci_dev->io_regions[0];
-    mmio = &pci_dev->io_regions[2];
+    bool is_nvidia =
+        pci_get_word(pci_dev->config + PCI_VENDOR_ID) == IA64_NV_VENDOR_ID;
+
+    /*
+     * NVIDIA uses BAR0=MMIO / BAR1=FB; ATI uses BAR0=FB / BAR2=MMIO.  The NV
+     * BARs are already assigned at the firmware's fixed addresses by
+     * ia64_vpc_configure_vga(), and its 128 MiB FB would overlap the ATI fixed
+     * MMIO window, so NV only needs the legacy 0xA0000 alias set up below.
+     */
+    fb = &pci_dev->io_regions[is_nvidia ? 1 : 0];
+    mmio = &pci_dev->io_regions[is_nvidia ? 0 : 2];
     if (fb->memory == NULL || mmio->memory == NULL ||
         fb->address_space == NULL || mmio->address_space == NULL) {
         return;
@@ -3250,7 +3294,7 @@ static void ia64_vpc_map_vga_fixed_windows(IA64VpcMachineState *s,
         return;
     }
 
-    if (s->vga_fb_alias == NULL) {
+    if (!is_nvidia && s->vga_fb_alias == NULL) {
         s->vga_fb_alias = g_new(MemoryRegion, 1);
         memory_region_init_alias(s->vga_fb_alias, OBJECT(s),
                                  "ia64-vga-fb-fixed", fb->memory, 0, fb->size);
@@ -3259,7 +3303,7 @@ static void ia64_vpc_map_vga_fixed_windows(IA64VpcMachineState *s,
                                             s->vga_fb_alias, 1);
     }
 
-    if (s->vga_mmio_alias == NULL) {
+    if (!is_nvidia && s->vga_mmio_alias == NULL) {
         s->vga_mmio_alias = g_new(MemoryRegion, 1);
         memory_region_init_alias(s->vga_mmio_alias, OBJECT(s),
                                  "ia64-vga-mmio-fixed", mmio->memory, 0,
@@ -4730,6 +4774,17 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
          * slot rather than through pci_vga_init()/-vga.
          */
         s->vga_dev = pci_new(PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), "mach64-vga");
+        if (!pci_realize_and_unref(s->vga_dev, pci_bus, errp)) {
+            return false;
+        }
+    } else if (g_strcmp0(s->vga_model, "nv15gl") == 0) {
+        /*
+         * The NVIDIA Quadro2 Pro (NV15GL, 10de:0153): an AGP graphics master
+         * with a 16 MB MMIO BAR0 and a 128 MB prefetchable framebuffer BAR1,
+         * chosen with -machine ia64-vpc,vga=nv15gl.  Created explicitly at the
+         * AGP/VGA slot; ia64_vpc_configure_vga() maps its BARs (NVIDIA layout).
+         */
+        s->vga_dev = pci_new(PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), "nv15gl-vga");
         if (!pci_realize_and_unref(s->vga_dev, pci_bus, errp)) {
             return false;
         }

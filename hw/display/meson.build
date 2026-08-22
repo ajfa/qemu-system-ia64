@@ -64,6 +64,8 @@ system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c', 'ati_
 
 system_ss.add(when: 'CONFIG_MACH64_VGA', if_true: files('mach64.c', 'mach64_2d.c'))
 
+system_ss.add(when: 'CONFIG_NV15_VGA', if_true: files('geforce.c', 'geforce_2d.c', 'geforce_3d.c'))
+
 system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_PCI'],     if_true: [files('apple-gfx.m', 'apple-gfx-pci.m')])
 system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_MMIO'],    if_true: [files('apple-gfx.m', 'apple-gfx-mmio.m')])
 

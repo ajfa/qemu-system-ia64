@@ -21,6 +21,7 @@ config IA64_VPC_GRAPHICS
     depends on IA64_VPC
     select ATI_VGA
     select MACH64_VGA
+    select NV15_VGA
     select VGA_PCI
 
 config IA64_VPC_NETWORK
