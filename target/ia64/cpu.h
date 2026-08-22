@@ -162,6 +162,10 @@
  * from the EfiRuntimeServicesCode descriptor containing the SST SalProc
  * address, so the stubs live in runtime-services code, not the PAL page.
  */
+#define IA64_FW_SAL_RUNTIME_ENTRY_OFF  0x2000
+#define IA64_FW_SAL_RUNTIME_RETURN_OFF 0x2020
+#define IA64_FW_SAL_DISPATCH_BLOCK_OFF 0x2040
+#define IA64_FW_PAL_PROC_ENTRY_OFF     0x60
 #define IA64_FW_SAL_RUNTIME_ENTRY_PA  (IA64_FW_IDENTITY_BASE + 0x2000)
 #define IA64_FW_SAL_RUNTIME_RETURN_PA (IA64_FW_IDENTITY_BASE + 0x2020)
 #define IA64_FW_SAL_DISPATCH_BLOCK_PA (IA64_FW_IDENTITY_BASE + 0x2040)
@@ -221,19 +225,17 @@ static inline bool ia64_firmware_owns_iva(uint64_t iva)
     return iva == 0 || iva == IA64_FIRMWARE_IVT_BASE;
 }
 
-static inline bool ia64_firmware_identity_pa(uint64_t iva, uint64_t ip,
-                                             uint64_t psr, uint64_t va,
-                                             uint64_t *pa)
+static inline bool ia64_firmware_identity_pa(uint64_t fw_base, uint64_t iva,
+                                             uint64_t ip, uint64_t psr,
+                                             uint64_t va, uint64_t *pa)
 {
     bool firmware_context =
         (psr & IA64_PSR_CPL_MASK) == 0 &&
         (ia64_firmware_owns_iva(iva) ||
-         (ip >= IA64_FW_IDENTITY_BASE &&
-          ip < IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE));
+         (ip >= fw_base && ip < fw_base + IA64_FW_IDENTITY_SIZE));
 
     if (firmware_context &&
-        va >= IA64_FW_IDENTITY_BASE &&
-        va < IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE) {
+        va >= fw_base && va < fw_base + IA64_FW_IDENTITY_SIZE) {
         *pa = va;
         return true;
     }
@@ -1018,6 +1020,17 @@ typedef struct CPUArchState {
     uint8_t impl_rid_bits;
     uint8_t impl_key_bits;
 
+    /*
+     * Physical base the firmware image executes from, seeded at reset from
+     * the machine (default IA64_FW_IDENTITY_BASE = the historical 1 MB link
+     * address).  The identity window, the SAL runtime stub trio and the PAL
+     * entry are all fixed link-layout offsets from it; phase 2.2 of the
+     * firmware rework relocates the image to the top of low RAM, where this
+     * becomes a function of RAM size.  Constant for the life of a boot, so
+     * translate-time use is safe.
+     */
+    uint64_t fw_image_base;
+
 } CPUIA64State;
 
 static inline bool ia64_pa_is_implemented(const CPUIA64State *env,
@@ -1625,6 +1638,8 @@ struct ArchCPU {
     bool boot_info_valid;
     bool boot_info_pending;
     bool alat_full;
+    /* Machine-set firmware execution base; 0 = IA64_FW_IDENTITY_BASE. */
+    uint64_t fw_image_base;
     uint32_t socket_id;
     uint32_t core_id;
     uint32_t thread_id;

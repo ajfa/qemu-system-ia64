@@ -447,7 +447,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
         goto raise_exception;
     }
 
-    if (ia64_firmware_identity_pa(cpu->env.cr_iva,
+    if (ia64_firmware_identity_pa(cpu->env.fw_image_base, cpu->env.cr_iva,
                                   is_ifetch ? addr : cpu->env.ip,
                                   cpu->env.psr, addr, &pa)) {
         int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
@@ -819,6 +819,12 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     cpu->env.mmu.region7_directmap_limit = IA64_FW_REGION7_DIRECTMAP_BASE +
         MIN(current_machine ? current_machine->ram_size : 0,
             IA64_FW_REGION7_DIRECTMAP_SIZE);
+    /*
+     * Where the firmware image executes.  The machine may relocate it (the
+     * phase-2.2 RAM-top shadow); zero means the historical 1 MB link home.
+     */
+    cpu->env.fw_image_base = cpu->fw_image_base ? cpu->fw_image_base
+                                                : IA64_FW_IDENTITY_BASE;
     cpu->env.alat_state.alat_full = cpu->alat_full;
     cpu->env.fp.fr[IA64_FR_ONE_INDEX] = IA64_FR_ONE;
     cpu->env.pr[IA64_PR_TRUE] = 1;

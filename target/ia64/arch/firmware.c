@@ -215,8 +215,8 @@ uint32_t ia64_firmware_debug_enter(CPUIA64State *env, uint64_t address)
     if (!debug->context_valid || debug->handler_active ||
         vector_base != IA64_FIRMWARE_IVT_BASE ||
         address < vector_address || address >= vector_address + 0x100 ||
-        handler < IA64_FW_IDENTITY_BASE ||
-        handler >= IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE ||
+        handler < env->fw_image_base ||
+        handler >= env->fw_image_base + IA64_FW_IDENTITY_SIZE ||
         (handler & (IA64_BUNDLE_SIZE - 1))) {
         return 0;
     }
@@ -891,7 +891,8 @@ uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
     if (bridge->active) {
         return 0;
     }
-    if (!ia64_exec_physical_rw(IA64_FW_SAL_DISPATCH_BLOCK_PA, block,
+    if (!ia64_exec_physical_rw(env->fw_image_base +
+                               IA64_FW_SAL_DISPATCH_BLOCK_OFF, block,
                                sizeof(block), false)) {
         return 0;
     }
