@@ -379,7 +379,7 @@ static const UINT8 gEfiEventGroupVirtualAddressChangeGuid[16] = {
     0x87, 0xea, 0x8f, 0x43, 0xfc, 0xc2, 0x51, 0x96
 };
 
-/* --- Memory map (built at firmware init) ---------------------------------- */
+/* --- Virtual address map (SetVirtualAddressMap state) --------------------- */
 
 static EFI_MEMORY_DESCRIPTOR  mVirtualAddressMap[MEMORY_MAP_MAX];
 static UINTN                  mVirtualAddressMapEntries;
@@ -5928,7 +5928,7 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
            !enabled && !pending && efi_time_valid(&alarm);
 }
 
-/* --- Initialize EFI tables ------------------------------------------------ */
+/* --- EFI core initialization ---------------------------------------------- */
 
 /* Memory-map construction lives in efi_memmap.c. */
 
@@ -13614,7 +13614,7 @@ EFI_HANDLE fw_scsi_controller_handle(VOID)
 
 /* --- Boot policy lives in boot.c ------------------------------------------ */
 
-/* --- Firmware Entry Point (updated) --------------------------------------- */
+/* --- Firmware entry point (firmware_main phases) -------------------------- */
 
 /*
  * firmware_main phases.  Pure mechanical split of the former 700-line
