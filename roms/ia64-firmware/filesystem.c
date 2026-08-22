@@ -1074,7 +1074,7 @@ FW_STATIC_ASSERT(sizeof(FW_CONSOLE_OUTPUT_DEVICE_PATH) == 57U,
         }, \
     }
 
-FW_DEVICE_PATH_NODE mEndDevicePath = {
+FW_DEVICE_PATH_NODE mEndDevicePath FW_DEVICE_PATH_GUEST_ALIGN = {
     .Type = 0x7f,
     .SubType = 0xff,
     .Length = 4,
