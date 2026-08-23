@@ -18,6 +18,7 @@
 #include "qemu/cutils.h"
 #include "qemu/datadir.h"
 #include "qemu/error-report.h"
+#include "qemu/log.h"
 #include "qemu/timer.h"
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
@@ -76,6 +77,37 @@
  */
 #define IA64_FIRMWARE_ADDRESS_SPACE_BASE IA64_FW_ADDRESS_SPACE_BASE
 #define IA64_FIRMWARE_ADDRESS_SPACE_SIZE IA64_FW_ADDRESS_SPACE_SIZE
+
+/*
+ * Real-firmware (realfw) mode: a vendor flash image mapped so that it ends
+ * exactly at 4 GiB, with the architected reset pointer block in its last
+ * 48 bytes (SAL sec 2.5): 4 GiB-48 = PAL_A FIT entry, -32 = FIT pointer,
+ * -24 = SALE_ENTRY pointer.  See plans/phase5-real-firmware-boot.md.
+ */
+#define IA64_REALFW_WINDOW_END    IA64_U64(0x0000000100000000)
+#define IA64_REALFW_MAX_SIZE      IA64_U64(0x0000000000400000)
+/*
+ * PAL procedure entry handed to real SAL in GR34/GR36 (and recognized via
+ * env->pal.pal_proc_copy_addr): a stub in the firmware address-space RAM,
+ * below the flash window and clear of the watchdog/handoff pages.
+ */
+#define IA64_REALFW_PAL_STUB_BASE IA64_U64(0x00000000ff100000)
+/*
+ * 460GX chipset CSR scratch below the IOAPIC window.  SAL_B's first act
+ * after PAL_PROC_GET_FEATURES is a BSP-arbitration handshake here: clear
+ * bit 7 at +0xCB0, poll +0xCC0 until bit 7 sets, then compare the low
+ * 7 bits with LID.id (bios130.BIN @ 0xffe76700..0xffe76790).  Model the
+ * grant register as always-granted-to-id-0; everything else in the page
+ * is write-store/read-back scratch, logged for the stage-1 inventory.
+ */
+#define IA64_REALFW_SAC_BASE      IA64_U64(0x00000000feb00000)
+#define IA64_REALFW_SAC_SIZE      0x10000
+#define IA64_REALFW_SAC_BOOT_SEM  0xcc0
+#define IA64_REALFW_PTR_FIT       (IA64_REALFW_WINDOW_END - 32)
+#define IA64_REALFW_PTR_SALE      (IA64_REALFW_WINDOW_END - 24)
+/* Bit 63 in firmware pointers is the uncacheable-attribute flag, not
+ * part of the physical address (SAL sec 2.5). */
+#define IA64_REALFW_PTR_ADDR_MASK (~(IA64_U64(1) << 63))
 #define IA64_HIGH_RAM_AFTER_FIRMWARE_BASE IA64_FW_ADDRESS_SPACE_END
 #define IA64_AHCI_IDP_IO_BASE   0x0000c100U
 #define IA64_UHCI_IO_BASE       0x0000c120U
@@ -387,6 +419,13 @@ struct IA64VpcMachineState {
     bool agp_enabled;
     uint64_t firmware_console;
     char *nvram_path;
+    char *realfw_path;
+    uint64_t realfw_entry;
+    uint64_t realfw_base;
+    MemoryRegion realfw_post_io;
+    MemoryRegion realfw_sac_mmio;
+    uint8_t *realfw_sac_data;
+    uint16_t realfw_post_last;
     char *vga_model;
     bool alat_full;
 
@@ -1543,6 +1582,25 @@ static void ia64_vpc_init_watchdog(IA64VpcMachineState *s)
                                         IA64_WATCHDOG_BASE,
                                         &s->watchdog_mmio, 2);
     qemu_register_reset(ia64_vpc_watchdog_reset, s);
+}
+
+static char *ia64_vpc_get_realfw(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return g_strdup(s->realfw_path ?: "");
+}
+
+static void ia64_vpc_set_realfw(Object *obj, const char *value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    g_free(s->realfw_path);
+    s->realfw_path = value[0] != '\0' ? g_strdup(value) : NULL;
 }
 
 static char *ia64_vpc_get_nvram(Object *obj, Error **errp)
@@ -3105,6 +3163,31 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
     (void)data;
     ia64_vpc_configure_platform_pci(s);
 
+    if (s->realfw_entry != 0) {
+        CPU_FOREACH(cs) {
+            IA64BootInfo info = {
+                .firmware_base = s->realfw_base,
+                .firmware_entry = s->realfw_entry,
+                .raw_entry = true,
+                .raw_proc_id = cs->cpu_index,
+                /*
+                 * SAL calls PAL procedures through the machine-planted stub
+                 * (GR34; GR36's authentication procedure lands on the same
+                 * dispatcher and returns not-implemented for unknown
+                 * indices).  SAL_B stashes this in bank-0 GR18 and uses it
+                 * for every static PAL call.
+                 */
+                .raw_pal_proc = IA64_REALFW_PAL_STUB_BASE,
+                .raw_pal_auth = IA64_REALFW_PAL_STUB_BASE,
+                .powered_off = cs->cpu_index != 0,
+            };
+
+            ia64_cpu_set_boot_info(IA64_CPU(cs), &info);
+            ia64_cpu_reset_to_boot_info(IA64_CPU(cs));
+        }
+        return;
+    }
+
     if (s->firmware_size == 0) {
         return;
     }
@@ -3147,6 +3230,10 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
     }
     if (s->alat_full && machine->smp.cpus > 1) {
         error_setg(errp, "full ALAT emulation is not SMP-safe");
+        return false;
+    }
+    if (s->realfw_path != NULL && machine->firmware != NULL) {
+        error_setg(errp, "realfw= and -bios are mutually exclusive");
         return false;
     }
     return true;
@@ -3262,6 +3349,188 @@ static bool ia64_vpc_relocate_firmware(uint8_t *image, int64_t size,
     return true;
 }
 
+/*
+ * Load a real vendor flash image (machine option realfw=) so that its end
+ * lands exactly at 4 GiB, and derive the boot entry from the architected
+ * SALE_ENTRY pointer at 4 GiB-24.  The flash window lies inside the
+ * ia64-firmware-address-space RAM region, so rom_add_blob_fixed() both
+ * installs the content and restores it on reset.  The blob is split around
+ * the NVRAM MMIO window (which deliberately overlays the image's FIT-0x1E
+ * scratch sector at priority 2): a rom_reset() write through the NVRAM ops
+ * would wipe the guest's stored variables with erased-flash bytes.
+ */
+/*
+ * The same two-bundle PAL procedure entry stub the project firmware carries
+ * at IA64_FW_PAL_PROC_ENTRY_OFF (roms/ia64-firmware/entry.S pal_proc_entry):
+ *   break.m 0x100000 ;;  br.many b0 ;;
+ * The translator services the break through ia64_pal_dispatch() when the
+ * bundle sits at a recognized PAL entry address (env->pal.pal_proc_copy_addr,
+ * seeded from IA64BootInfo.raw_pal_proc in realfw mode).
+ */
+/*
+ * POST-code port 0x80/0x81 (SAL narrates boot progress there; the codes are
+ * tabulated in plans/sdv-i2000-firmware-reference.md sec 6.5).  Logged on
+ * change only, so a code re-written in a wait loop cannot flood the log.
+ */
+static uint64_t ia64_realfw_post_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+
+    return s->realfw_post_last >> (addr * 8);
+}
+
+static void ia64_realfw_post_write(void *opaque, hwaddr addr, uint64_t val,
+                                   unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+    uint16_t code = s->realfw_post_last;
+
+    if (size == 2 && addr == 0) {
+        code = val;
+    } else {
+        code &= ~(0xff << (addr * 8));
+        code |= (val & 0xff) << (addr * 8);
+    }
+    if (code != s->realfw_post_last) {
+        s->realfw_post_last = code;
+        qemu_log("ia64-realfw: POST %02x%02x\n", code >> 8, code & 0xff);
+    }
+}
+
+static const MemoryRegionOps ia64_realfw_post_ops = {
+    .read = ia64_realfw_post_read,
+    .write = ia64_realfw_post_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 2,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static uint64_t ia64_realfw_sac_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+    uint64_t val = 0;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        val |= (uint64_t)s->realfw_sac_data[addr + i] << (i * 8);
+    }
+    if (addr <= IA64_REALFW_SAC_BOOT_SEM &&
+        addr + size > IA64_REALFW_SAC_BOOT_SEM) {
+        /* Boot semaphore: granted, holder id 0 (the BSP's LID.id). */
+        val |= 0x80ULL << ((IA64_REALFW_SAC_BOOT_SEM - addr) * 8);
+    }
+    qemu_log_mask(LOG_UNIMP, "ia64-realfw: SAC read  +%04x/%u = 0x%" PRIx64
+                  "\n", (unsigned)addr, size, val);
+    return val;
+}
+
+static void ia64_realfw_sac_write(void *opaque, hwaddr addr, uint64_t val,
+                                  unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        s->realfw_sac_data[addr + i] = val >> (i * 8);
+    }
+    qemu_log_mask(LOG_UNIMP, "ia64-realfw: SAC write +%04x/%u = 0x%" PRIx64
+                  "\n", (unsigned)addr, size, val);
+}
+
+static const MemoryRegionOps ia64_realfw_sac_ops = {
+    .read = ia64_realfw_sac_read,
+    .write = ia64_realfw_sac_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 8,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
+                                         MemoryRegion *pci_io)
+{
+    s->realfw_sac_data = g_malloc0(IA64_REALFW_SAC_SIZE);
+    memory_region_init_io(&s->realfw_sac_mmio, OBJECT(s),
+                          &ia64_realfw_sac_ops, s, "ia64-realfw.sac",
+                          IA64_REALFW_SAC_SIZE);
+    memory_region_add_subregion(get_system_memory(), IA64_REALFW_SAC_BASE,
+                                &s->realfw_sac_mmio);
+    memory_region_init_io(&s->realfw_post_io, OBJECT(s),
+                          &ia64_realfw_post_ops, s, "ia64-realfw.post", 2);
+    memory_region_add_subregion(pci_io, 0x80, &s->realfw_post_io);
+}
+
+static const uint8_t ia64_realfw_pal_stub[32] = {
+    0x0a, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+    0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x08, 0x00, 0x80, 0x00,
+};
+
+static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
+{
+    g_autofree uint8_t *image = NULL;
+    gsize image_size = 0;
+    GError *gerr = NULL;
+    uint64_t base, fit_ptr, sale_ptr;
+    char fit_sig[8];
+
+    if (!g_file_get_contents(s->realfw_path, (gchar **)&image,
+                             &image_size, &gerr)) {
+        error_setg(errp, "failed to read realfw image '%s': %s",
+                   s->realfw_path, gerr->message);
+        g_error_free(gerr);
+        return false;
+    }
+    if (image_size == 0 || image_size > IA64_REALFW_MAX_SIZE ||
+        (image_size & 0xffff) != 0) {
+        error_setg(errp, "realfw image '%s' must be a whole number of "
+                   "64 KiB flash blocks, at most 4 MiB", s->realfw_path);
+        return false;
+    }
+    base = IA64_REALFW_WINDOW_END - image_size;
+
+    fit_ptr = ldq_le_p(image + (IA64_REALFW_PTR_FIT - base)) &
+              IA64_REALFW_PTR_ADDR_MASK;
+    sale_ptr = ldq_le_p(image + (IA64_REALFW_PTR_SALE - base)) &
+               IA64_REALFW_PTR_ADDR_MASK;
+    if (fit_ptr < base || fit_ptr + sizeof(fit_sig) > IA64_REALFW_WINDOW_END ||
+        sale_ptr < base || sale_ptr >= IA64_REALFW_WINDOW_END) {
+        error_setg(errp, "realfw image '%s': reset pointer block does not "
+                   "point into the image (FIT 0x%" PRIx64 ", SALE_ENTRY "
+                   "0x%" PRIx64 ")", s->realfw_path, fit_ptr, sale_ptr);
+        return false;
+    }
+    memcpy(fit_sig, image + (fit_ptr - base), sizeof(fit_sig));
+    if (memcmp(fit_sig, "_FIT_   ", sizeof(fit_sig)) != 0) {
+        error_setg(errp, "realfw image '%s': no _FIT_ signature at the "
+                   "FIT pointer target 0x%" PRIx64, s->realfw_path, fit_ptr);
+        return false;
+    }
+
+    if (base < IA64_NVRAM_BASE &&
+        base + image_size > IA64_NVRAM_BASE + IA64_NVRAM_SIZE) {
+        rom_add_blob_fixed("ia64-realfw-low", image,
+                           IA64_NVRAM_BASE - base, base);
+        rom_add_blob_fixed("ia64-realfw-high",
+                           image + (IA64_NVRAM_BASE + IA64_NVRAM_SIZE - base),
+                           base + image_size -
+                           (IA64_NVRAM_BASE + IA64_NVRAM_SIZE),
+                           IA64_NVRAM_BASE + IA64_NVRAM_SIZE);
+    } else {
+        rom_add_blob_fixed("ia64-realfw", image, image_size, base);
+    }
+
+    rom_add_blob_fixed("ia64-realfw-palstub", ia64_realfw_pal_stub,
+                       sizeof(ia64_realfw_pal_stub),
+                       IA64_REALFW_PAL_STUB_BASE);
+
+    s->realfw_base = base;
+    s->realfw_entry = sale_ptr;
+    /* No project firmware image: machine_done must not parse a PE plabel. */
+    s->firmware_size = 0;
+    return true;
+}
+
 static bool ia64_vpc_load_firmware(IA64VpcMachineState *s,
                                    MachineState *machine, Error **errp)
 {
@@ -3269,6 +3538,10 @@ static bool ia64_vpc_load_firmware(IA64VpcMachineState *s,
     const char *firmware = machine->firmware;
     Error *local_err = NULL;
     int64_t firmware_size;
+
+    if (s->realfw_path != NULL) {
+        return ia64_vpc_load_realfw(s, errp);
+    }
 
     if (firmware == NULL) {
         /*
@@ -3441,6 +3714,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     pci_bus_set_slot_reserved_mask(pci_bus, 1U << 0);
     pci_io = pci_bus->address_space_io;
     ia64_vpc_init_acpi_pm(s, iosapic, pci_io);
+    if (s->realfw_path != NULL) {
+        ia64_vpc_init_realfw_devices(s, pci_io);
+    }
 
     /*
      * Early IA-64 kernel debuggers predate the ACPI DBGP table and drive a
@@ -3677,6 +3953,7 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
     g_free(s->nvram_path);
     g_free(s->nvram_resolved_path);
     g_free(s->vga_model);
+    g_free(s->realfw_path);
 }
 
 static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
@@ -3778,6 +4055,14 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                   ia64_vpc_set_firmware_console);
     object_class_property_set_description(oc, "firmware-console",
         "Set firmware HCDP primary console to 'serial' or 'vga'");
+    object_class_property_add_str(oc, "realfw",
+                                  ia64_vpc_get_realfw,
+                                  ia64_vpc_set_realfw);
+    object_class_property_set_description(oc, "realfw",
+        "Path to a real vendor flash image (e.g. the HP i2000 bios130.BIN) "
+        "to map ending at 4 GiB and enter at its architected SALE_ENTRY "
+        "pointer with synthesized PALE_RESET exit state, instead of the "
+        "project firmware (plans/phase5-real-firmware-boot.md)");
     object_class_property_add_str(oc, "nvram",
                                   ia64_vpc_get_nvram,
                                   ia64_vpc_set_nvram);

@@ -6,6 +6,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "hw/ia64/ia64_pci.h"
 #include "hw/pci/pci_host.h"
 #include "hw/pci/pci.h"
@@ -59,6 +60,7 @@ static uint64_t ia64_pci_sparse_io_read(void *opaque, hwaddr addr,
     IA64PCIState *s = opaque;
     hwaddr port = ia64_pci_sparse_io_port(addr + IA64_PCI_IO_SPARSE_SKIP);
     hwaddr dense = ia64_pci_dense_io_addr(port);
+    uint64_t val;
 
     if (port >= IA64_PCI_IO_SIZE || port + size > IA64_PCI_IO_SIZE) {
         return ~0ULL;
@@ -66,17 +68,24 @@ static uint64_t ia64_pci_sparse_io_read(void *opaque, hwaddr addr,
 
     switch (size) {
     case 1:
-        return address_space_ldub(&s->pci_io_as, dense,
-                                  MEMTXATTRS_UNSPECIFIED, NULL);
+        val = address_space_ldub(&s->pci_io_as, dense,
+                                 MEMTXATTRS_UNSPECIFIED, NULL);
+        break;
     case 2:
-        return address_space_lduw_le(&s->pci_io_as, dense,
-                                     MEMTXATTRS_UNSPECIFIED, NULL);
-    case 4:
-        return address_space_ldl_le(&s->pci_io_as, dense,
+        val = address_space_lduw_le(&s->pci_io_as, dense,
                                     MEMTXATTRS_UNSPECIFIED, NULL);
+        break;
+    case 4:
+        val = address_space_ldl_le(&s->pci_io_as, dense,
+                                   MEMTXATTRS_UNSPECIFIED, NULL);
+        break;
     default:
-        return ~0ULL;
+        val = ~0ULL;
+        break;
     }
+    qemu_log_mask(LOG_UNIMP, "ia64-io: in%u  0x%04x = 0x%" PRIx64 "\n",
+                  size * 8, (unsigned)port, val);
+    return val;
 }
 
 static void ia64_pci_sparse_io_write(void *opaque, hwaddr addr, uint64_t data,
@@ -90,6 +99,8 @@ static void ia64_pci_sparse_io_write(void *opaque, hwaddr addr, uint64_t data,
         return;
     }
 
+    qemu_log_mask(LOG_UNIMP, "ia64-io: out%u 0x%04x = 0x%" PRIx64 "\n",
+                  size * 8, (unsigned)port, data);
     switch (size) {
     case 1:
         address_space_stb(&s->pci_io_as, dense, data,

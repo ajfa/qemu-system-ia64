@@ -754,6 +754,58 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
     }
     cpu->boot_info_pending = false;
 
+    if (info->raw_entry) {
+        /*
+         * Architected PALE_RESET exit state (SDM Vol.2 rev 1.1 sec 11.2.2)
+         * for a healthy normal cold boot, synthesized so real SAL firmware
+         * can be entered at SALE_ENTRY without running real PAL_A/PAL_B
+         * (plans/phase5-real-firmware-boot.md sec 3).  reset_hold has just
+         * zeroed the whole env; only the non-zero pieces are set here.
+         *
+         * PSR.bn = 1 selects bank 1 for GR16-31.  Both banks are zero at
+         * this point, so setting the bit without a bank swap is consistent,
+         * and the bank-1 GR20 state parameter (function RESET) is 0 anyway.
+         */
+        env->psr = IA64_PSR_BN;
+        env->ip = info->firmware_entry;
+        /* All 96 stacked registers accessible: CFM.sof = 96, rest 0. */
+        env->cfm_sof = IA64_STACKED_GR_COUNT;
+        env->rse.rse_invalid = 0;
+        /*
+         * PTA is architecturally undefined here, but PTA.size below 15 is a
+         * reserved encoding even with ve=0 (same reasoning as the synthetic
+         * path below) — encode the minimal valid dont-care.
+         */
+        env->cr_pta = 15ULL << 2;
+        env->gr[IA64_SALE_GR_PROC_ID] = info->raw_proc_id;
+        env->gr[IA64_SALE_GR_PAL_PROC] = info->raw_pal_proc;
+        env->gr[IA64_SALE_GR_PAL_RETURN] = info->raw_pal_auth;
+        /* Keep the physical stacked file coherent with the virtual view
+         * (rse_bol = 0, no rotation: GR32+n maps to rse_pgr[n]). */
+        env->rse.rse_pgr[IA64_SALE_GR_PROC_ID - IA64_SALE_GR_FROM_PAL] =
+            info->raw_proc_id;
+        env->rse.rse_pgr[IA64_SALE_GR_PAL_PROC - IA64_SALE_GR_FROM_PAL] =
+            info->raw_pal_proc;
+        env->rse.rse_pgr[IA64_SALE_GR_PAL_RETURN - IA64_SALE_GR_FROM_PAL] =
+            info->raw_pal_auth;
+        /*
+         * Recognize the machine-planted PAL stub as a PAL procedure entry so
+         * its break instruction dispatches into the PAL emulation
+         * (ia64_is_pal_proc_break checks pal_proc_copy_addr).
+         */
+        if (info->raw_pal_proc != 0) {
+            env->pal.pal_proc_copy_valid = true;
+            env->pal.pal_proc_copy_addr = info->raw_pal_proc;
+        }
+        env->interrupt.pal_halt_wake = info->powered_off;
+        env->ar_fpsr = IA64_FPSR_DEFAULT;
+        set_float_rounding_mode(float_round_nearest_even, &env->fp.fp_status);
+        set_flush_to_zero(false, &env->fp.fp_status);
+        set_flush_inputs_to_zero(false, &env->fp.fp_status);
+        set_default_nan_mode(false, &env->fp.fp_status);
+        return;
+    }
+
     env->psr = 0;
     env->ip = info->firmware_entry;
     env->br[IA64_BR_RETURN_LINK] = info->firmware_entry;

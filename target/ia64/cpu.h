@@ -542,6 +542,18 @@ typedef enum IA64PalGeneralRegisterIndex {
     IA64_PAL_GR_ARG3 = 31,
 } IA64PalGeneralRegisterIndex;
 
+/*
+ * PALE_RESET exit state registers seen by SALE_ENTRY (SDM Vol.2 rev 1.1
+ * sec 11.2.2): the first stacked registers carry the hand-off values.
+ */
+typedef enum IA64SaleEntryRegisterIndex {
+    IA64_SALE_GR_FROM_PAL = 32,   /* 0 = entered from PALE_RESET */
+    IA64_SALE_GR_PROC_ID = 33,    /* geographically significant id */
+    IA64_SALE_GR_PAL_PROC = 34,   /* PAL procedure call address */
+    IA64_SALE_GR_SELF_TEST = 35,  /* self-test state parameter */
+    IA64_SALE_GR_PAL_RETURN = 36, /* PAL return / auth proc address */
+} IA64SaleEntryRegisterIndex;
+
 typedef enum IA64FirmwareDebugRegisterIndex {
     IA64_FW_DEBUG_GR_HANDLER = 16,
     IA64_FW_DEBUG_GR_EXCEPTION = 16,
@@ -1631,6 +1643,20 @@ typedef struct IA64BootInfo {
      */
     uint64_t fw_cpu_assist_base;
     bool powered_off;
+    /*
+     * Real-firmware entry (machine realfw mode): instead of the project
+     * firmware's synthetic entry state, enter at firmware_entry with the
+     * architected PALE_RESET exit state for a healthy normal cold boot
+     * (SDM Vol.2 rev 1.1 sec 11.2.2): GR20 = SALE_ENTRY state parameter
+     * (function RESET = 0), GR32 = 0 (entered from PALE_RESET),
+     * GR33 = geographic processor id, GR34 = PAL_PROC call address,
+     * GR35 = self-test state (0 = healthy), GR36 = PAL auth proc address,
+     * CFM.sof = 96, AR.RSC = 0, PSR = {bn=1}, DCR = 0.
+     */
+    bool raw_entry;
+    uint64_t raw_proc_id;   /* GR33 */
+    uint64_t raw_pal_proc;  /* GR34 */
+    uint64_t raw_pal_auth;  /* GR36 */
 } IA64BootInfo;
 
 struct ArchCPU {
