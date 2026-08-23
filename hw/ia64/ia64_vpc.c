@@ -36,6 +36,8 @@
 #include "hw/acpi/acpi.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_bus.h"
+#include "hw/pci/pci_device.h"
+#include "hw/pci/pci_host.h"
 #include "net/net.h"
 #include "hw/isa/isa.h"
 #include "hw/rtc/mc146818rtc.h"
@@ -424,8 +426,13 @@ struct IA64VpcMachineState {
     uint64_t realfw_base;
     MemoryRegion realfw_post_io;
     MemoryRegion realfw_sac_mmio;
+    MemoryRegion realfw_cfg_io;
     uint8_t *realfw_sac_data;
     uint16_t realfw_post_last;
+    uint32_t realfw_config_address;
+    /* 460GX chipset config space: bus CBN devices, 8 fns x 256 bytes. */
+    uint8_t *realfw_chipset_cfg;
+    PCIBus *realfw_pci_bus;
     char *vga_model;
     bool alat_full;
 
@@ -3445,6 +3452,204 @@ static const MemoryRegionOps ia64_realfw_sac_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+/*
+ * 460GX CF8/CFC configuration space (realfw mode).  Bus CBN (reset 0)
+ * carries the chipset's own devices (SSDM Table 2-1): dev 00h/01h SAC,
+ * 04h SDC, 05h/06h Memory Card A/B (MAC; SPD EEPROMs tunnel through its
+ * higher functions over I2C), dev 10h the CBN-programming device.  The
+ * public SSDM documents none of the platform-setup register offsets
+ * (plans/460gx-config-space-notes.md), so the model is a write-store/
+ * read-back scratch per function with the empirically required specials:
+ * Memory Card A claims presence with a MAC ID, dev 10h reg 40h is the CBN.
+ * Accesses to non-chipset device numbers forward to the QEMU PCI bus.
+ */
+static const uint8_t ia64_realfw_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
+                                                    0x10 };
+#define IA64_REALFW_CFG_FN_SIZE   256
+#define IA64_REALFW_CFG_DEV_SIZE  (8 * IA64_REALFW_CFG_FN_SIZE)
+#define IA64_REALFW_CFG_SIZE      \
+    (ARRAY_SIZE(ia64_realfw_chipset_devs) * IA64_REALFW_CFG_DEV_SIZE)
+#define IA64_REALFW_CBN_DEV       0x10
+#define IA64_REALFW_CBN_REG       0x40
+
+/*
+ * SPD EEPROM served through the MAC's I2C pass-through: firmware writes the
+ * DIMM's I2C address (0x54..0x57, bit 7 = read) into the SAC IIADR register
+ * (dev 00h fn 0 reg 0x68), then config reads of Memory Card fn 2/3 return
+ * the addressed EEPROM's bytes at the register offset (observed protocol,
+ * plans/phase5-real-firmware-boot.md sec 5.5; register naming per
+ * plans/460gx-config-space-notes.md).  One image serves all four DIMMs:
+ * 256 MB registered SDRAM (32Mx4 devices: 13 row / 10 column address bits,
+ * 4 banks, 1 module rank, x72 ECC) - 4 x 256 MB = 1 GiB on Memory Card A.
+ */
+#define IA64_REALFW_SAC_IIADR_REG 0x68
+static const uint8_t ia64_realfw_spd[64] = {
+    [0] = 128,    /* bytes written by manufacturer */
+    [1] = 8,      /* log2 of EEPROM size (256 bytes) */
+    [2] = 4,      /* memory type: SDRAM */
+    [3] = 13,     /* row address bits */
+    [4] = 10,     /* column address bits */
+    [5] = 1,      /* module rows (ranks) */
+    [6] = 72,     /* module data width low */
+    [8] = 1,      /* interface level: LVTTL */
+    [9] = 0xa0,   /* cycle time 10 ns (PC100) */
+    [11] = 2,     /* ECC */
+    [12] = 0x82,  /* refresh: self-refresh, 15.6 us */
+    [13] = 4,     /* primary SDRAM device width x4 */
+    [17] = 4,     /* banks per SDRAM device */
+    [18] = 4,     /* CAS latencies supported */
+    [31] = 0x40,  /* module rank density: 256 MB */
+};
+
+static uint8_t *ia64_realfw_chipset_cfg(IA64VpcMachineState *s,
+                                        uint8_t bus, uint8_t dev, uint8_t fn)
+{
+    uint8_t cbn = s->realfw_chipset_cfg[(ARRAY_SIZE(ia64_realfw_chipset_devs)
+                                         - 1) * IA64_REALFW_CFG_DEV_SIZE +
+                                        IA64_REALFW_CBN_REG];
+    unsigned i;
+
+    /* Dev 10h is always on bus 0; the rest live on bus CBN. */
+    if (bus == 0 && dev == IA64_REALFW_CBN_DEV) {
+        dev = IA64_REALFW_CBN_DEV;
+    } else if (bus != cbn) {
+        return NULL;
+    }
+    for (i = 0; i < ARRAY_SIZE(ia64_realfw_chipset_devs); i++) {
+        if (ia64_realfw_chipset_devs[i] == dev) {
+            return s->realfw_chipset_cfg + i * IA64_REALFW_CFG_DEV_SIZE +
+                   fn * IA64_REALFW_CFG_FN_SIZE;
+        }
+    }
+    return NULL;
+}
+
+static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+    uint32_t cf8 = s->realfw_config_address;
+    uint8_t bus = cf8 >> 16, dev = (cf8 >> 11) & 0x1f, fn = (cf8 >> 8) & 7;
+    unsigned reg = (cf8 & 0xfc) | (addr & 3);
+    uint8_t *cfg;
+    uint64_t val = 0;
+    unsigned i;
+
+    if (addr < 4) {
+        return s->realfw_config_address >> (addr * 8);
+    }
+    if (!(cf8 & 0x80000000)) {
+        return (1ULL << (size * 8)) - 1;
+    }
+    cfg = ia64_realfw_chipset_cfg(s, bus, dev, fn);
+    if (cfg != NULL && dev == 0x05 && (fn == 2 || fn == 3)) {
+        uint8_t iiadr = ia64_realfw_chipset_cfg(s, 0, 0, 0)
+                        [IA64_REALFW_SAC_IIADR_REG];
+        bool row0 = ia64_realfw_chipset_cfg(s, 0, 0x05, 4)[0x48] == 1 &&
+                    ia64_realfw_chipset_cfg(s, 0, 0x05, 5)[0x48] == 0 &&
+                    ia64_realfw_chipset_cfg(s, 0, 0x05, 6)[0x48] == 0 &&
+                    ia64_realfw_chipset_cfg(s, 0, 0x05, 7)[0x48] == 0;
+
+        /*
+         * MAC I2C pass-through: serve the addressed DIMM's SPD EEPROM.
+         * The card carries 4 rows x 4 DIMMs (row select = one-hot in
+         * fn 4..7 reg 0x48); only row 0 is populated - 4 x 256 MB = 1 GiB.
+         */
+        if ((iiadr & 0xfc) == 0xd4 && row0) {
+            for (i = 0; i < size; i++) {
+                unsigned off = (reg + i) & 0xff;
+
+                val |= (uint64_t)(off < sizeof(ia64_realfw_spd)
+                                  ? ia64_realfw_spd[off] : 0) << (i * 8);
+            }
+        }
+    } else if (cfg != NULL) {
+        for (i = 0; i < size; i++) {
+            val |= (uint64_t)cfg[(reg + i) & 0xff] << (i * 8);
+        }
+    } else {
+        PCIDevice *pci_dev = pci_find_device(s->realfw_pci_bus, bus,
+                                             PCI_DEVFN(dev, fn));
+
+        val = pci_dev != NULL
+            ? pci_host_config_read_common(pci_dev, reg,
+                                          pci_config_size(pci_dev), size)
+            : (1ULL << (size * 8)) - 1;
+    }
+    qemu_log_mask(LOG_UNIMP, "ia64-realfw: cfg%c read  %02x:%02x.%x "
+                  "@0x%02x/%u = 0x%" PRIx64 "\n", cfg ? '*' : ' ',
+                  bus, dev, fn, reg, size, val);
+    return val;
+}
+
+static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
+                                  unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+    uint32_t cf8 = s->realfw_config_address;
+    uint8_t bus = cf8 >> 16, dev = (cf8 >> 11) & 0x1f, fn = (cf8 >> 8) & 7;
+    unsigned reg = (cf8 & 0xfc) | (addr & 3);
+    uint8_t *cfg;
+    unsigned i;
+
+    if (addr < 4) {
+        for (i = 0; i < size && addr + i < 4; i++) {
+            s->realfw_config_address &= ~(0xffU << ((addr + i) * 8));
+            s->realfw_config_address |= ((data >> (i * 8)) & 0xff) <<
+                                        ((addr + i) * 8);
+        }
+        return;
+    }
+    if (!(cf8 & 0x80000000)) {
+        return;
+    }
+    cfg = ia64_realfw_chipset_cfg(s, bus, dev, fn);
+    qemu_log_mask(LOG_UNIMP, "ia64-realfw: cfg%c write %02x:%02x.%x "
+                  "@0x%02x/%u = 0x%" PRIx64 "\n", cfg ? '*' : ' ',
+                  bus, dev, fn, reg, size, data);
+    if (cfg != NULL) {
+        for (i = 0; i < size; i++) {
+            cfg[(reg + i) & 0xff] = data >> (i * 8);
+        }
+        return;
+    }
+    {
+        PCIDevice *pci_dev = pci_find_device(s->realfw_pci_bus, bus,
+                                             PCI_DEVFN(dev, fn));
+
+        if (pci_dev != NULL) {
+            pci_host_config_write_common(pci_dev, reg,
+                                         pci_config_size(pci_dev),
+                                         data, size);
+        }
+    }
+}
+
+static const MemoryRegionOps ia64_realfw_cfg_ops = {
+    .read = ia64_realfw_cfg_read,
+    .write = ia64_realfw_cfg_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+    .impl.min_access_size = 1,
+    .impl.max_access_size = 4,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s)
+{
+    uint8_t *mac_a;
+
+    s->realfw_chipset_cfg = g_malloc0(IA64_REALFW_CFG_SIZE);
+    /*
+     * Memory Card A (dev 05h fn 0) claims presence with the MAC identity
+     * (8086:84E3, rev B-1 = 03h; pci.ids, flagged unverified in
+     * plans/460gx-config-space-notes.md).  Memory Card B stays absent.
+     */
+    mac_a = ia64_realfw_chipset_cfg(s, 0, 0x05, 0);
+    stw_le_p(mac_a + PCI_VENDOR_ID, 0x8086);
+    stw_le_p(mac_a + PCI_DEVICE_ID, 0x84e3);
+    mac_a[PCI_REVISION_ID] = 0x03;
+}
+
 static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
                                          MemoryRegion *pci_io)
 {
@@ -3457,6 +3662,10 @@ static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
     memory_region_init_io(&s->realfw_post_io, OBJECT(s),
                           &ia64_realfw_post_ops, s, "ia64-realfw.post", 2);
     memory_region_add_subregion(pci_io, 0x80, &s->realfw_post_io);
+    ia64_vpc_init_realfw_chipset_cfg(s);
+    memory_region_init_io(&s->realfw_cfg_io, OBJECT(s),
+                          &ia64_realfw_cfg_ops, s, "ia64-realfw.cfg", 8);
+    memory_region_add_subregion(pci_io, 0xcf8, &s->realfw_cfg_io);
 }
 
 static const uint8_t ia64_realfw_pal_stub[32] = {
@@ -3715,6 +3924,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     pci_io = pci_bus->address_space_io;
     ia64_vpc_init_acpi_pm(s, iosapic, pci_io);
     if (s->realfw_path != NULL) {
+        s->realfw_pci_bus = pci_bus;
         ia64_vpc_init_realfw_devices(s, pci_io);
     }
 
