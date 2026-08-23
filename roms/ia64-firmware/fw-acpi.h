@@ -20,8 +20,12 @@
 #define IA64_CPUID3_FAMILY_SHIFT     24U
 #define IA64_CPUID3_FAMILY_MASK      0xffU
 #define IA64_CPUID3_FAMILY_MERCED    0x07U
-#define SAL_TR_VIRTUAL_ADDRESS       0x0000000000000000ULL
-#define SAL_TR_PAGE_SHIFT            22U
+/*
+ * ITR(0) as published in the SST: a 1 MB translation at the image shadow
+ * base - exactly the firmware-context identity window the emulator models
+ * (rework D11; the OS purges this register with these VA/size values).
+ */
+#define SAL_TR_PAGE_SHIFT            20U
 #define SAL_TR_ENCODED_PAGE_SIZE     (SAL_TR_PAGE_SHIFT << 2)
 
 typedef struct {

@@ -390,21 +390,35 @@ static void efi_init_sal_system_table(void)
     }
     mSalSystemTable.SalAVersion = 0x0100;
     mSalSystemTable.SalBVersion = 0x0100;
-    for (i = 0; i < sizeof(mSalSystemTable.OemId); i++) {
-        mSalSystemTable.OemId[i] = 0;
+    /*
+     * Reference-platform identity per personality (rework D13): the SDV /
+     * i2000 for the 460GX profile, the SR870BH2 for the E8870 profile.
+     */
+    {
+        const char *oem = "Intel Corp.";
+        const char *product = fw_platform_is_460gx() ? "SDV460GX"
+                                                     : "SR870BH2";
+
+        for (i = 0; i < sizeof(mSalSystemTable.OemId); i++) {
+            mSalSystemTable.OemId[i] = oem[i] != 0 ? (UINT8)oem[i] : 0;
+            if (oem[i] == 0) {
+                break;
+            }
+        }
+        for (; i < sizeof(mSalSystemTable.OemId); i++) {
+            mSalSystemTable.OemId[i] = 0;
+        }
+        for (i = 0; i < sizeof(mSalSystemTable.ProductId); i++) {
+            mSalSystemTable.ProductId[i] =
+                product[i] != 0 ? (UINT8)product[i] : 0;
+            if (product[i] == 0) {
+                break;
+            }
+        }
+        for (; i < sizeof(mSalSystemTable.ProductId); i++) {
+            mSalSystemTable.ProductId[i] = 0;
+        }
     }
-    mSalSystemTable.OemId[0] = 'Q';
-    mSalSystemTable.OemId[1] = 'E';
-    mSalSystemTable.OemId[2] = 'M';
-    mSalSystemTable.OemId[3] = 'U';
-    for (i = 0; i < sizeof(mSalSystemTable.ProductId); i++) {
-        mSalSystemTable.ProductId[i] = 0;
-    }
-    mSalSystemTable.ProductId[0] = 'I';
-    mSalSystemTable.ProductId[1] = 'A';
-    mSalSystemTable.ProductId[2] = '-';
-    mSalSystemTable.ProductId[3] = '6';
-    mSalSystemTable.ProductId[4] = '4';
     for (i = 0; i < sizeof(mSalSystemTable.Reserved1); i++) {
         mSalSystemTable.Reserved1[i] = 0;
     }
@@ -477,7 +491,9 @@ static void efi_init_sal_system_table(void)
         md[3].Length = (UINT32)((image_end - image_base) >> 12);
     }
     mSalSystemTable.PlatformFeatures.Type = 2;
-    mSalSystemTable.PlatformFeatures.Features = 0;
+    /* SAL spec platform-feature bit 0: bus lock, a 460GX-era feature. */
+    mSalSystemTable.PlatformFeatures.Features =
+        fw_platform_is_460gx() ? 0x01U : 0x00U;
     for (i = 0; i < sizeof(mSalSystemTable.PlatformFeatures.Reserved); i++) {
         mSalSystemTable.PlatformFeatures.Reserved[i] = 0;
     }
@@ -488,8 +504,13 @@ static void efi_init_sal_system_table(void)
          i < sizeof(mSalSystemTable.TranslationRegister.Reserved0); i++) {
         mSalSystemTable.TranslationRegister.Reserved0[i] = 0;
     }
+    /*
+     * Truthful ITR(0) (rework D11): name the firmware's actual identity
+     * mapping - the 1 MB window at the image shadow base - instead of a
+     * fictitious VA 0.
+     */
     mSalSystemTable.TranslationRegister.VirtualAddress =
-        SAL_TR_VIRTUAL_ADDRESS;
+        (UINT64)(UINTN)__fw_image_start;
     mSalSystemTable.TranslationRegister.EncodedPageSize =
         SAL_TR_ENCODED_PAGE_SIZE;
     mSalSystemTable.TranslationRegister.Reserved1 = 0;
@@ -1010,7 +1031,7 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mSalSystemTable.TranslationRegister.RegisterType != 0 ||
         mSalSystemTable.TranslationRegister.RegisterNumber != 0 ||
         mSalSystemTable.TranslationRegister.VirtualAddress !=
-            SAL_TR_VIRTUAL_ADDRESS ||
+            (UINT64)(UINTN)__fw_image_start ||
         mSalSystemTable.TranslationRegister.EncodedPageSize !=
             SAL_TR_ENCODED_PAGE_SIZE ||
         mSalSystemTable.TranslationRegister.Reserved1 != 0 ||

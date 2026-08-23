@@ -142,6 +142,7 @@
      ~(IA64_FW_LOW_RAM_ALIGN - 1ULL))
 #define IA64_FW_CPU_ASSIST_BASE_FOR(ram_size) \
     (IA64_FW_LOW_RAM_END(ram_size) - IA64_FW_CPU_ASSIST_SIZE)
+/* 4 MB aligned: the SST names a truthful 4 MB ITR(0) over the shadow. */
 #define IA64_FW_IMAGE_BASE_FOR(ram_size) \
     ((IA64_FW_CPU_ASSIST_BASE_FOR(ram_size) - IA64_FW_ACPI_REGION_SIZE - \
       IA64_FW_IMAGE_SPAN) & ~IA64_U64(0xfffff))
