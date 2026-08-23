@@ -859,13 +859,22 @@ static void pal_mc_resume(CPUIA64State *env)
 static void pal_mc_register_mem(CPUIA64State *env)
 {
     uint64_t address = env->gr[IA64_PAL_GR_ARG1];
+    /*
+     * The min-state save area must be uncacheable (SDM Vol.2 sec 11.3.2.3,
+     * PAL_MC_REGISTER_MEM), so firmware passes its physical address with
+     * bit 63 - the uncacheable memory-attribute bit - set, exactly as it
+     * does for PAL_COPY_PAL.  Mask that attribute off before checking the
+     * 512-byte alignment; rejecting a bit-63-set address is wrong and
+     * real SDV firmware fatal-spins on the INVALID_ARGUMENT status.
+     */
+    uint64_t pa = address & ~PAL_COPY_TARGET_CACHE_ATTR;
 
-    if ((address >> 63) != 0 || (address & 0x1ff) != 0 ||
+    if ((pa & 0x1ff) != 0 ||
         env->gr[IA64_PAL_GR_ARG2] != 0 || env->gr[IA64_PAL_GR_ARG3] != 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->pal.pal_mc_save_addr = address;
+        env->pal.pal_mc_save_addr = pa;
     }
     env->gr[IA64_PAL_GR_RESULT1] = 0;
     env->gr[IA64_PAL_GR_RESULT2] = 0;

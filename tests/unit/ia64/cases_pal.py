@@ -1480,6 +1480,17 @@ test_pal_mc_register_mem = require_registers("pal_mc_register_mem",
     {"ip": 0x60, "r28": PAL_MC_REGISTER_MEM, "r8": 0,
      "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
 
+# The min-state save area must be uncacheable (SDM Vol.2 11.3.2.3), so
+# firmware passes the address with bit 63 (the uncacheable attribute) set.
+# That bit is masked, not rejected: a 512-byte-aligned address with bit 63
+# set must succeed.  Real SDV firmware fatal-spins on the wrong -2 status.
+test_pal_mc_register_mem_uncacheable = require_registers(
+    "pal_mc_register_mem_uncacheable",
+    pal_call_program(PAL_MC_REGISTER_MEM,
+                     [(29, (1 << 63) | 0x3ff84000), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_MC_REGISTER_MEM, "r8": 0,
+     "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+
 test_pal_cache_line_init = require_registers("pal_cache_line_init",
     pal_call_program(PAL_CACHE_LINE_INIT,
                      [(29, 0x4000), (30, 0x1234), (31, 0)]),
@@ -1626,6 +1637,7 @@ CASE_NAMES = (
     'pal_mc_error_info_structure_empty',
     'pal_mc_expected',
     'pal_mc_register_mem',
+    'pal_mc_register_mem_uncacheable',
     'pal_mc_resume_bad_args',
     'pal_mc_resume_bad_save_ptr',
     'pal_mc_resume_new_context_no_context',
