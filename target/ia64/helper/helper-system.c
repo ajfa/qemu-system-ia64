@@ -1,10 +1,40 @@
 /* IA-64 TCG helper ABI adapters for system-register operations. */
 
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "arch/arch.h"
 #include "arch/system.h"
+
+/*
+ * Full-speed IP trace (debug facility).  When the environment variable
+ * IA64_IPTRACE lists bundle IPs (comma-separated hex), the translator plants
+ * a call to this helper on those bundles; it logs the IP and a general
+ * register slice under -d int.  This is the way to observe deep firmware
+ * boot states that the gdbstub cannot reach in reasonable time (a software
+ * or hardware breakpoint slows the boot to POST 0x98 past several minutes).
+ * Zero overhead when IA64_IPTRACE is unset.  Note bundle IPs are 16-byte
+ * aligned; an objdump slot label like ...c9c is slot 2 of bundle ...c90.
+ */
+void helper_ia64_ip_trace(CPUIA64State *env)
+{
+    g_autoptr(GString) s = g_string_new(NULL);
+    unsigned r;
+
+    g_string_append_printf(s, "ia64-IPTRACE ip=%016" PRIx64 " b0=%016" PRIx64,
+                           env->ip, env->br[IA64_BR_RETURN_LINK]);
+    /* Return values (r8-r11), status/index (r28-r31), first stacked
+     * registers (r32-r43) - the slice needed to follow firmware call
+     * results and frame arguments. */
+    for (r = 8; r <= 11; r++) {
+        g_string_append_printf(s, " r%u=%016" PRIx64, r, env->gr[r]);
+    }
+    for (r = 28; r <= 43; r++) {
+        g_string_append_printf(s, " r%u=%016" PRIx64, r, env->gr[r]);
+    }
+    qemu_log_mask(CPU_LOG_INT, "%s\n", s->str);
+}
 
 uint64_t helper_read_pr(CPUIA64State *env)
 {

@@ -2862,6 +2862,33 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         return;
     }
 
+    {
+        /* Full-speed IP trace (debug).  IA64_IPTRACE=hex[,hex...] lists
+         * bundle IPs to log when executed (helper_ia64_ip_trace). */
+        static bool tgt_read;
+        static uint64_t tgt[8];
+        static int ntgt;
+
+        if (!tgt_read) {
+            const char *e = getenv("IA64_IPTRACE");
+
+            tgt_read = true;
+            while (e && *e && ntgt < 8) {
+                tgt[ntgt++] = strtoull(e, (char **)&e, 16);
+                if (*e == ',') {
+                    e++;
+                }
+            }
+        }
+        for (int i = 0; i < ntgt; i++) {
+            if (bundle_ip == tgt[i]) {
+                tcg_gen_movi_i64(cpu_ip, bundle_ip);
+                gen_helper_ia64_ip_trace(tcg_env);
+                break;
+            }
+        }
+    }
+
     low = translator_ldq_end(ctx->env, db, bundle_ip, MO_LE);
     high = translator_ldq_end(ctx->env, db, bundle_ip + 8, MO_LE);
     template_code = ia64_bundle_template_code(low);
