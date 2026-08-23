@@ -973,6 +973,58 @@ static void test_nvram_commit_and_restart(void)
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
+/*
+ * realfw mode (phase 5): a synthetic 128 KiB flash image with the
+ * architected reset pointer block must be mapped ending at 4 GiB, and the
+ * machine-planted PAL stub must appear at its fixed home.  The image places
+ * a _FIT_ header and points SALE_ENTRY at an arbitrary bundle inside the
+ * image; qtest never runs the CPU, so mapping and content are the contract
+ * under test.
+ */
+static void test_realfw_flash_window(void)
+{
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *path = NULL;
+    g_autofree char *quoted_path = NULL;
+    g_autofree uint8_t *image = NULL;
+    const uint64_t image_size = 0x20000;
+    const uint64_t base = 0x100000000ULL - image_size;
+    const uint64_t fit_addr = base + 0x10000;
+    const uint64_t sale_addr = base + 0x8000;
+    g_autoptr(GError) error = NULL;
+    QTestState *qts;
+
+    tmpdir = g_dir_make_tmp("ia64-vpc-realfw-XXXXXX", &error);
+    g_assert_no_error(error);
+    path = g_build_filename(tmpdir, "flash.bin", NULL);
+    quoted_path = g_shell_quote(path);
+
+    image = g_malloc0(image_size);
+    memset(image, 0xff, image_size);
+    memcpy(image + (fit_addr - base), "_FIT_   ", 8);
+    stq_le_p(image + (fit_addr - base) + 8, 0x0100000000000010ULL);
+    stq_le_p(image + image_size - 32, (1ULL << 63) | fit_addr);
+    stq_le_p(image + image_size - 24, (1ULL << 63) | sale_addr);
+    stq_le_p(image + (sale_addr - base), 0x0123456789abcdefULL);
+    g_assert_true(g_file_set_contents(path, (char *)image, image_size,
+                                      &error));
+
+    qts = qtest_initf("-machine ia64-vpc,realfw=%s -m 256M -S", quoted_path);
+    /* Flash content is visible at its physical home. */
+    g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
+    g_assert_cmphex(qtest_readq(qts, fit_addr) & 0xffffffffffffULL, ==,
+                    0x5f5449465fULL | ((uint64_t)' ' << 40));
+    /* Reset pointer block at 4 GiB-32/-24. */
+    g_assert_cmphex(qtest_readq(qts, 0x100000000ULL - 24), ==,
+                    (1ULL << 63) | sale_addr);
+    /* The PAL stub's break bundle sits at its fixed home. */
+    g_assert_cmphex(qtest_readq(qts, 0xff100000ULL), !=, 0);
+    qtest_quit(qts);
+
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
 static void ia64_qpci_init(QGenericPCIBus *gbus, QTestState *qts)
 {
     qpci_init_generic(gbus, qts, NULL, false);
@@ -3235,6 +3287,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/savevm/platform-state",
                    test_savevm_restores_platform_state);
     qtest_add_func("/ia64-vpc/agp/gxb", test_agp_gxb);
+    qtest_add_func("/ia64-vpc/realfw/flash-window", test_realfw_flash_window);
     qtest_add_func("/ia64-vpc/agp/off", test_agp_off);
     qtest_add_func("/ia64-vpc/ati/config-ids", test_ati_config_ids);
     qtest_add_func("/ia64-vpc/ati/pll-regfile", test_ati_pll_regfile);
