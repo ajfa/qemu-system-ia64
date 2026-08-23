@@ -478,11 +478,22 @@ static void pal_copy_info(CPUIA64State *env)
 
 static void pal_copy_pal(CPUIA64State *env)
 {
+    /*
+     * The relocated PAL procedure entry: break.m 0x100000 ;; br.many b0.
+     * This must match roms/ia64-firmware/entry.S pal_proc_entry byte for
+     * byte.  The return branch is br.many (a plain branch, no register-stack
+     * pop), NOT br.ret: the PAL static-procedure convention runs in the
+     * caller's frame without an alloc, so the caller reaches PAL_PROC by a
+     * plain branch with the return address in b0.  A br.ret here would pop a
+     * frame that was never pushed and corrupt the caller's stacked
+     * registers (observed with real SDV firmware, which branches to the
+     * relocated entry via br.few; see plans/phase5-real-firmware-boot.md).
+     */
     static const uint64_t pal_proc_words[] = {
         0x000002000000000aULL,
         0x0004000000000200ULL,
-        0x0000000100000010ULL,
-        0x0084000080000200ULL,
+        0x0000000100000011ULL,
+        0x0080000800000200ULL,
     };
     uint64_t target_addr = pal_stacked_arg(env, 0);
     uint64_t alloc_size = pal_stacked_arg(env, 1);

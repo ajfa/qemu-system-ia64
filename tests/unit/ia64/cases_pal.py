@@ -134,6 +134,7 @@ from .encoding import (
     br_call,
     br_call_indirect,
     br_cond,
+    br_indirect,
     br_ret,
     bundle_words,
     cmp_ltu_unc,
@@ -1265,6 +1266,45 @@ test_pal_copy_pal_ap_entry_callable = require_registers(
      "r9": PAL_VERSION_VALUE, "r10": PAL_VERSION_VALUE, "r11": 0},
     entry=0x10)
 
+# Regression: the relocated PAL entry that pal_copy_pal writes must return via
+# a plain branch (br.many b0), not br.ret.  Real firmware reaches a static PAL
+# procedure at the relocated entry by a *plain* branch (br) without pushing a
+# frame; a br.ret in the stub would pop the caller's frame and corrupt its
+# stacked registers (observed with real SDV firmware).  This test relocates
+# PAL, invokes PAL_VERSION at the relocated entry via a *plain* branch (b1,
+# with the return in b0), and then reads the relocated return bundle back: its
+# first word must be the br.many encoding (0x0000000100000011), never the
+# br.ret encoding (0x0000000100000010).  See target/ia64/arch/pal.c
+# pal_copy_pal and plans/phase5-real-firmware-boot.md.
+test_pal_copy_pal_relocated_entry_plain_branch = require_registers(
+    "pal_copy_pal_relocated_entry_plain_branch", [
+        # Relocate PAL to PAL_COPY_TARGET (standard stacked call).
+        (0x10, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
+        (0x20, *movl_mlx(28, PAL_COPY_PAL)),
+        (0x30, *movl_mlx(33, PAL_COPY_TARGET | (1 << 63))),
+        (0x40, *movl_mlx(34, PAL_COPY_BUFFER_SIZE)),
+        (0x50, *movl_mlx(35, 0)),
+        (0x60, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x60, PAL_PROC_ENTRY)),
+        # Invoke PAL_VERSION at the relocated entry via a plain branch: b1 is
+        # the entry, b0 is the return (0xd0); no frame is pushed.
+        (0x70, *movl_mlx(28, PAL_VERSION)),
+        (0x80, *movl_mlx(7, PAL_COPY_TARGET)),
+        (0x90, 0x00, nop_m(), mov_b_gr(1, 7), nop_i()),
+        (0xa0, *movl_mlx(7, 0xd0)),
+        (0xb0, 0x00, nop_m(), mov_b_gr(0, 7), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_indirect(1)),
+        # Read the relocated return bundle back and check it is br.many.
+        (0xd0, *movl_mlx(5, PAL_COPY_TARGET + 0x10)),
+        (0xe0, 0x00, ld8(6, 5), nop_i(), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ],
+    {"ip": 0xf0, "r6": 0x0000000100000011, "r28": PAL_VERSION, "r8": 0,
+     "r9": PAL_VERSION_VALUE, "r10": PAL_VERSION_VALUE, "r11": 0},
+    entry=0x10)
+
 test_pal_copy_pal_bad_alloc = require_registers("pal_copy_pal_bad_alloc",
     pal_stacked_call_program(PAL_COPY_PAL,
                              [PAL_COPY_TARGET, PAL_COPY_BUFFER_SIZE - 1, 0]),
@@ -1530,6 +1570,7 @@ CASE_NAMES = (
     'pal_copy_pal_bad_processor',
     'pal_copy_pal_ap_entry_callable',
     'pal_copy_pal_entry_callable',
+    'pal_copy_pal_relocated_entry_plain_branch',
     'pal_debug_info',
     'pal_debug_info_reserved_arg',
     'pal_fixed_addr',
