@@ -95,6 +95,20 @@
  */
 #define IA64_REALFW_PAL_STUB_BASE IA64_U64(0x00000000ff100000)
 /*
+ * Capture IVT (realfw mode): a 32 KiB-aligned interruption vector table
+ * whose every bundle is a branch-to-self, planted in firmware scratch RAM
+ * and pointed to by cr.iva in the synthesized SALE_ENTRY entry state.  Real
+ * PAL provides an IVT before entering SAL (SDM 11.2.2); we skip PAL, so
+ * without this any firmware fault would vector to physical 0 (no handler)
+ * and, under the bare-loader ic=0/iva=0 rule, storm.  With it, a fatal fault
+ * instead freezes at IVT_BASE + vector with all GRs, the RSE frame, ISR and
+ * IIPA preserved - the fault class is the offset from IVT_BASE, and the
+ * interrupted state is inspectable via the monitor.  See
+ * plans/phase5-real-firmware-boot.md.
+ */
+#define IA64_REALFW_IVT_BASE      IA64_U64(0x00000000ff300000)
+#define IA64_REALFW_IVT_SIZE      0x8000
+/*
  * 460GX chipset CSR scratch below the IOAPIC window.  SAL_B's first act
  * after PAL_PROC_GET_FEATURES is a BSP-arbitration handshake here: clear
  * bit 7 at +0xCB0, poll +0xCC0 until bit 7 sets, then compare the low
@@ -3175,6 +3189,7 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
             IA64BootInfo info = {
                 .firmware_base = s->realfw_base,
                 .firmware_entry = s->realfw_entry,
+                .iva = IA64_REALFW_IVT_BASE,
                 .raw_entry = true,
                 .raw_proc_id = cs->cpu_index,
                 /*
@@ -3732,6 +3747,22 @@ static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
     rom_add_blob_fixed("ia64-realfw-palstub", ia64_realfw_pal_stub,
                        sizeof(ia64_realfw_pal_stub),
                        IA64_REALFW_PAL_STUB_BASE);
+
+    {
+        /* Branch-to-self bundle (MIB: nop.m; nop.i; br.few 0). */
+        static const uint8_t self_branch[16] = {
+            0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+        };
+        g_autofree uint8_t *ivt = g_malloc(IA64_REALFW_IVT_SIZE);
+        size_t off;
+
+        for (off = 0; off < IA64_REALFW_IVT_SIZE; off += sizeof(self_branch)) {
+            memcpy(ivt + off, self_branch, sizeof(self_branch));
+        }
+        rom_add_blob_fixed("ia64-realfw-ivt", ivt, IA64_REALFW_IVT_SIZE,
+                           IA64_REALFW_IVT_BASE);
+    }
 
     s->realfw_base = base;
     s->realfw_entry = sale_ptr;

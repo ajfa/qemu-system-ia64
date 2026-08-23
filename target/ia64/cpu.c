@@ -768,6 +768,12 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
          */
         env->psr = IA64_PSR_BN;
         env->ip = info->firmware_entry;
+        /*
+         * IVA points at the capture IVT (SDM 11.2.2 has PAL provide an IVT
+         * before SALE_ENTRY; we synthesize one).  Zero keeps the historical
+         * no-IVT behavior for callers that leave it unset.
+         */
+        env->cr_iva = info->iva;
         /* All 96 stacked registers accessible: CFM.sof = 96, rest 0. */
         env->cfm_sof = IA64_STACKED_GR_COUNT;
         env->rse.rse_invalid = 0;
