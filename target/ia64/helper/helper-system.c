@@ -57,6 +57,8 @@ void helper_ia32_ip_trace(CPUIA64State *env)
     static unsigned post;      /* IA32_IPTRACE_POST: log this many IPs after hit */
     static bool post_read;
     static unsigned post_max;
+    static uint32_t below;     /* IA32_IPTRACE_BELOW: hit on first ip < this */
+    static bool below_read;
     uint32_t ip = (uint32_t)env->ip;
 
     if (!trigger_read) {
@@ -71,8 +73,14 @@ void helper_ia32_ip_trace(CPUIA64State *env)
         post_max = e ? (unsigned)strtoul(e, NULL, 0) : 0;
         post_read = true;
     }
+    if (!below_read) {
+        const char *e = getenv("IA32_IPTRACE_BELOW");
+
+        below = e ? (uint32_t)strtoul(e, NULL, 16) : 0;
+        below_read = true;
+    }
     ring[pos++ & (ARRAY_SIZE(ring) - 1)] = ip;
-    if (trigger && ip == trigger && !dumped) {
+    if (((trigger && ip == trigger) || (below && ip < below)) && !dumped) {
         g_autoptr(GString) s = g_string_new(NULL);
         unsigned n = pos < ARRAY_SIZE(ring) ? pos : ARRAY_SIZE(ring);
         unsigned i;
