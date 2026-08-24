@@ -3478,7 +3478,9 @@ static const MemoryRegionOps ia64_realfw_sac_ops = {
  * Memory Card A claims presence with a MAC ID, dev 10h reg 40h is the CBN.
  * Accesses to non-chipset device numbers forward to the QEMU PCI bus.
  */
+#define IA64_REALFW_IFB_DEV       0x1e
 static const uint8_t ia64_realfw_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
+                                                    IA64_REALFW_IFB_DEV,
                                                     0x10 };
 #define IA64_REALFW_CFG_FN_SIZE   256
 #define IA64_REALFW_CFG_DEV_SIZE  (8 * IA64_REALFW_CFG_FN_SIZE)
@@ -3663,6 +3665,26 @@ static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s)
     stw_le_p(mac_a + PCI_VENDOR_ID, 0x8086);
     stw_le_p(mac_a + PCI_DEVICE_ID, 0x84e3);
     mac_a[PCI_REVISION_ID] = 0x03;
+
+    /*
+     * 460GX I/O & Firmware Bridge (IFB), the platform south bridge.  Real
+     * SDV firmware's QuickBoot scans bus 0 for it (8086:7600) and fatal-spins
+     * if absent (POST 0x98).  Model Function 0's identity per the 460GX SSDM
+     * §11: multi-function ISA/LPC bridge.  The other functions (fn1 IDE,
+     * fn2 USB, fn3 SMBus) and the config-register behaviours are added as the
+     * firmware exercises them; the rest of the config space is read/write
+     * scratch (see ia64_realfw_cfg_read/write).
+     */
+    {
+        uint8_t *ifb0 = ia64_realfw_chipset_cfg(s, 0, IA64_REALFW_IFB_DEV, 0);
+
+        stw_le_p(ifb0 + PCI_VENDOR_ID, 0x8086);          /* VID */
+        stw_le_p(ifb0 + PCI_DEVICE_ID, 0x7600);          /* DID = IFB */
+        ifb0[PCI_REVISION_ID] = 0x03;                    /* RID (stepping) */
+        ifb0[PCI_CLASS_PROG] = 0x00;                     /* CLASSC 060100h: */
+        stw_le_p(ifb0 + PCI_CLASS_DEVICE, 0x0601);       /*   ISA bridge */
+        ifb0[PCI_HEADER_TYPE] = 0x80;                    /* multi-function */
+    }
 }
 
 static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
