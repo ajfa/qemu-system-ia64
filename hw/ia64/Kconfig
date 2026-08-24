@@ -7,6 +7,8 @@ config IA64_VPC
     select ISA_BUS
     select PFLASH_CFI01
     select MC146818RTC
+    select I8259
+    select I8254
     select ACPI
     imply IA64_VPC_GRAPHICS
     imply IA64_VPC_NETWORK

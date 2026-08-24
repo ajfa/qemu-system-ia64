@@ -42,6 +42,8 @@
 #include "net/net.h"
 #include "hw/isa/isa.h"
 #include "hw/rtc/mc146818rtc.h"
+#include "hw/intc/i8259.h"
+#include "hw/timer/i8254.h"
 #include "hw/usb/hcd-uhci.h"
 #include "hw/usb/usb.h"
 #include "hw/ia64/ia64_loader.h"
@@ -445,6 +447,7 @@ struct IA64VpcMachineState {
     MemoryRegion realfw_cfg_io;
     MemoryRegion realfw_ide_data[2];
     MemoryRegion realfw_ide_cmd[2];
+    qemu_irq realfw_extint;
     uint8_t *realfw_sac_data;
     uint16_t realfw_post_last;
     uint32_t realfw_config_address;
@@ -2314,6 +2317,15 @@ static uint64_t ia64_vpc_lsapic_read(void *opaque, hwaddr addr,
     (void)opaque;
 
     if (addr == IA64_PIB_INTA_OFFSET && size == 1) {
+        /*
+         * Interrupt-acknowledge byte.  When an ExtINT is delivered (IVR reads
+         * 0) firmware reads this location to run the INTA cycle against the
+         * external 8259 PIC and obtain the real 8-bit vector.  The PIC exists
+         * only in realfw mode; without it the cycle reads back 0.
+         */
+        if (isa_pic != NULL) {
+            return pic_read_irq(isa_pic);
+        }
         return 0;
     }
     return 0;
@@ -3759,6 +3771,42 @@ static void ia64_vpc_map_realfw_legacy_ide(IA64VpcMachineState *s,
     }
 }
 
+/*
+ * The master 8259's INTR line, delivered to the boot processor as an IA-64
+ * ExtINT (SAPIC vector 0): while the PIC asserts INTR the processor takes an
+ * external interrupt whose IVR reads 0, and firmware then fetches the real
+ * 8-bit vector from the PIC itself.  ExtINT is level-sensitive, so forward the
+ * line state directly -- de-asserting it (for example when firmware masks the
+ * PIC before draining IVR) withdraws the pending vector 0.
+ */
+static void ia64_vpc_realfw_extint(void *opaque, int n, int level)
+{
+    (void)opaque;
+    (void)n;
+    if (first_cpu != NULL) {
+        ia64_sapic_set_extint(first_cpu, level);
+    }
+}
+
+/*
+ * Real SDV firmware uses the legacy PC-AT timer tick during POST: it programs
+ * the 8254 PIT channel 0 for a periodic square wave and routes its IRQ 0
+ * through the 8259 PIC, whose INTR reaches the processor as an ExtINT (above).
+ * The machine is otherwise IOSAPIC-only, so instantiate the pair only in
+ * realfw mode and wire PIT OUT0 straight into 8259 IR0, independent of the
+ * IOSAPIC-backed ISA IRQ inputs the rest of the machine uses.
+ */
+static void ia64_vpc_init_realfw_pic(IA64VpcMachineState *s, ISABus *isa_bus)
+{
+    qemu_irq *pic_irqs;
+
+    s->realfw_extint = qemu_allocate_irq(ia64_vpc_realfw_extint, s, 0);
+    pic_irqs = i8259_init(isa_bus, s->realfw_extint);
+    /* PIT OUT0 -> 8259 IR0 (isa_irq = -1 selects the explicit alt_irq). */
+    i8254_pit_init(isa_bus, 0x40, -1, pic_irqs[0]);
+    g_free(pic_irqs);
+}
+
 static const uint8_t ia64_realfw_pal_stub[32] = {
     0x0a, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
@@ -4127,6 +4175,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
     }
     isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
+    if (s->realfw_path != NULL) {
+        ia64_vpc_init_realfw_pic(s, isa_bus);
+    }
     /*
      * The real-time clock is the standard MC146818 CMOS device at legacy
      * ports 0x70/0x71 (IRQ 8), as the i2000/SDV Super-I/O provides - the

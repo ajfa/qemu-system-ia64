@@ -1051,6 +1051,30 @@ static void test_realfw_flash_window(void)
     g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE +
                                 ia64_sparse_io_offset(0x1f7)), ==, 0x00);
 
+    /*
+     * realfw mode wires an 8259 PIC for the legacy timer tick, reachable
+     * through the ExtINT interrupt-acknowledge byte in the Processor
+     * Interrupt Block (lsapic base + 0x1e0000).  Initialize the PIC with
+     * vector base 8, as the firmware does; with no IRQ pending the INTA cycle
+     * returns the master's spurious vector (base | 7 = 0x0f), confirming the
+     * ack byte drives the 8259.  The live IRQ-0 -> vector-8 -> ExtINT path is
+     * exercised by booting the real firmware.
+     */
+    {
+        const uint64_t pic_cmd =
+            IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x20);
+        const uint64_t pic_data =
+            IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x21);
+        const uint64_t inta = 0xfefe0000ULL;
+
+        qtest_writeb(qts, pic_cmd, 0x11);   /* ICW1: cascade, ICW4 to follow */
+        qtest_writeb(qts, pic_data, 0x08);  /* ICW2: interrupt vector base 8 */
+        qtest_writeb(qts, pic_data, 0x04);  /* ICW3: slave cascaded on IR2 */
+        qtest_writeb(qts, pic_data, 0x01);  /* ICW4: 8086 mode */
+
+        g_assert_cmphex(qtest_readb(qts, inta), ==, 0x0f);
+    }
+
     qtest_quit(qts);
 
     g_assert_cmpint(g_unlink(path), ==, 0);
