@@ -1486,6 +1486,47 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
                               sizeof(vector));
 }
 
+/*
+ * Real-firmware video-ROM shadow.  The synthetic INT10 ROM above is a passive
+ * 2 KiB image for Windows guests, which read the video BIOS through the PCI ROM
+ * BAR (VideoPortGetRomImage).  The vendor SDV firmware instead POSTs the video
+ * card's option ROM the legacy PC-AT way: shadow it to 0xC0000 and call
+ * C000:0003.  Its shadow copy reads through the ROM BAR, and our ROM-BAR model
+ * is not faithful enough for that read to capture the whole image -- only the
+ * header lands, so the option ROM's entry jump (e.g. std vgabios `jmp 0x55C3`)
+ * runs the CPU into empty shadow and hangs POST at ~0xc6.
+ *
+ * Place the device's complete expansion ROM at the 0xC0000 shadow directly so
+ * the firmware finds a whole, valid option ROM to POST in place.  This is the
+ * realfw analogue of install_int10 (the synthetic stub is skipped in realfw).
+ */
+static void ia64_vpc_install_realfw_video_rom(IA64VpcMachineState *s)
+{
+    PCIDevice *pci_dev = s->vga_dev;
+    const uint8_t *rom;
+    uint64_t rom_size;
+    uint32_t declared;
+
+    if (pci_dev == NULL ||
+        pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
+        return;
+    }
+    rom = memory_region_get_ram_ptr(&pci_dev->rom);
+    rom_size = memory_region_size(&pci_dev->rom);
+    if (rom == NULL || rom_size < 0x400 || rom[0] != 0x55 || rom[1] != 0xaa) {
+        return;
+    }
+    declared = (uint32_t)rom[2] * 512U;
+    if (declared == 0 || declared > rom_size) {
+        declared = rom_size;
+    }
+    /* The legacy video-ROM window is C0000h-CFFFFh (64 KiB). */
+    if (declared > 0x10000) {
+        declared = 0x10000;
+    }
+    cpu_physical_memory_write(IA64_INT10_ROM_BASE, rom, declared);
+}
+
 static void ia64_vpc_reset_int10(IA64VpcMachineState *s)
 {
     memset(&s->int10_request, 0, sizeof(s->int10_request));
@@ -3187,8 +3228,20 @@ static void ia64_vpc_reset(void *opaque)
     acpi_pm_tmr_reset(&s->acpi_regs);
     acpi_gpe_reset(&s->acpi_regs);
 #ifdef CONFIG_IA64_VPC_GRAPHICS
+    /*
+     * The synthetic INT10 ROM is a passive 2 KiB image for Windows guests that
+     * read the video BIOS through the PCI ROM BAR.  In realfw mode the vendor
+     * SDV firmware instead POSTs the video device's own expansion ROM the
+     * legacy way (shadow to 0xC0000, call C000:0003); a 2 KiB stub whose entry
+     * jumps into its (absent) body then runs the CPU away into empty shadow, so
+     * shadow the device's complete option ROM there instead.
+     */
     if (s->vga_dev != NULL) {
-        ia64_vpc_reset_int10(s);
+        if (s->realfw_path != NULL) {
+            ia64_vpc_install_realfw_video_rom(s);
+        } else {
+            ia64_vpc_reset_int10(s);
+        }
     }
 #endif
 }
