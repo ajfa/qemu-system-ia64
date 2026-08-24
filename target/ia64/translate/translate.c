@@ -962,6 +962,7 @@ static IA64AlignAcMode ia64_align_ac_mode(const Ia64Instruction *insn)
 static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
                                                bool always_fault,
                                                IA64AlignAcMode ac_mode,
+                                               bool is_write,
                                                TCGLabel *fault)
 {
     TCGv_i64 tmp;
@@ -976,21 +977,44 @@ static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
     tcg_gen_andi_i64(tmp, addr, size - 1);
     tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, ok);
 
-    if (always_fault || ac_mode == IA64_ALIGN_AC_SET) {
-        /* Misaligned always faults (PSR.ac set, or an alignment-required op). */
+    if (always_fault) {
+        /*
+         * Semaphore and ld16/st16 misalignment faults regardless of PSR.ac and
+         * of the memory attribute (SDM Vol.2 4.5), so it is never exempt.
+         */
         tcg_gen_br(fault);
     } else {
-        if (ac_mode == IA64_ALIGN_AC_RUNTIME) {
-            tcg_gen_andi_i64(tmp, cpu_psr, IA64_PSR_AC);
-            tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, fault);
-        }
         /*
-         * PSR.ac clear: a misaligned access still faults if it crosses a
-         * 4 KiB page boundary (SDM Vol.2 5.5.4).
+         * A misaligned ordinary reference faults when PSR.ac is set, or (with
+         * PSR.ac clear) when it crosses a 4 KiB page boundary (SDM Vol.2 5.5.4).
+         * But unaligned references to the I/O port space -- and more generally
+         * to any non-writeback-cacheable (UC/MMIO) target the platform
+         * decomposes -- are NOT detected as alignment faults, even with PSR.ac
+         * set (SDM Vol.2, "I/O port space"; PSR.ac == EFLAG.ac).  So gather the
+         * fault conditions and, only when one holds, consult the runtime
+         * exemption before actually faulting -- keeping the aligned and
+         * PSR.ac-clear-in-page fast paths free of the probing helper.
          */
-        tcg_gen_andi_i64(tmp, addr, 0xfff);
-        tcg_gen_addi_i64(tmp, tmp, size - 1);
-        tcg_gen_brcondi_i64(TCG_COND_GTU, tmp, 0xfff, fault);
+        TCGLabel *maybe_fault = gen_new_label();
+
+        if (ac_mode == IA64_ALIGN_AC_SET) {
+            tcg_gen_br(maybe_fault);
+        } else {
+            if (ac_mode == IA64_ALIGN_AC_RUNTIME) {
+                tcg_gen_andi_i64(tmp, cpu_psr, IA64_PSR_AC);
+                tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, maybe_fault);
+            }
+            tcg_gen_andi_i64(tmp, addr, 0xfff);
+            tcg_gen_addi_i64(tmp, tmp, size - 1);
+            tcg_gen_brcondi_i64(TCG_COND_GTU, tmp, 0xfff, maybe_fault);
+            tcg_gen_br(ok);
+        }
+
+        gen_set_label(maybe_fault);
+        gen_helper_ia64_alignment_exempt(tmp, tcg_env, addr,
+                                         tcg_constant_i32(size),
+                                         tcg_constant_i32(is_write));
+        tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, fault);
     }
 
     gen_set_label(ok);
@@ -1011,7 +1035,8 @@ void ia64_gen_check_alignment_access(const Ia64Instruction *insn,
     fault = gen_new_label();
     ok = gen_new_label();
     ia64_gen_branch_if_alignment_fault(addr, size, always_fault,
-                                       ia64_align_ac_mode(insn), fault);
+                                       ia64_align_ac_mode(insn),
+                                       (isr_access & IA64_ISR_W) != 0, fault);
     tcg_gen_br(ok);
 
     gen_set_label(fault);

@@ -477,6 +477,31 @@ test_unaligned_store_reports_unaligned_when_mapped = require_registers(
         "r15": IA64_ISR_W,
     }, entry=0x10)
 
+# The I/O-port / MMIO exemption: SDM Vol.2 ("I/O port space") states that
+# unaligned references to non-writeback (UC) space are NOT detected as
+# Unaligned Data Reference faults, even with PSR.ac set -- PSR.ac is the
+# architectural alias of EFLAG.ac, and the SDV firmware deliberately runs POST
+# with PSR.ac set while issuing an unaligned 32-bit OUT to a sparse I/O port.
+# Both a misaligned store to and load from a UC page must complete silently and
+# round-trip, reaching the non-fault terminal rather than the Unaligned vector.
+test_unaligned_uc_reference_exempt_from_ac_fault = require_registers(
+    "unaligned_uc_reference_exempt_from_ac_fault", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000,
+                           pte_flags=DTR_PTE_UC),
+        (0x70, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT | IA64_PSR_AC)),
+        (0x80, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x90, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(3, HIGH_TR_BASE + 0x201)),
+        (0xb0, *movl_mlx(4, 0x1122334455667788)),
+        (0xc0, 0x00, st8(3, 4), nop_i(), nop_i()),
+        (0xd0, 0x00, ld8(6, 3), nop_i(), nop_i()),
+        (0xe0, 0x10, nop_m(), nop_i(), br_cond(0xe0, 0xe0)),
+    ], {
+        "ip": 0xe0,
+        "exception": IA64_EXCP_NONE,
+        "r6": 0x1122334455667788,
+    }, entry=0x10)
+
 # A control-speculative load defers instead of faulting, and the deferred
 # exception indicator is written to the target register.
 test_natpage_speculative_load_defers = require_registers(
@@ -6526,6 +6551,7 @@ CASE_NAMES = (
     'natpage_unaligned_store_outranks_unaligned',
     'natpage_xchg_raises_nat_consumption',
     'unaligned_store_reports_unaligned_when_mapped',
+    'unaligned_uc_reference_exempt_from_ac_fault',
     'mov_cr_ifa_uda_merced',
     'mov_pkr_duplicate_key_invalidates_old_slot',
     'mov_pkr_indexed_decode',
