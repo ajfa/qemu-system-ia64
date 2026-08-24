@@ -41,7 +41,8 @@ static int ia64_ia32_iptrace_enabled = -1;
     tcg_gen_st_i64(tcg_constant_i64((uint32_t)(pc)), tcg_env,             \
                    offsetof(CPUIA64State, ip));                           \
     if (ia64_ia32_iptrace_enabled < 0) {                                  \
-        ia64_ia32_iptrace_enabled = getenv("IA32_IPTRACE") != NULL;       \
+        ia64_ia32_iptrace_enabled = getenv("IA32_IPTRACE") != NULL ||     \
+                                    getenv("IA32_IPTRACE_BELOW") != NULL;  \
     }                                                                     \
     if (ia64_ia32_iptrace_enabled) {                                      \
         gen_helper_ia32_ip_trace(tcg_env);                               \

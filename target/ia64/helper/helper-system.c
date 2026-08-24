@@ -104,10 +104,16 @@ void helper_ia32_ip_trace(CPUIA64State *env)
             g_string_append_printf(s, "%s%08x",
                                    (i % 8) ? " " : "\n  ", ring[idx]);
         }
-        qemu_log_mask(CPU_LOG_INT, "%s\n", s->str);
+        /*
+         * stderr, not the -d int log: the dump is one-shot (guarded by !dumped)
+         * plus a bounded post window, so it is rule-7-safe, and it lets this run
+         * without -d int -- which would otherwise log the post-runaway fault
+         * storm and fill the disk.
+         */
+        fprintf(stderr, "%s\n", s->str);
     } else if (dumped && post > 0) {
         post--;
-        qemu_log_mask(CPU_LOG_INT,
+        fprintf(stderr,
             "ia32-IPTRACE post ip=%08x eip=%08x cs.base=%08x esp=%08x\n",
             ip, (uint32_t)env->ia32.eip,
             (uint32_t)env->ia32.segs[R_CS].base,
