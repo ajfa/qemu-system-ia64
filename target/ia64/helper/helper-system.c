@@ -54,6 +54,9 @@ void helper_ia32_ip_trace(CPUIA64State *env)
     static uint32_t trigger;
     static bool trigger_read;
     static bool dumped;
+    static unsigned post;      /* IA32_IPTRACE_POST: log this many IPs after hit */
+    static bool post_read;
+    static unsigned post_max;
     uint32_t ip = (uint32_t)env->ip;
 
     if (!trigger_read) {
@@ -62,6 +65,12 @@ void helper_ia32_ip_trace(CPUIA64State *env)
         trigger = e ? (uint32_t)strtoul(e, NULL, 16) : 0;
         trigger_read = true;
     }
+    if (!post_read) {
+        const char *e = getenv("IA32_IPTRACE_POST");
+
+        post_max = e ? (unsigned)strtoul(e, NULL, 0) : 0;
+        post_read = true;
+    }
     ring[pos++ & (ARRAY_SIZE(ring) - 1)] = ip;
     if (trigger && ip == trigger && !dumped) {
         g_autoptr(GString) s = g_string_new(NULL);
@@ -69,10 +78,15 @@ void helper_ia32_ip_trace(CPUIA64State *env)
         unsigned i;
 
         dumped = true;
+        post = post_max;
         g_string_append_printf(s,
-            "ia32-IPTRACE hit ip=%08x eax=%08x ecx=%08x edx=%08x ebx=%08x "
+            "ia32-IPTRACE hit ip=%08x eip=%08x cs.sel=%04x cs.base=%08x "
+            "eax=%08x ecx=%08x edx=%08x ebx=%08x "
             "esp=%08x ebp=%08x esi=%08x edi=%08x; preceding %u x86 IPs:",
-            ip, (uint32_t)env->ia32.regs[0], (uint32_t)env->ia32.regs[1],
+            ip, (uint32_t)env->ia32.eip,
+            (unsigned)env->ia32.segs[R_CS].selector,
+            (uint32_t)env->ia32.segs[R_CS].base,
+            (uint32_t)env->ia32.regs[0], (uint32_t)env->ia32.regs[1],
             (uint32_t)env->ia32.regs[2], (uint32_t)env->ia32.regs[3],
             (uint32_t)env->ia32.regs[4], (uint32_t)env->ia32.regs[5],
             (uint32_t)env->ia32.regs[6], (uint32_t)env->ia32.regs[7], n);
@@ -83,6 +97,13 @@ void helper_ia32_ip_trace(CPUIA64State *env)
                                    (i % 8) ? " " : "\n  ", ring[idx]);
         }
         qemu_log_mask(CPU_LOG_INT, "%s\n", s->str);
+    } else if (dumped && post > 0) {
+        post--;
+        qemu_log_mask(CPU_LOG_INT,
+            "ia32-IPTRACE post ip=%08x eip=%08x cs.base=%08x esp=%08x\n",
+            ip, (uint32_t)env->ia32.eip,
+            (uint32_t)env->ia32.segs[R_CS].base,
+            (uint32_t)env->ia32.regs[4]);
     }
 }
 
