@@ -1019,6 +1019,29 @@ static void test_realfw_flash_window(void)
                     (1ULL << 63) | sale_addr);
     /* The PAL stub's break bundle sits at its fixed home. */
     g_assert_cmphex(qtest_readq(qts, 0xff100000ULL), !=, 0);
+
+    /*
+     * The flash is a writable Intel-CFI part.  Read Device ID (0x90) exposes
+     * the JEDEC identity the SDV firmware checks: manufacturer 0x89 at byte
+     * offset 0, device 0xac (82802AB Firmware Hub) at byte offset 1.
+     */
+    qtest_writeb(qts, base, 0x90);
+    g_assert_cmphex(qtest_readb(qts, base + 0), ==, 0x89);
+    g_assert_cmphex(qtest_readb(qts, base + 1), ==, 0xac);
+
+    /*
+     * Clear Status (0x50) followed by Read Status (0x70) must leave the
+     * WSM-ready bit (0x80) set on an idle part; the firmware treats a part
+     * that reads back "not ready" here as dead.
+     */
+    qtest_writeb(qts, base, 0x50);
+    qtest_writeb(qts, base, 0x70);
+    g_assert_cmphex(qtest_readb(qts, base) & 0x80, ==, 0x80);
+
+    /* Back to Read Array (0xff): the stored content is intact. */
+    qtest_writeb(qts, base, 0xff);
+    g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
+
     qtest_quit(qts);
 
     g_assert_cmpint(g_unlink(path), ==, 0);

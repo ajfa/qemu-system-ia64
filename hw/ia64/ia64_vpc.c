@@ -29,6 +29,7 @@
 #include "hw/display/vga_regs.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
+#include "hw/block/flash.h"
 #include "hw/ide/ahci-pci.h"
 #include "hw/ide/ide-dev.h"
 #include "hw/ide/pci.h"
@@ -438,6 +439,7 @@ struct IA64VpcMachineState {
     char *realfw_path;
     uint64_t realfw_entry;
     uint64_t realfw_base;
+    PFlashCFI01 *realfw_flash;
     MemoryRegion realfw_post_io;
     MemoryRegion realfw_sac_mmio;
     MemoryRegion realfw_cfg_io;
@@ -1715,6 +1717,15 @@ static void ia64_vpc_init_nvram(IA64VpcMachineState *s)
     g_autofree char *contents = NULL;
     g_autoptr(GError) err = NULL;
     gsize length = 0;
+
+    /*
+     * In realfw mode the FIT-0x1E NVRAM sector is part of the vendor flash
+     * image, which is modelled by the pflash device (writable, in the flash
+     * itself); the synthetic NVRAM MMIO would shadow it, so skip it here.
+     */
+    if (s->realfw_path != NULL) {
+        return;
+    }
 
     memset(s->nvram_data, 0, sizeof(s->nvram_data));
     g_clear_pointer(&s->nvram_resolved_path, g_free);
@@ -3753,17 +3764,47 @@ static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
         return false;
     }
 
-    if (base < IA64_NVRAM_BASE &&
-        base + image_size > IA64_NVRAM_BASE + IA64_NVRAM_SIZE) {
-        rom_add_blob_fixed("ia64-realfw-low", image,
-                           IA64_NVRAM_BASE - base, base);
-        rom_add_blob_fixed("ia64-realfw-high",
-                           image + (IA64_NVRAM_BASE + IA64_NVRAM_SIZE - base),
-                           base + image_size -
-                           (IA64_NVRAM_BASE + IA64_NVRAM_SIZE),
-                           IA64_NVRAM_BASE + IA64_NVRAM_SIZE);
-    } else {
-        rom_add_blob_fixed("ia64-realfw", image, image_size, base);
+    /*
+     * The flash is a real Intel-CFI (command-set 0x0001) part: SDV firmware
+     * probes it during QuickBoot (write 0x50 Clear-Status, 0x70 Read-Status,
+     * read the WSM-ready bit 0x80, 0xff Read-Array) and uses it as writable
+     * non-volatile storage for EFI settings / boot config in the FIT-0x1E
+     * NVRAM sector.  Model it with pflash_cfi01 (the Intel CFI flash device)
+     * initialized from the vendor image, overlaying the firmware address
+     * space (priority above the identity RAM region) so its command interface
+     * shadows plain RAM at the flash window.  64 KiB blocks match the block
+     * size the firmware's flash descriptor uses.
+     */
+    {
+        DeviceState *dev = qdev_new(TYPE_PFLASH_CFI01);
+        MemoryRegion *flash_mr;
+
+        qdev_prop_set_uint32(dev, "num-blocks", image_size / 0x10000);
+        qdev_prop_set_uint64(dev, "sector-length", 0x10000);
+        qdev_prop_set_uint8(dev, "width", 1);
+        qdev_prop_set_bit(dev, "big-endian", 0);
+        /*
+         * JEDEC ID the firmware checks: manufacturer 0x89 (Intel), device
+         * 0xAC (82802AB Firmware Hub).  It byte-reads read-ID offset 0 for
+         * the manufacturer and offset 1 for the device, then combines them to
+         * 0xAC89.  pflash returns id0<<8|id1 at word offset 0 and id2<<8|id3
+         * at word offset 1, so a byte read of offset 0 yields id1 (hold the
+         * manufacturer there) and a byte read of offset 1 yields id3 (hold
+         * the device there).  id0 also carries the device so that a 16-bit
+         * read of offset 0 reads 0xAC89 too.
+         */
+        qdev_prop_set_uint16(dev, "id0", 0x00ac);
+        qdev_prop_set_uint16(dev, "id1", 0x0089);        /* Intel (offset 0) */
+        qdev_prop_set_uint16(dev, "id2", 0x0000);
+        qdev_prop_set_uint16(dev, "id3", 0x00ac);        /* 82802AB (offset 1) */
+        qdev_prop_set_string(dev, "name", "ia64-realfw-flash");
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+
+        s->realfw_flash = PFLASH_CFI01(dev);
+        flash_mr = pflash_cfi01_get_memory(s->realfw_flash);
+        memory_region_add_subregion_overlap(get_system_memory(), base,
+                                            flash_mr, 2);
+        memcpy(memory_region_get_ram_ptr(flash_mr), image, image_size);
     }
 
     rom_add_blob_fixed("ia64-realfw-palstub", ia64_realfw_pal_stub,
