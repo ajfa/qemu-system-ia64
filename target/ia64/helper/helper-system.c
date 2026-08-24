@@ -36,6 +36,56 @@ void helper_ia64_ip_trace(CPUIA64State *env)
     qemu_log_mask(CPU_LOG_INT, "%s\n", s->str);
 }
 
+/*
+ * Full-speed IA-32 IP trace (debug facility).  When IA32_IPTRACE=<hex> names an
+ * x86 linear IP, the translator plants a call to this helper on every x86
+ * instruction (X86_GEN_INSN_START); it keeps a ring of the most recent x86 IPs
+ * and, the first time the trigger IP executes, dumps that history plus the x86
+ * register file under -d int.  This is how to recover the control-flow path the
+ * IA-32 engine took to reach an unexpected x86 address (for example the SDV
+ * "Emult" BIOS falling into its guard HLT), which the fault-only trace
+ * (-d ia32_fault) cannot show.  Zero overhead when IA32_IPTRACE is unset (the
+ * helper is not planted).
+ */
+void helper_ia32_ip_trace(CPUIA64State *env)
+{
+    static uint32_t ring[1024];
+    static unsigned pos;
+    static uint32_t trigger;
+    static bool trigger_read;
+    static bool dumped;
+    uint32_t ip = (uint32_t)env->ip;
+
+    if (!trigger_read) {
+        const char *e = getenv("IA32_IPTRACE");
+
+        trigger = e ? (uint32_t)strtoul(e, NULL, 16) : 0;
+        trigger_read = true;
+    }
+    ring[pos++ & (ARRAY_SIZE(ring) - 1)] = ip;
+    if (trigger && ip == trigger && !dumped) {
+        g_autoptr(GString) s = g_string_new(NULL);
+        unsigned n = pos < ARRAY_SIZE(ring) ? pos : ARRAY_SIZE(ring);
+        unsigned i;
+
+        dumped = true;
+        g_string_append_printf(s,
+            "ia32-IPTRACE hit ip=%08x eax=%08x ecx=%08x edx=%08x ebx=%08x "
+            "esp=%08x ebp=%08x esi=%08x edi=%08x; preceding %u x86 IPs:",
+            ip, (uint32_t)env->ia32.regs[0], (uint32_t)env->ia32.regs[1],
+            (uint32_t)env->ia32.regs[2], (uint32_t)env->ia32.regs[3],
+            (uint32_t)env->ia32.regs[4], (uint32_t)env->ia32.regs[5],
+            (uint32_t)env->ia32.regs[6], (uint32_t)env->ia32.regs[7], n);
+        for (i = 0; i < n; i++) {
+            unsigned idx = (pos - n + i) & (ARRAY_SIZE(ring) - 1);
+
+            g_string_append_printf(s, "%s%08x",
+                                   (i % 8) ? " " : "\n  ", ring[idx]);
+        }
+        qemu_log_mask(CPU_LOG_INT, "%s\n", s->str);
+    }
+}
+
 uint64_t helper_read_pr(CPUIA64State *env)
 {
     return ia64_system_read_pr(env);
