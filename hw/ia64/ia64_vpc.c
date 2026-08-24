@@ -439,6 +439,7 @@ struct IA64VpcMachineState {
     uint64_t firmware_console;
     char *nvram_path;
     char *realfw_path;
+    char *realfw_vga_rom_path;
     uint64_t realfw_entry;
     uint64_t realfw_base;
     PFlashCFI01 *realfw_flash;
@@ -1496,23 +1497,43 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
  * header lands, so the option ROM's entry jump (e.g. std vgabios `jmp 0x55C3`)
  * runs the CPU into empty shadow and hangs POST at ~0xc6.
  *
- * Place the device's complete expansion ROM at the 0xC0000 shadow directly so
- * the firmware finds a whole, valid option ROM to POST in place.  This is the
- * realfw analogue of install_int10 (the synthetic stub is skipped in realfw).
+ * Place a complete option ROM at the 0xC0000 shadow directly so the firmware
+ * finds a whole, valid option ROM to POST in place.  This is the realfw analogue
+ * of install_int10 (the synthetic stub is skipped in realfw).  The ROM is the
+ * emulated card's own expansion ROM by default, or -- when realfw-vga-rom= names
+ * a file -- an authentic vendor card BIOS (e.g. the ATI Rage 128 Pro the SDV
+ * shipped with), so the firmware POSTs the real BIOS for accurate emulation.
  */
 static void ia64_vpc_install_realfw_video_rom(IA64VpcMachineState *s)
 {
     PCIDevice *pci_dev = s->vga_dev;
-    const uint8_t *rom;
-    uint64_t rom_size;
+    g_autofree uint8_t *file_rom = NULL;
+    const uint8_t *rom = NULL;
+    uint64_t rom_size = 0;
     uint32_t declared;
 
-    if (pci_dev == NULL ||
-        pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
-        return;
+    if (s->realfw_vga_rom_path != NULL) {
+        GError *gerr = NULL;
+        gsize len = 0;
+
+        if (!g_file_get_contents(s->realfw_vga_rom_path, (gchar **)&file_rom,
+                                 &len, &gerr)) {
+            warn_report("realfw-vga-rom '%s': %s (falling back to card ROM)",
+                        s->realfw_vga_rom_path, gerr->message);
+            g_error_free(gerr);
+        } else {
+            rom = file_rom;
+            rom_size = len;
+        }
     }
-    rom = memory_region_get_ram_ptr(&pci_dev->rom);
-    rom_size = memory_region_size(&pci_dev->rom);
+    if (file_rom == NULL) {
+        if (pci_dev == NULL ||
+            pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
+            return;
+        }
+        rom = memory_region_get_ram_ptr(&pci_dev->rom);
+        rom_size = memory_region_size(&pci_dev->rom);
+    }
     if (rom == NULL || rom_size < 0x400 || rom[0] != 0x55 || rom[1] != 0xaa) {
         return;
     }
@@ -1670,6 +1691,26 @@ static void ia64_vpc_set_realfw(Object *obj, const char *value, Error **errp)
 
     g_free(s->realfw_path);
     s->realfw_path = value[0] != '\0' ? g_strdup(value) : NULL;
+}
+
+static char *ia64_vpc_get_realfw_vga_rom(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return g_strdup(s->realfw_vga_rom_path ?: "");
+}
+
+static void ia64_vpc_set_realfw_vga_rom(Object *obj, const char *value,
+                                        Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    g_free(s->realfw_vga_rom_path);
+    s->realfw_vga_rom_path = value[0] != '\0' ? g_strdup(value) : NULL;
 }
 
 static char *ia64_vpc_get_nvram(Object *obj, Error **errp)
@@ -4522,6 +4563,14 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "to map ending at 4 GiB and enter at its architected SALE_ENTRY "
         "pointer with synthesized PALE_RESET exit state, instead of the "
         "project firmware (plans/phase5-real-firmware-boot.md)");
+    object_class_property_add_str(oc, "realfw-vga-rom",
+                                  ia64_vpc_get_realfw_vga_rom,
+                                  ia64_vpc_set_realfw_vga_rom);
+    object_class_property_set_description(oc, "realfw-vga-rom",
+        "Path to a real video-card option ROM to shadow at 0xC0000 for the "
+        "realfw video POST, instead of the emulated card's own vgabios.  Used "
+        "to run the vendor firmware against an authentic card BIOS (e.g. the "
+        "ATI Rage 128 Pro the SDV shipped with); realfw mode only.");
     object_class_property_add_str(oc, "nvram",
                                   ia64_vpc_get_nvram,
                                   ia64_vpc_set_nvram);
