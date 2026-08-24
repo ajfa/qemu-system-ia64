@@ -1841,6 +1841,32 @@ static void test_sparse_io_pm_register(void)
     qtest_quit(qts);
 }
 
+static void test_openbus_io_port(void)
+{
+    /*
+     * A legacy I/O port that no device claims floats the bus high: a byte
+     * read returns 0xff, not 0x00.  Real SDV firmware byte-reads a Super I/O
+     * device-ID register at port 0x2f (and the 0x2e index alongside it) and
+     * requires 0xff for an absent chip.  A port a device does answer keeps
+     * returning its own value.  (Sparse I/O maps consecutive ports to
+     * non-consecutive addresses, so only single-port byte reads are probed.)
+     */
+    const uint64_t sio2f = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2f);
+    const uint64_t sio2e = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2e);
+    const uint32_t pm_port = IA64_ACPI_PM_IO_BASE + IA64_ACPI_PM1_CNT_OFFSET;
+    const uint64_t pm = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(pm_port);
+    QTestState *qts = ia64_vpc_start(NULL);
+
+    g_assert_cmphex(qtest_readb(qts, sio2f), ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts, sio2e), ==, 0xff);
+
+    /* A claimed port answers its own value, never the open-bus 0xff. */
+    qtest_writew(qts, pm, 0);
+    g_assert_cmphex(qtest_readb(qts, pm), !=, 0xff);
+
+    qtest_quit(qts);
+}
+
 static bool sapic_irr_has_vector(QTestState *qts, uint8_t vector)
 {
     g_autofree char *registers = qtest_hmp(qts, "info registers");
@@ -3305,6 +3331,7 @@ int main(int argc, char **argv)
                    test_iosapic_lowest_priority);
     qtest_add_func("/ia64-vpc/iosapic/edge-rte-write-not-a-request",
                    test_iosapic_edge_rte_write_is_not_a_request);
+    qtest_add_func("/ia64-vpc/sparse-io/openbus", test_openbus_io_port);
     qtest_add_func("/ia64-vpc/sparse-io/pm-register",
                    test_sparse_io_pm_register);
     qtest_add_func("/ia64-vpc/savevm/platform-state",
