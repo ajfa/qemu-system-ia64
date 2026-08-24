@@ -443,6 +443,8 @@ struct IA64VpcMachineState {
     MemoryRegion realfw_post_io;
     MemoryRegion realfw_sac_mmio;
     MemoryRegion realfw_cfg_io;
+    MemoryRegion realfw_ide_data[2];
+    MemoryRegion realfw_ide_cmd[2];
     uint8_t *realfw_sac_data;
     uint16_t realfw_post_last;
     uint32_t realfw_config_address;
@@ -3716,6 +3718,47 @@ static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
     memory_region_add_subregion(pci_io, 0xcf8, &s->realfw_cfg_io);
 }
 
+/*
+ * Real SDV firmware drives IDE through the fixed legacy I/O ports, not the
+ * controller's PCI BARs: it polls the primary status register at 0x1f7 during
+ * drive detection and spins forever if nothing answers.  The CMD646's ATA
+ * register blocks are otherwise only reachable at firmware-assigned BAR
+ * addresses, so alias them into the legacy ranges (command block 0x1f0-0x1f7
+ * and 0x170-0x177, control block at 0x3f4/0x374 whose offset-2 register is the
+ * 0x3f6/0x376 alt-status).  With no media attached the channels report an
+ * empty bus, which the firmware reads as "no drive" and moves on.  This runs
+ * only in realfw mode; our own firmware and guests use the PCI BARs.
+ */
+static void ia64_vpc_map_realfw_legacy_ide(IA64VpcMachineState *s,
+                                           MemoryRegion *pci_io)
+{
+    PCIIDEState *ide = PCI_IDE(s->ide_dev);
+    static const struct {
+        uint16_t data_base;
+        uint16_t cmd_base;
+    } channel[2] = {
+        { 0x1f0, 0x3f4 },
+        { 0x170, 0x374 },
+    };
+    int i;
+
+    for (i = 0; i < 2; i++) {
+        g_autofree char *data_name =
+            g_strdup_printf("ia64-realfw.ide-data%d", i);
+        g_autofree char *cmd_name =
+            g_strdup_printf("ia64-realfw.ide-cmd%d", i);
+
+        memory_region_init_alias(&s->realfw_ide_data[i], OBJECT(s), data_name,
+                                 &ide->data_bar[i], 0, 8);
+        memory_region_add_subregion(pci_io, channel[i].data_base,
+                                    &s->realfw_ide_data[i]);
+        memory_region_init_alias(&s->realfw_ide_cmd[i], OBJECT(s), cmd_name,
+                                 &ide->cmd_bar[i], 0, 4);
+        memory_region_add_subregion(pci_io, channel[i].cmd_base,
+                                    &s->realfw_ide_cmd[i]);
+    }
+}
+
 static const uint8_t ia64_realfw_pal_stub[32] = {
     0x0a, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
@@ -4179,7 +4222,12 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * pci_ide_create_devs() auto-binds any if=ide media across them.
      */
 #ifdef CONFIG_IA64_VPC_STORAGE
-    if (s->ide_enabled) {
+    /*
+     * realfw mode always instantiates the controller: the SDV firmware probes
+     * a legacy IDE during POST regardless of the ide=on switch, and reaches it
+     * through the fixed legacy ports aliased below rather than the PCI BARs.
+     */
+    if (s->ide_enabled || s->realfw_path != NULL) {
         s->ide_dev = pci_new(PCI_DEVFN(0, 0), "cmd646-ide");
         qdev_prop_set_uint32(DEVICE(s->ide_dev), "secondary", 1);
         if (!pci_realize_and_unref(s->ide_dev, pci_bus, errp)) {
@@ -4187,6 +4235,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         }
         ia64_vpc_configure_pci_irq(s->ide_dev);
         pci_ide_create_devs(s->ide_dev);
+        if (s->realfw_path != NULL) {
+            ia64_vpc_map_realfw_legacy_ide(s, pci_io);
+        }
     }
 #endif
 

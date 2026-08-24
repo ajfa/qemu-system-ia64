@@ -1042,6 +1042,15 @@ static void test_realfw_flash_window(void)
     qtest_writeb(qts, base, 0xff);
     g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
 
+    /*
+     * realfw mode aliases the CMD646 register blocks onto the legacy IDE
+     * ports the SDV firmware polls.  With no media the empty primary channel
+     * reports status 0x00 (BSY clear, no drive) at port 0x1f7 -- not the
+     * open-bus 0xff that would hang the firmware's drive detection.
+     */
+    g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE +
+                                ia64_sparse_io_offset(0x1f7)), ==, 0x00);
+
     qtest_quit(qts);
 
     g_assert_cmpint(g_unlink(path), ==, 0);
