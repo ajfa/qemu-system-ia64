@@ -3756,6 +3756,18 @@ static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
                                   ? ia64_realfw_spd[off] : 0) << (i * 8);
             }
         }
+    } else if (cfg != NULL && (reg & 0xfc) == 0x30) {
+        /*
+         * The 460GX chipset functions carry no expansion ROM, so their ROM BAR
+         * (0x30) must read back 0.  The config store is a plain write/read-back
+         * cell, so without this it returns whatever the firmware last wrote --
+         * during BAR sizing that is 0xFFFFFFFE, which the firmware decodes as a
+         * 2 KiB ROM.  A real add-in card at the same dev number (our ATI video
+         * shares dev 5 with the MAC while CBN still reads 0) then has its 64 KiB
+         * video ROM sized as 2 KiB, and the next option ROM is shadowed on top
+         * of the video ROM body -- corrupting the vgabios INT10 handler.
+         */
+        val = 0;
     } else if (cfg != NULL) {
         for (i = 0; i < size; i++) {
             val |= (uint64_t)cfg[(reg + i) & 0xff] << (i * 8);
