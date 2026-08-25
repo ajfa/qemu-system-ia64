@@ -97,8 +97,9 @@ jobs:
 
       - name: Build QEMU + firmware
         run: |
+          set -o pipefail
           export PATH=/usr/lib64/ccache:$PATH
-          ninja -C build
+          ninja -C build 2>&1 | tee build/ninja-build.log
           ccache -s
 
       - name: Run ia64 regression gate
@@ -149,7 +150,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux-test-logs
-          path: build/meson-logs/
+          path: |
+            build/meson-logs/
+            build/ninja-build.log
+          if-no-files-found: ignore
           if-no-files-found: ignore
 
   windows-cross:
@@ -212,7 +216,9 @@ jobs:
           esac
 
       - name: Build QEMU + firmware
-        run: ninja -C build
+        run: |
+          set -o pipefail
+          ninja -C build 2>&1 | tee build/ninja-build.log
 
       - name: Assemble Windows package
         # Windows installs use a flat layout: .exe files at the prefix root,
@@ -279,5 +285,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-build-logs
-          path: build/meson-logs/
+          path: |
+            build/meson-logs/
+            build/ninja-build.log
           if-no-files-found: ignore
