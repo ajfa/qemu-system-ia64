@@ -133,6 +133,14 @@
 /* LSI BAR0 is 0x100 bytes and therefore requires 0x100-byte alignment. */
 #define IA64_LSI_IO_BASE        0x0000c200U
 #define IA64_VGA_IO_BASE        0x0000c300U
+/*
+ * The vendor ATI Rage 128 vgabios hardcodes its register I/O base at 0xD800 and
+ * only falls back to a port-space scan if a signature probe there fails, so in
+ * realfw mode the card's I/O BAR must live at 0xD800 for the BIOS's register
+ * accesses (MM_INDEX/DATA, the PLL file) to reach the device.  Guests read the
+ * BAR from config space, so they use the layout-fixed IA64_VGA_IO_BASE.
+ */
+#define IA64_VGA_IO_BASE_REALFW 0x0000d800U
 #define IA64_E1000_IO_BASE      0x0000c400U
 #define IA64_OHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define IA64_AHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00020000ULL)
@@ -2898,7 +2906,7 @@ static void ia64_vpc_match_rom_pcir(PCIDevice *pci_dev)
     rom[declared - 1] = (uint8_t)(-checksum);
 }
 
-static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
+static void ia64_vpc_configure_vga(PCIDevice *pci_dev, uint32_t io_base)
 {
     if (pci_dev == NULL) {
         return;
@@ -2920,7 +2928,7 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
                              IA64_VGA_FB_PCI_BASE, 4);
     if (pci_dev->io_regions[1].memory != NULL) {
         pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0 + 4,
-                                 IA64_VGA_IO_BASE, 4);
+                                 io_base, 4);
     }
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0 + 8,
                              IA64_VGA_MMIO_PCI_BASE, 4);
@@ -3055,7 +3063,9 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_ohci(s->ohci_dev);
     ia64_vpc_configure_uhci(s->uhci_dev);
     ia64_vpc_configure_lsi(s->lsi_dev);
-    ia64_vpc_configure_vga(s->vga_dev);
+    ia64_vpc_configure_vga(s->vga_dev,
+                           s->realfw_path != NULL ? IA64_VGA_IO_BASE_REALFW
+                                                  : IA64_VGA_IO_BASE);
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_nic(s->nic_devs[i], i);
     }
@@ -4394,7 +4404,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         return false;
     }
     ia64_vpc_load_realfw_device_rom(s);
-    ia64_vpc_configure_vga(s->vga_dev);
+    ia64_vpc_configure_vga(s->vga_dev,
+                           s->realfw_path != NULL ? IA64_VGA_IO_BASE_REALFW
+                                                  : IA64_VGA_IO_BASE);
     ia64_vpc_map_vga_fixed_windows(s, s->vga_dev);
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     if (s->vga_dev != NULL) {
