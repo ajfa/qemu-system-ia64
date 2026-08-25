@@ -8,6 +8,7 @@
 #include <glib/gstdio.h>
 #include "qemu/bitops.h"
 #include "qemu/bswap.h"
+#include "qemu/cutils.h"
 #include "qemu/sockets.h"
 #include "qemu/timer.h"
 #include "qemu/units.h"
@@ -930,7 +931,7 @@ static void test_rtc_aligned_read(void)
     }
     tm.tm_year += tm.tm_year < 80 ? 100 : 0;   /* two-digit year pivot */
 
-    guest = timegm(&tm);
+    guest = mktimegm(&tm);
     g_assert_true(rtc_value_is_current(guest));
     qtest_quit(qts);
 }
