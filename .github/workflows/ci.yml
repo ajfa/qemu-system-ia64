@@ -154,7 +154,6 @@ jobs:
             build/meson-logs/
             build/ninja-build.log
           if-no-files-found: ignore
-          if-no-files-found: ignore
 
   windows-cross:
     name: Windows cross build (mingw64)
