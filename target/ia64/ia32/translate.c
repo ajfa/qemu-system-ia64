@@ -42,7 +42,8 @@ static int ia64_ia32_iptrace_enabled = -1;
                    offsetof(CPUIA64State, ip));                           \
     if (ia64_ia32_iptrace_enabled < 0) {                                  \
         ia64_ia32_iptrace_enabled = getenv("IA32_IPTRACE") != NULL ||     \
-                                    getenv("IA32_IPTRACE_BELOW") != NULL;  \
+                                    getenv("IA32_IPTRACE_BELOW") != NULL || \
+                                    getenv("IA32_IPTRACE_SAMPLE") != NULL;  \
     }                                                                     \
     if (ia64_ia32_iptrace_enabled) {                                      \
         gen_helper_ia32_ip_trace(tcg_env);                               \

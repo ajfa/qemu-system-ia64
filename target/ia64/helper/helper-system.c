@@ -59,7 +59,21 @@ void helper_ia32_ip_trace(CPUIA64State *env)
     static unsigned post_max;
     static uint32_t below;     /* IA32_IPTRACE_BELOW: hit on first ip < this */
     static bool below_read;
+    static uint32_t sample;    /* IA32_IPTRACE_SAMPLE: log every Nth ip */
+    static bool sample_read;
+    static unsigned sampled;
     uint32_t ip = (uint32_t)env->ip;
+
+    if (!sample_read) {
+        const char *e = getenv("IA32_IPTRACE_SAMPLE");
+        sample = e ? (uint32_t)strtoul(e, NULL, 0) : 0;
+        sample_read = true;
+    }
+    if (sample && (pos % sample) == 0 && sampled < 400) {
+        sampled++;
+        fprintf(stderr, "ia32-IPTRACE sample #%u ip=%08x cs.base=%08x\n",
+                pos, ip, (uint32_t)env->ia32.segs[R_CS].base);
+    }
 
     if (!trigger_read) {
         const char *e = getenv("IA32_IPTRACE");
