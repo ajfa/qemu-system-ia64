@@ -22,6 +22,17 @@ typedef struct IA64MemoryPlan {
     uint32_t size;
 } IA64MemoryPlan;
 
+/* IA64_STTRACE debug gate: plant helper_ia64_st_trace after stores when set. */
+static bool ia64_sttrace_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        cached = getenv("IA64_STTRACE") != NULL;
+    }
+    return cached;
+}
+
 typedef enum IA64IntegerLoadKind {
     IA64_INTEGER_LOAD_NORMAL,
     IA64_INTEGER_LOAD_ADVANCED,
@@ -836,6 +847,9 @@ IA64GenResult ia64_gen_memory(DisasContext *ctx,
         ia64_gen_memory_release(insn);
         tcg_gen_qemu_st_i64(value, plan.address, ctx->memory.mmu_idx,
                             plan.memop);
+        if (ia64_sttrace_enabled()) {
+            gen_helper_ia64_st_trace(tcg_env, plan.address);
+        }
         ia64_gen_invalidate_alat_store(ctx, plan.address, plan.size);
         if (spill) {
             gen_helper_st_spill_unat(tcg_env, tcg_constant_i32(op->source),

@@ -37,6 +37,43 @@ void helper_ia64_ip_trace(CPUIA64State *env)
 }
 
 /*
+ * Store-address trace (debug facility).  Planted after IA-64 stores only when
+ * IA64_STTRACE is set (translation-time gate, so zero overhead otherwise).
+ * IA64_STTRACE="lo:hi" (hex) logs the first N stores whose address lands in
+ * [lo,hi) with the storing IA-64 IP and a slice of GPRs -- used to catch what
+ * overwrites a physical window (e.g. the video-ROM body 0xC0800 under realfw).
+ * IA64_STTRACE_MAX overrides the default hit cap.
+ */
+void helper_ia64_st_trace(CPUIA64State *env, uint64_t addr)
+{
+    static bool cfg_read;
+    static uint64_t lo, hi;
+    static unsigned cap = 16;
+    static unsigned hits;
+
+    if (!cfg_read) {
+        const char *e = getenv("IA64_STTRACE");
+        const char *colon = e ? strchr(e, ':') : NULL;
+        const char *m = getenv("IA64_STTRACE_MAX");
+
+        if (colon) {
+            lo = strtoull(e, NULL, 16);
+            hi = strtoull(colon + 1, NULL, 16);
+        }
+        if (m) {
+            cap = (unsigned)strtoul(m, NULL, 0);
+        }
+        cfg_read = true;
+    }
+    if (hi > lo && addr >= lo && addr < hi && hits < cap) {
+        hits++;
+        fprintf(stderr, "ia64-STTRACE store addr=%016" PRIx64
+                " ip=%016" PRIx64 " b0=%016" PRIx64 "\n",
+                addr, env->ip, env->br[IA64_BR_RETURN_LINK]);
+    }
+}
+
+/*
  * Full-speed IA-32 IP trace (debug facility).  When IA32_IPTRACE=<hex> names an
  * x86 linear IP, the translator plants a call to this helper on every x86
  * instruction (X86_GEN_INSN_START); it keeps a ring of the most recent x86 IPs
@@ -62,6 +99,8 @@ void helper_ia32_ip_trace(CPUIA64State *env)
     static uint32_t sample;    /* IA32_IPTRACE_SAMPLE: log every Nth ip */
     static bool sample_read;
     static unsigned sampled;
+    static uint32_t minpos;    /* IA32_IPTRACE_MINPOS: arm trigger only after N insns */
+    static bool minpos_read;
     uint32_t ip = (uint32_t)env->ip;
 
     if (!sample_read) {
@@ -69,10 +108,19 @@ void helper_ia32_ip_trace(CPUIA64State *env)
         sample = e ? (uint32_t)strtoul(e, NULL, 0) : 0;
         sample_read = true;
     }
+    if (!minpos_read) {
+        const char *e = getenv("IA32_IPTRACE_MINPOS");
+        minpos = e ? (uint32_t)strtoul(e, NULL, 0) : 0;
+        minpos_read = true;
+    }
     if (sample && (pos % sample) == 0 && sampled < 400) {
         sampled++;
-        fprintf(stderr, "ia32-IPTRACE sample #%u ip=%08x cs.base=%08x\n",
-                pos, ip, (uint32_t)env->ia32.segs[R_CS].base);
+        fprintf(stderr,
+                "ia32-IPTRACE sample #%u ip=%08x cs.base=%08x eax=%08x "
+                "ebx=%08x ecx=%08x edx=%08x\n",
+                pos, ip, (uint32_t)env->ia32.segs[R_CS].base,
+                (uint32_t)env->ia32.regs[0], (uint32_t)env->ia32.regs[3],
+                (uint32_t)env->ia32.regs[1], (uint32_t)env->ia32.regs[2]);
     }
 
     if (!trigger_read) {
@@ -94,7 +142,8 @@ void helper_ia32_ip_trace(CPUIA64State *env)
         below_read = true;
     }
     ring[pos++ & (ARRAY_SIZE(ring) - 1)] = ip;
-    if (((trigger && ip == trigger) || (below && ip < below)) && !dumped) {
+    if (((trigger && ip == trigger) || (below && ip < below)) &&
+        pos >= minpos && !dumped) {
         g_autoptr(GString) s = g_string_new(NULL);
         unsigned n = pos < ARRAY_SIZE(ring) ? pos : ARRAY_SIZE(ring);
         unsigned i;
@@ -103,11 +152,14 @@ void helper_ia32_ip_trace(CPUIA64State *env)
         post = post_max;
         g_string_append_printf(s,
             "ia32-IPTRACE hit ip=%08x eip=%08x cs.sel=%04x cs.base=%08x "
+            "ds.base=%08x ss.base=%08x "
             "eax=%08x ecx=%08x edx=%08x ebx=%08x "
             "esp=%08x ebp=%08x esi=%08x edi=%08x; preceding %u x86 IPs:",
             ip, (uint32_t)env->ia32.eip,
             (unsigned)env->ia32.segs[R_CS].selector,
             (uint32_t)env->ia32.segs[R_CS].base,
+            (uint32_t)env->ia32.segs[R_DS].base,
+            (uint32_t)env->ia32.segs[R_SS].base,
             (uint32_t)env->ia32.regs[0], (uint32_t)env->ia32.regs[1],
             (uint32_t)env->ia32.regs[2], (uint32_t)env->ia32.regs[3],
             (uint32_t)env->ia32.regs[4], (uint32_t)env->ia32.regs[5],
