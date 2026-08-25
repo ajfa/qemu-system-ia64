@@ -431,6 +431,28 @@ static uint32_t ati_pll_read(ATIVGAState *s)
     return val;
 }
 
+/* PLL_TEST_CNTL (PLL:0x13): TEST_COUNT occupies bits 31:24. */
+#define ATI_PLL_TEST_CNTL 0x13
+
+/*
+ * PLL_TEST_CNTL.TEST_COUNT (bits 31:24) is a free-running counter clocked by
+ * whatever TEST_DEBUG_MUX.TEST_DEBUG_CLK muxes in -- the vendor vgabios points
+ * it at Xtalin and builds every hardware-timed delay by clearing TEST_COUNT and
+ * spinning until it crosses a threshold (RRG PLL_TEST_CNTL; delay library at
+ * vgabios 0x6118).  The byte therefore has to advance each time it is sampled
+ * or those loops never terminate and firmware init grinds through the full
+ * software timeout on every microsecond delay.  Advance it by a coarse step per
+ * sample: the guest only observes the count crossing its threshold (0x1d/0x91),
+ * and a large step keeps the loops -- real-time on hardware -- short here.
+ */
+static void ati_pll_tick_test_count(ATIVGAState *s)
+{
+    uint32_t v = s->regs.pll_regs[ATI_PLL_TEST_CNTL];
+    uint32_t cnt = ((v >> 24) + 0x40) & 0xff;
+
+    s->regs.pll_regs[ATI_PLL_TEST_CNTL] = (v & 0x00ffffffu) | (cnt << 24);
+}
+
 static void ati_mm_write(void *opaque, hwaddr addr, uint64_t data,
                          unsigned int size);
 
@@ -1040,6 +1062,9 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
                                 addr - CLOCK_CNTL_INDEX, size);
         break;
     case CLOCK_CNTL_DATA ... CLOCK_CNTL_DATA + 3:
+        if ((s->regs.clock_cntl_index & 0x3f) == ATI_PLL_TEST_CNTL) {
+            ati_pll_tick_test_count(s);
+        }
         val = ati_reg_read_offs(ati_pll_read(s), addr - CLOCK_CNTL_DATA,
                                 size);
         break;
