@@ -1548,6 +1548,54 @@ static void ia64_vpc_install_realfw_video_rom(IA64VpcMachineState *s)
     cpu_physical_memory_write(IA64_INT10_ROM_BASE, rom, declared);
 }
 
+/*
+ * When realfw-vga-rom= supplies an authentic card BIOS, load it into the video
+ * device's own expansion ROM as well as the 0xC0000 shadow.  The vendor firmware
+ * re-shadows the option ROM's header from the PCI ROM BAR during POST; if the BAR
+ * still held the emulated card's stock vgabios, that header's entry jump (a
+ * different offset) would be laid over the real BIOS body already shadowed at
+ * 0xC0000, and the CPU would jump into the wrong image and run away.  Keeping the
+ * BAR and the shadow the same image keeps the re-shadow consistent.  Called
+ * before configure_vga() so the ATI table / checksum fixups act on this image.
+ */
+static void ia64_vpc_load_realfw_device_rom(IA64VpcMachineState *s)
+{
+    PCIDevice *pci_dev = s->vga_dev;
+    g_autofree uint8_t *file_rom = NULL;
+    GError *gerr = NULL;
+    gsize len = 0;
+    uint8_t *rom;
+    uint64_t rom_size;
+
+    if (s->realfw_path == NULL || s->realfw_vga_rom_path == NULL ||
+        pci_dev == NULL ||
+        pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
+        return;
+    }
+    if (!g_file_get_contents(s->realfw_vga_rom_path, (gchar **)&file_rom,
+                             &len, &gerr)) {
+        warn_report("realfw-vga-rom '%s': %s", s->realfw_vga_rom_path,
+                    gerr->message);
+        g_error_free(gerr);
+        return;
+    }
+    if (len < 0x400 || file_rom[0] != 0x55 || file_rom[1] != 0xaa) {
+        warn_report("realfw-vga-rom '%s': not a 55AA option ROM",
+                    s->realfw_vga_rom_path);
+        return;
+    }
+    rom = memory_region_get_ram_ptr(&pci_dev->rom);
+    rom_size = memory_region_size(&pci_dev->rom);
+    if (rom == NULL || rom_size == 0) {
+        return;
+    }
+    if (len > rom_size) {
+        len = rom_size;
+    }
+    memset(rom, 0, rom_size);
+    memcpy(rom, file_rom, len);
+}
+
 static void ia64_vpc_reset_int10(IA64VpcMachineState *s)
 {
     memset(&s->int10_request, 0, sizeof(s->int10_request));
@@ -4345,6 +4393,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (!ia64_vpc_enable_vga_legacy_switch(s->vga_dev, errp)) {
         return false;
     }
+    ia64_vpc_load_realfw_device_rom(s);
     ia64_vpc_configure_vga(s->vga_dev);
     ia64_vpc_map_vga_fixed_windows(s, s->vga_dev);
 #ifdef CONFIG_IA64_VPC_GRAPHICS
