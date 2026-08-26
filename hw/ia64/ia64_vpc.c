@@ -3304,6 +3304,8 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
  * after this handler, so we must NOT read ROM content here.  PE32+
  * plabel parsing is deferred to the machine_done notifier.
  */
+static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s);
+
 static void ia64_vpc_reset(void *opaque)
 {
     IA64VpcMachineState *s = opaque;
@@ -3320,6 +3322,22 @@ static void ia64_vpc_reset(void *opaque)
     CPU_FOREACH(cs) {
         /* The CPUs are not children of the platform system bus. */
         ia64_cpu_reset_to_boot_info(IA64_CPU(cs));
+    }
+
+    /*
+     * The 460GX configuration store (CBN, the chipset functions' BARs and
+     * command registers, and the CF8 config-address latch) models chipset
+     * state that a real SYS_RST/RST_CPU (port 0xCF9) clears.  It is only
+     * seeded at machine-init, so without this a warm reset would leave it
+     * holding the previous boot's programming (e.g. a non-zero CBN and
+     * assigned BARs); the firmware's re-enumeration then takes a different
+     * path and the second boot's video-ROM POST diverges (it hangs in a
+     * vgabios timed-delay whose INT8 tick never advances).  Re-seed it to its
+     * power-on identity on every reset (harmless on the initial cold reset,
+     * which merely repeats the init-time seed).
+     */
+    if (s->realfw_path != NULL) {
+        ia64_vpc_init_realfw_chipset_cfg(s);
     }
 
     acpi_pm1_evt_reset(&s->acpi_regs);
@@ -3736,24 +3754,37 @@ static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
     }
     cfg = ia64_realfw_chipset_cfg(s, bus, dev, fn);
     if (cfg != NULL && dev == 0x05 && (fn == 2 || fn == 3)) {
-        uint8_t iiadr = ia64_realfw_chipset_cfg(s, 0, 0, 0)
-                        [IA64_REALFW_SAC_IIADR_REG];
-        bool row0 = ia64_realfw_chipset_cfg(s, 0, 0x05, 4)[0x48] == 1 &&
-                    ia64_realfw_chipset_cfg(s, 0, 0x05, 5)[0x48] == 0 &&
-                    ia64_realfw_chipset_cfg(s, 0, 0x05, 6)[0x48] == 0 &&
-                    ia64_realfw_chipset_cfg(s, 0, 0x05, 7)[0x48] == 0;
-
         /*
          * MAC I2C pass-through: serve the addressed DIMM's SPD EEPROM.
          * The card carries 4 rows x 4 DIMMs (row select = one-hot in
          * fn 4..7 reg 0x48); only row 0 is populated - 4 x 256 MB = 1 GiB.
+         *
+         * The SAC (dev 0) and the MAC's fn 4..7 sit on the same bus as the
+         * addressed dev 5 - i.e. the CBN bus, which the guest's own address
+         * decoded here as 'bus'.  Once the firmware has programmed CBN to a
+         * non-zero value (which happens late in POST) a hard-coded bus 0 no
+         * longer resolves these functions and the lookup returns NULL, so use
+         * 'bus' and guard defensively.
          */
-        if ((iiadr & 0xfc) == 0xd4 && row0) {
-            for (i = 0; i < size; i++) {
-                unsigned off = (reg + i) & 0xff;
+        uint8_t *sac = ia64_realfw_chipset_cfg(s, bus, 0, 0);
+        uint8_t *r4 = ia64_realfw_chipset_cfg(s, bus, 0x05, 4);
+        uint8_t *r5 = ia64_realfw_chipset_cfg(s, bus, 0x05, 5);
+        uint8_t *r6 = ia64_realfw_chipset_cfg(s, bus, 0x05, 6);
+        uint8_t *r7 = ia64_realfw_chipset_cfg(s, bus, 0x05, 7);
 
-                val |= (uint64_t)(off < sizeof(ia64_realfw_spd)
-                                  ? ia64_realfw_spd[off] : 0) << (i * 8);
+        if (sac != NULL && r4 != NULL && r5 != NULL && r6 != NULL &&
+            r7 != NULL) {
+            uint8_t iiadr = sac[IA64_REALFW_SAC_IIADR_REG];
+            bool row0 = r4[0x48] == 1 && r5[0x48] == 0 &&
+                        r6[0x48] == 0 && r7[0x48] == 0;
+
+            if ((iiadr & 0xfc) == 0xd4 && row0) {
+                for (i = 0; i < size; i++) {
+                    unsigned off = (reg + i) & 0xff;
+
+                    val |= (uint64_t)(off < sizeof(ia64_realfw_spd)
+                                      ? ia64_realfw_spd[off] : 0) << (i * 8);
+                }
             }
         }
     } else if (cfg != NULL && (reg & 0xfc) == 0x30) {
@@ -3796,6 +3827,23 @@ static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
     unsigned reg = (cf8 & 0xfc) | (addr & 3);
     uint8_t *cfg;
     unsigned i;
+
+    if (addr == 1 && size == 1) {
+        /*
+         * Port 0xCF9 (RST_CNT): an 8-bit access is the legacy PC reset-control
+         * register, aliased with byte 1 of the 0xCF8 config-address register.
+         * RST_CPU (bit 2) set triggers a system reset.  The SDV firmware writes
+         * 0xCF9=2 then 0xCF9=6 to reboot after its one-time "New CPU frequency
+         * is set" configuration step (the historical POST-0xc6 "wall").  The
+         * warm-boot path this reset lands in is still being brought up (the
+         * post-reset video-ROM POST diverges), so honouring the reset is gated
+         * behind STDBG_CF9RESET for now — see plans/phase5-real-firmware-boot.md.
+         */
+        if ((data & 0x04) && getenv("STDBG_CF9RESET")) {
+            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+            return;
+        }
+    }
 
     if (addr < 4) {
         for (i = 0; i < size && addr + i < 4; i++) {
@@ -3844,7 +3892,12 @@ static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s)
 {
     uint8_t *mac_a;
 
-    s->realfw_chipset_cfg = g_malloc0(IA64_REALFW_CFG_SIZE);
+    if (s->realfw_chipset_cfg == NULL) {
+        s->realfw_chipset_cfg = g_malloc0(IA64_REALFW_CFG_SIZE);
+    } else {
+        memset(s->realfw_chipset_cfg, 0, IA64_REALFW_CFG_SIZE);
+    }
+    s->realfw_config_address = 0;
     /*
      * Memory Card A (dev 05h fn 0) claims presence with the MAC identity
      * (8086:84E3, rev B-1 = 03h; pci.ids, flagged unverified in
