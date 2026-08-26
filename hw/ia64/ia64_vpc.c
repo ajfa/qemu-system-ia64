@@ -456,6 +456,7 @@ struct IA64VpcMachineState {
     MemoryRegion realfw_cfg_io;
     MemoryRegion realfw_ide_data[2];
     MemoryRegion realfw_ide_cmd[2];
+    MemoryRegion realfw_rtc_ext_alias;
     qemu_irq realfw_extint;
     uint8_t *realfw_sac_data;
     uint16_t realfw_post_last;
@@ -4400,7 +4401,31 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * ports 0x70/0x71 (IRQ 8), as the i2000/SDV Super-I/O provides - the
      * invented MMIO seconds register at 0xFFEF0000 is gone (rework D8).
      */
-    mc146818_rtc_init(isa_bus, 2000, NULL);
+    {
+        MC146818RtcState *rtc = mc146818_rtc_init(isa_bus, 2000, NULL);
+        if (s->realfw_path != NULL) {
+            /*
+             * The 460GX RTC is a 256-byte part: the standard 128-byte bank is
+             * reached through ports 0x70/0x71 (RTCI/RTCD), and ports 0x72/0x73
+             * (RTCEI/RTCED) reach the upper 128-byte battery-backed bank ONLY
+             * when RTCCFG (IFB function 0, config offset C8h) bit 2 "Upper RAM
+             * Enable" is set.  [460GX SSDM 11.1.20, 11.2.5, 15.5.1]  The i2000
+             * firmware never writes RTCCFG (the IFB at bus0 dev 0x1e gets no
+             * config write to offset C8h), so that bit stays clear and 0x72/
+             * 0x73 alias 0x70/0x71 - the SAME 128-byte bank.  POST writes its
+             * CMOS configuration and checksum through 0x70/0x71 but reads them
+             * back through 0x72/0x73; without this alias every such read is
+             * open-bus 0xFF and the CMOS checksum never validates.  (This is
+             * distinct from the separate "New CPU frequency is set" reboot,
+             * which turns on the firmware's CPU-frequency-detection reads of
+             * unmodelled 460GX registers - see plans/phase5 SESSION 15.)
+             */
+            memory_region_init_alias(&s->realfw_rtc_ext_alias, OBJECT(s),
+                                     "rtc-ext-alias", &rtc->io, 0, 2);
+            memory_region_add_subregion(isa_bus->address_space_io, 0x72,
+                                        &s->realfw_rtc_ext_alias);
+        }
+    }
 #ifdef CONFIG_IA64_VPC_PS2
     if (s->i8042_enabled) {
         ISADevice *i8042 = isa_new(TYPE_I8042);
