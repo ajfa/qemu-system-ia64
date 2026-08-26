@@ -2914,6 +2914,55 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         }
     }
 
+    {
+        /* Region-gated ring trace (debug).  IA64_TRACE="lo:hi" records a full
+         * register snapshot for every bundle in [lo,hi); IA64_TRACE_TRIG=<hex>
+         * dumps the ring.  See helper_ia64_trace_rec/dump. */
+        static bool trace_read;
+        static uint64_t trace_lo, trace_hi, trace_trig;
+        static uint64_t trace_xlo, trace_xhi, trace_xlo2, trace_xhi2;
+
+        if (!trace_read) {
+            const char *e = getenv("IA64_TRACE");
+            const char *colon = e ? strchr(e, ':') : NULL;
+            const char *t = getenv("IA64_TRACE_TRIG");
+            const char *x = getenv("IA64_TRACE_EXCL");
+            const char *xcolon = x ? strchr(x, ':') : NULL;
+            const char *x2 = getenv("IA64_TRACE_EXCL2");
+            const char *x2colon = x2 ? strchr(x2, ':') : NULL;
+
+            if (colon) {
+                trace_lo = strtoull(e, NULL, 16);
+                trace_hi = strtoull(colon + 1, NULL, 16);
+            }
+            if (t) {
+                trace_trig = strtoull(t, NULL, 16);
+            }
+            if (xcolon) {
+                trace_xlo = strtoull(x, NULL, 16);
+                trace_xhi = strtoull(xcolon + 1, NULL, 16);
+            }
+            if (x2colon) {
+                trace_xlo2 = strtoull(x2, NULL, 16);
+                trace_xhi2 = strtoull(x2colon + 1, NULL, 16);
+            }
+            trace_read = true;
+        }
+        if (trace_hi > trace_lo &&
+            bundle_ip >= trace_lo && bundle_ip < trace_hi &&
+            !(trace_xhi > trace_xlo &&
+              bundle_ip >= trace_xlo && bundle_ip < trace_xhi) &&
+            !(trace_xhi2 > trace_xlo2 &&
+              bundle_ip >= trace_xlo2 && bundle_ip < trace_xhi2)) {
+            tcg_gen_movi_i64(cpu_ip, bundle_ip);
+            gen_helper_ia64_trace_rec(tcg_env);
+        }
+        if (trace_trig && bundle_ip == trace_trig) {
+            tcg_gen_movi_i64(cpu_ip, bundle_ip);
+            gen_helper_ia64_trace_dump(tcg_env);
+        }
+    }
+
     low = translator_ldq_end(ctx->env, db, bundle_ip, MO_LE);
     high = translator_ldq_end(ctx->env, db, bundle_ip + 8, MO_LE);
     template_code = ia64_bundle_template_code(low);

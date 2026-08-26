@@ -74,6 +74,92 @@ void helper_ia64_st_trace(CPUIA64State *env, uint64_t addr)
 }
 
 /*
+ * Region-gated single-step trace (debug facility).  IA64_TRACE="lo:hi" (hex)
+ * makes the translator plant helper_ia64_trace_rec on every bundle whose IP is
+ * in [lo,hi); each records a full snapshot (IP, packed predicates, all 128 GRs,
+ * b0-b7) into a ring buffer (IA64_TRACE_RING entries, default 16384).  When the
+ * bundle at IA64_TRACE_TRIG (hex) executes, helper_ia64_trace_dump prints the
+ * last IA64_TRACE_DUMP (default 500) recorded snapshots in chronological order,
+ * one-shot.  This lets the firmware's reset-decision path be observed with the
+ * live compare operands that static disassembly + RSE-unwinding cannot pin.
+ * Zero overhead when IA64_TRACE is unset (translation-time gate).
+ */
+struct ia64_trace_ent {
+    uint64_t ip;
+    uint64_t pr;
+    uint64_t gr[IA64_GR_COUNT];
+    uint64_t br[IA64_BR_COUNT];
+};
+static struct ia64_trace_ent *ia64_trace_ring;
+static unsigned ia64_trace_sz;
+static unsigned ia64_trace_pos;
+static unsigned ia64_trace_cnt;
+
+void helper_ia64_trace_rec(CPUIA64State *env)
+{
+    struct ia64_trace_ent *e;
+
+    if (ia64_trace_ring == NULL) {
+        const char *n = getenv("IA64_TRACE_RING");
+
+        ia64_trace_sz = n ? (unsigned)strtoul(n, NULL, 0) : 16384;
+        if (ia64_trace_sz < 16) {
+            ia64_trace_sz = 16;
+        }
+        ia64_trace_ring = g_malloc0(sizeof(*ia64_trace_ring) * ia64_trace_sz);
+    }
+    e = &ia64_trace_ring[ia64_trace_pos % ia64_trace_sz];
+    e->ip = env->ip;
+    e->pr = ia64_system_read_pr(env);
+    memcpy(e->gr, env->gr, sizeof(e->gr));
+    memcpy(e->br, env->br, sizeof(e->br));
+    ia64_trace_pos++;
+    ia64_trace_cnt++;
+}
+
+void helper_ia64_trace_dump(CPUIA64State *env)
+{
+    static bool dumped;
+    const char *dn;
+    unsigned n, dump_n, start, i, r, rmax;
+
+    if (dumped || ia64_trace_ring == NULL) {
+        return;
+    }
+    dumped = true;
+    n = ia64_trace_cnt < ia64_trace_sz ? ia64_trace_cnt : ia64_trace_sz;
+    dn = getenv("IA64_TRACE_DUMP");
+    dump_n = dn ? (unsigned)strtoul(dn, NULL, 0) : 500;
+    if (dump_n > n) {
+        dump_n = n;
+    }
+    /* IA64_TRACE_REGS: highest GR index to print per entry (default 47). */
+    {
+        const char *rr = getenv("IA64_TRACE_REGS");
+        rmax = rr ? (unsigned)strtoul(rr, NULL, 0) : 47;
+        if (rmax >= IA64_GR_COUNT) {
+            rmax = IA64_GR_COUNT - 1;
+        }
+    }
+    start = ia64_trace_pos - dump_n;
+    fprintf(stderr, "=== IA64_TRACE dump: last %u of %u recorded, "
+            "trigger ip=0x%" PRIx64 " ===\n", dump_n, ia64_trace_cnt, env->ip);
+    for (i = 0; i < dump_n; i++) {
+        struct ia64_trace_ent *e =
+            &ia64_trace_ring[(start + i) % ia64_trace_sz];
+        g_autoptr(GString) s = g_string_new(NULL);
+
+        g_string_append_printf(s, "T ip=%010" PRIx64 " pr=%016" PRIx64
+                               " b0=%010" PRIx64, e->ip, e->pr,
+                               e->br[IA64_BR_RETURN_LINK]);
+        for (r = 1; r <= rmax; r++) {
+            g_string_append_printf(s, " r%u=%" PRIx64, r, e->gr[r]);
+        }
+        fprintf(stderr, "%s\n", s->str);
+    }
+}
+
+/*
  * Full-speed IA-32 IP trace (debug facility).  When IA32_IPTRACE=<hex> names an
  * x86 linear IP, the translator plants a call to this helper on every x86
  * instruction (X86_GEN_INSN_START); it keeps a ring of the most recent x86 IPs
