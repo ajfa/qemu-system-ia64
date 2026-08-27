@@ -149,6 +149,25 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
         return pa == entry_pa;
     }
 
+    /*
+     * Last resort: none of the resolvers above found a translation for this
+     * virtual IP.  A firmware PAL entry (e.g. a vendor firmware's PAL stub, at
+     * 0xff100000 for the realfw HP i2000 image) is identity-mapped
+     * virtual==physical, but the firmware-identity and SAL-boot resolvers only
+     * cover our own firmware, not a vendor one, and the cached-TLB lookup can
+     * transiently miss the firmware's own ITLB entry -- the instruction fetch
+     * that got us here uses the softmmu TLB while this match walks the guest
+     * TLB, so the two can diverge and the fetch succeeds where this lookup
+     * comes up empty.  A break 0x100000 only ever sits at a PAL entry, so an IP
+     * that equals the physical entry is that entry reached through its identity
+     * mapping: treat it as a match.  Without this the PAL-hook interception,
+     * decided here at translate time, intermittently goes stale in virtual mode
+     * and the break drops into the firmware's Break vector, which rfi-loops.
+     */
+    if (address == entry_pa) {
+        return true;
+    }
+
     return false;
 }
 
