@@ -457,6 +457,7 @@ struct IA64VpcMachineState {
     MemoryRegion realfw_ide_data[2];
     MemoryRegion realfw_ide_cmd[2];
     MemoryRegion realfw_rtc_ext_alias;
+    MemoryRegion realfw_smbus_io;
     qemu_irq realfw_extint;
     uint8_t *realfw_sac_data;
     uint16_t realfw_post_last;
@@ -3629,6 +3630,50 @@ static const MemoryRegionOps ia64_realfw_post_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+/*
+ * IFB fn3 SMBus host controller (PIIX4-style register file at I/O 0xFFF0).
+ *
+ * During QuickBoot the SDV firmware programs the IFB Function 3 SMBus I/O BAR
+ * to 0xFFF0 and runs SMBus byte-data transactions to initialise the board's
+ * hardware-monitor sensor chips (observed device addresses 0x2C and 0x4E): it
+ * writes SMBHSTCMD/ADD/DAT0, kicks SMBHSTCNT with START (bit 6), then spins on
+ * SMBHSTSTS bit 1 (INTR = transaction complete) with HOST_BUSY (bit 0) clear
+ * -- i.e. `(status & 3) == 2`.  With no I/O region here the poll floats high
+ * (0xff -> status bits 11b) and the firmware hangs at POST 0xc6.
+ *
+ * We have no physical devices behind the bus.  The firmware only needs the
+ * transaction to *complete*: it polls SMBHSTSTS for `(status & 3) == 2` (INTR
+ * set, HOST_BUSY clear), so report the controller permanently idle-with-INTR
+ * (0x02).  Every other register reads back 0 -- the value the firmware got for
+ * these ports before this region existed (the sparse-I/O container answers 0
+ * for an in-range but unclaimed port), which its controller-enable poll at
+ * offset 0xe depends on: floating those bytes high (0xff) instead makes that
+ * poll spin forever.  Register offsets follow the Intel PIIX4 SMBus layout
+ * (SMBHSTSTS 0, SMBHSTCNT 2, SMBHSTCMD 3, SMBHSTADD 4, SMBHSTDAT0 5).
+ */
+#define IA64_REALFW_SMB_STS   0x00   /* bit0 HOST_BUSY, bit1 INTR, bit2 DEV_ERR */
+#define IA64_REALFW_SMB_BASE  0xfff0
+#define IA64_REALFW_SMB_SIZE  0x10
+
+static uint64_t ia64_realfw_smbus_read(void *opaque, hwaddr addr, unsigned size)
+{
+    return (addr == IA64_REALFW_SMB_STS) ? 0x02 : 0;
+}
+
+static void ia64_realfw_smbus_write(void *opaque, hwaddr addr, uint64_t val,
+                                    unsigned size)
+{
+    /* No physical device: every transaction "completes" with nothing to do. */
+}
+
+static const MemoryRegionOps ia64_realfw_smbus_ops = {
+    .read = ia64_realfw_smbus_read,
+    .write = ia64_realfw_smbus_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
 static uint64_t ia64_realfw_sac_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64VpcMachineState *s = opaque;
@@ -3990,6 +4035,11 @@ static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
     memory_region_init_io(&s->realfw_post_io, OBJECT(s),
                           &ia64_realfw_post_ops, s, "ia64-realfw.post", 2);
     memory_region_add_subregion(pci_io, 0x80, &s->realfw_post_io);
+    memory_region_init_io(&s->realfw_smbus_io, OBJECT(s),
+                          &ia64_realfw_smbus_ops, s, "ia64-realfw.smbus",
+                          IA64_REALFW_SMB_SIZE);
+    memory_region_add_subregion(pci_io, IA64_REALFW_SMB_BASE,
+                                &s->realfw_smbus_io);
     ia64_vpc_init_realfw_chipset_cfg(s);
     memory_region_init_io(&s->realfw_cfg_io, OBJECT(s),
                           &ia64_realfw_cfg_ops, s, "ia64-realfw.cfg", 8);
