@@ -120,10 +120,19 @@ void helper_ia64_trace_rec(CPUIA64State *env)
 void helper_ia64_trace_dump(CPUIA64State *env)
 {
     static bool dumped;
+    static unsigned seen;
+    const char *sk;
+    unsigned skip;
     const char *dn;
     unsigned n, dump_n, start, i, r, rmax;
 
     if (dumped || ia64_trace_ring == NULL) {
+        return;
+    }
+    /* IA64_TRACE_SKIP: ignore this many trigger hits before dumping. */
+    sk = getenv("IA64_TRACE_SKIP");
+    skip = sk ? (unsigned)strtoul(sk, NULL, 0) : 0;
+    if (seen++ < skip) {
         return;
     }
     dumped = true;
