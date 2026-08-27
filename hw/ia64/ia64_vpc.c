@@ -462,6 +462,7 @@ struct IA64VpcMachineState {
     MemoryRegion realfw_ide_cmd[2];
     MemoryRegion realfw_rtc_ext_alias;
     MemoryRegion realfw_smbus_io;
+    MemoryRegion realfw_port61_io;
     qemu_irq realfw_extint;
     uint8_t *realfw_sac_data;
     uint16_t realfw_post_last;
@@ -3698,6 +3699,45 @@ static const MemoryRegionOps ia64_realfw_smbus_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+/*
+ * System Control Port B (I/O 0x61).  Near the end of POST the SDV firmware
+ * uses bit 4 -- the DRAM REFRESH toggle -- as a timing reference: it reads
+ * port 0x61 in a tight loop and waits for bit 4 to flip a full 0->1->0 refresh
+ * period to calibrate a delay.  Real hardware toggles that bit roughly every
+ * 15 us; unmodelled the port floats to a constant (open-bus 0xff, bit 4 stuck
+ * at 1) and the loop never sees the flip, hanging at POST ~0x05.
+ *
+ * Report the pre-existing open-bus value 0xff -- which is what the firmware saw
+ * for the other bits before this region existed and reached this far with, so
+ * nothing that reads the port earlier regresses -- but drive bit 4 from the
+ * virtual clock so the refresh toggle is observed.  Writes (the firmware pokes
+ * the timer-2/speaker gate bits) are dropped, exactly as the unbacked port did.
+ */
+#define IA64_REALFW_PORT61            0x61
+#define IA64_REALFW_PORT61_REFRESH_NS 15000
+
+static uint64_t ia64_realfw_port61_read(void *opaque, hwaddr addr, unsigned size)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint8_t refresh = (now / IA64_REALFW_PORT61_REFRESH_NS) & 1;
+
+    return (uint8_t)((0xff & ~0x10) | (refresh << 4));
+}
+
+static void ia64_realfw_port61_write(void *opaque, hwaddr addr, uint64_t val,
+                                     unsigned size)
+{
+    /* Open bus: writes are dropped, as for the previously unbacked port. */
+}
+
+static const MemoryRegionOps ia64_realfw_port61_ops = {
+    .read = ia64_realfw_port61_read,
+    .write = ia64_realfw_port61_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 1,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
 static uint64_t ia64_realfw_sac_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64VpcMachineState *s = opaque;
@@ -4064,6 +4104,10 @@ static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
                           IA64_REALFW_SMB_SIZE);
     memory_region_add_subregion(pci_io, IA64_REALFW_SMB_BASE,
                                 &s->realfw_smbus_io);
+    memory_region_init_io(&s->realfw_port61_io, OBJECT(s),
+                          &ia64_realfw_port61_ops, s, "ia64-realfw.port61", 1);
+    memory_region_add_subregion(pci_io, IA64_REALFW_PORT61,
+                                &s->realfw_port61_io);
     ia64_vpc_init_realfw_chipset_cfg(s);
     memory_region_init_io(&s->realfw_cfg_io, OBJECT(s),
                           &ia64_realfw_cfg_ops, s, "ia64-realfw.cfg", 8);
