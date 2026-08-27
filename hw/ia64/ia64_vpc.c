@@ -30,6 +30,9 @@
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
 #include "hw/block/flash.h"
+#include "system/block-backend.h"
+#include "block/block.h"
+#include "qobject/qdict.h"
 #include "hw/ide/ahci-pci.h"
 #include "hw/ide/ide-dev.h"
 #include "hw/ide/pci.h"
@@ -448,6 +451,7 @@ struct IA64VpcMachineState {
     char *nvram_path;
     char *realfw_path;
     char *realfw_vga_rom_path;
+    char *realfw_nvram_path;
     uint64_t realfw_entry;
     uint64_t realfw_base;
     PFlashCFI01 *realfw_flash;
@@ -1775,6 +1779,26 @@ static void ia64_vpc_set_realfw_vga_rom(Object *obj, const char *value,
 
     g_free(s->realfw_vga_rom_path);
     s->realfw_vga_rom_path = value[0] != '\0' ? g_strdup(value) : NULL;
+}
+
+static char *ia64_vpc_get_realfw_nvram(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return g_strdup(s->realfw_nvram_path ?: "");
+}
+
+static void ia64_vpc_set_realfw_nvram(Object *obj, const char *value,
+                                      Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    g_free(s->realfw_nvram_path);
+    s->realfw_nvram_path = value[0] != '\0' ? g_strdup(value) : NULL;
 }
 
 static char *ia64_vpc_get_nvram(Object *obj, Error **errp)
@@ -4130,6 +4154,43 @@ static const uint8_t ia64_realfw_pal_stub[32] = {
     0x00, 0x02, 0x00, 0x00, 0x08, 0x00, 0x80, 0x00,
 };
 
+/*
+ * Open the realfw-nvram persistence file as a raw, writable block backend for
+ * the flash device.  On first use (or if the file is the wrong size, e.g. the
+ * realfw image changed) it is created from the vendor image; the pflash device
+ * requires the backing file to be exactly the flash size.  Once attached, the
+ * flash loads its contents from the file and writes back to it, so the
+ * firmware's one-time NVRAM reprogram survives across runs.
+ */
+static BlockBackend *ia64_realfw_open_nvram(const char *path,
+                                            const uint8_t *image,
+                                            uint64_t image_size, Error **errp)
+{
+    QDict *options;
+    BlockBackend *blk;
+    struct stat st;
+
+    if (stat(path, &st) != 0 || (uint64_t)st.st_size != image_size) {
+        GError *gerr = NULL;
+
+        if (!g_file_set_contents(path, (const gchar *)image, image_size,
+                                 &gerr)) {
+            error_setg(errp, "realfw-nvram '%s': cannot initialise: %s",
+                       path, gerr->message);
+            g_error_free(gerr);
+            return NULL;
+        }
+    }
+
+    options = qdict_new();
+    qdict_put_str(options, "driver", "raw");
+    blk = blk_new_open(path, NULL, options, BDRV_O_RDWR, errp);
+    if (blk == NULL) {
+        error_prepend(errp, "realfw-nvram '%s': ", path);
+    }
+    return blk;
+}
+
 static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
 {
     g_autofree uint8_t *image = NULL;
@@ -4185,6 +4246,16 @@ static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
     {
         DeviceState *dev = qdev_new(TYPE_PFLASH_CFI01);
         MemoryRegion *flash_mr;
+        BlockBackend *flash_blk = NULL;
+
+        if (s->realfw_nvram_path != NULL) {
+            flash_blk = ia64_realfw_open_nvram(s->realfw_nvram_path, image,
+                                               image_size, errp);
+            if (flash_blk == NULL) {
+                return false;
+            }
+            qdev_prop_set_drive(dev, "drive", flash_blk);
+        }
 
         qdev_prop_set_uint32(dev, "num-blocks", image_size / 0x10000);
         qdev_prop_set_uint64(dev, "sector-length", 0x10000);
@@ -4211,7 +4282,15 @@ static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
         flash_mr = pflash_cfi01_get_memory(s->realfw_flash);
         memory_region_add_subregion_overlap(get_system_memory(), base,
                                             flash_mr, 2);
-        memcpy(memory_region_get_ram_ptr(flash_mr), image, image_size);
+        /*
+         * Without a persistence file the flash starts from the vendor image
+         * every boot; with one the pflash device has already loaded the
+         * (possibly firmware-updated) contents from the backing file, so the
+         * image copy would clobber them.
+         */
+        if (flash_blk == NULL) {
+            memcpy(memory_region_get_ram_ptr(flash_mr), image, image_size);
+        }
     }
 
     rom_add_blob_fixed("ia64-realfw-palstub", ia64_realfw_pal_stub,
@@ -4820,6 +4899,14 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "realfw video POST, instead of the emulated card's own vgabios.  Used "
         "to run the vendor firmware against an authentic card BIOS (e.g. the "
         "ATI Rage 128 Pro the SDV shipped with); realfw mode only.");
+    object_class_property_add_str(oc, "realfw-nvram",
+                                  ia64_vpc_get_realfw_nvram,
+                                  ia64_vpc_set_realfw_nvram);
+    object_class_property_set_description(oc, "realfw-nvram",
+        "Path to a writable file that persists the realfw flash (the firmware's "
+        "NVRAM/EFI-variable store) across runs.  Created from the realfw image "
+        "on first use; thereafter the flash is loaded from and written back to "
+        "it.  realfw mode only.");
     object_class_property_add_str(oc, "nvram",
                                   ia64_vpc_get_nvram,
                                   ia64_vpc_set_nvram);
