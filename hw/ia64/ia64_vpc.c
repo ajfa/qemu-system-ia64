@@ -461,6 +461,12 @@ struct IA64VpcMachineState {
     uint8_t *realfw_sac_data;
     uint16_t realfw_post_last;
     uint32_t realfw_config_address;
+    /*
+     * Persistent CPU-frequency mailbox (south bridge 00:03.0 reg 0xd0), NOT
+     * cleared by ia64_vpc_reset so the firmware's one-time "New CPU frequency
+     * is set" write survives its CF9 reboot.  See ia64_realfw_cfg_read.
+     */
+    uint32_t realfw_freq_mailbox;
     /* 460GX chipset config space: bus CBN devices, 8 fns x 256 bytes. */
     uint8_t *realfw_chipset_cfg;
     PCIBus *realfw_pci_bus;
@@ -3753,6 +3759,36 @@ static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
     if (!(cf8 & 0x80000000)) {
         return (1ULL << (size * 8)) - 1;
     }
+    /*
+     * CPU-frequency mailbox (south bridge 00:03.0 reg 0xd0).  The SDV firmware
+     * stores the detected processor frequency here and reads it back on the
+     * next boot; a fresh (zero) mailbox makes its frequency detector fall back
+     * to a sentinel and take the one-time "New CPU frequency is set. System
+     * resets." reboot (port 0xCF9).  The register is battery-backed on real
+     * hardware, so the written value must survive that reset for the reboot to
+     * be one-shot rather than an infinite loop.  Model it as a persistent cell
+     * that ia64_vpc_reset does NOT clear.  See plans/phase5 SESSION 17.
+     */
+    if (s->realfw_path != NULL && bus == 0 && dev == 3 && fn == 0 &&
+        (reg & 0xfc) == 0xd0) {
+        {
+            /*
+             * Bit 15 is the hardware "done/valid" flag: the firmware writes a
+             * frequency command (bit 15 clear) and polls until the mailbox
+             * reads back with bit 15 set.  Real silicon sets it once it has
+             * latched the value; our model completes instantly, so present the
+             * stored command with bit 15 forced set.
+             */
+            uint32_t cell = s->realfw_freq_mailbox | 0x8000;
+            for (i = 0; i < size; i++) {
+                unsigned b = (reg & 3) + i;
+                if (b < 4) {
+                    val |= (uint64_t)((cell >> (b * 8)) & 0xff) << (i * 8);
+                }
+            }
+        }
+        return val;
+    }
     cfg = ia64_realfw_chipset_cfg(s, bus, dev, fn);
     if (cfg != NULL && dev == 0x05 && (fn == 2 || fn == 3)) {
         /*
@@ -3855,6 +3891,18 @@ static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
         return;
     }
     if (!(cf8 & 0x80000000)) {
+        return;
+    }
+    /* CPU-frequency mailbox at 00:03.0 reg 0xd0 - see the read path. */
+    if (s->realfw_path != NULL && bus == 0 && dev == 3 && fn == 0 &&
+        (reg & 0xfc) == 0xd0) {
+        for (i = 0; i < size; i++) {
+            unsigned b = (reg & 3) + i;
+            if (b < 4) {
+                s->realfw_freq_mailbox &= ~(0xffU << (b * 8));
+                s->realfw_freq_mailbox |= ((data >> (i * 8)) & 0xff) << (b * 8);
+            }
+        }
         return;
     }
     cfg = ia64_realfw_chipset_cfg(s, bus, dev, fn);
