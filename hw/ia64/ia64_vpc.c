@@ -4626,6 +4626,19 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         MC146818RtcState *rtc = mc146818_rtc_init(isa_bus, 2000, NULL);
         if (s->realfw_path != NULL) {
             /*
+             * Make the century byte (CMOS 0x32) a read-only hardware register,
+             * as on the real 460GX RTC.  Late in POST the i2000 SDV firmware
+             * probes it by writing 0 (with the RTC halted) and requires it to
+             * still read back the century; a writable byte reads back the
+             * written 0, the firmware's RTC self-test returns EFI_DEVICE_ERROR,
+             * and the zero result count trips a break 1 at POST 0x0a.  Dropping
+             * writes keeps the stored century so the probe reads it back.  Set
+             * directly rather than via a property because mc146818_rtc_init
+             * realizes the device before returning.  realfw-only; guests keep
+             * the standard writable byte.
+             */
+            rtc->century_read_only = true;
+            /*
              * The 460GX RTC is a 256-byte part: the standard 128-byte bank is
              * reached through ports 0x70/0x71 (RTCI/RTCD), and ports 0x72/0x73
              * (RTCEI/RTCED) reach the upper 128-byte battery-backed bank ONLY
