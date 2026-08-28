@@ -327,12 +327,10 @@ EFI_STATUS __attribute__((noinline)) boot_image_from_disk(void)
 
 #define FW_MENU_MAX          20U
 #define FW_MENU_DESC_MAX     58U
-#define FW_MENU_LINE_WIDTH   60U
 
-#define FW_MENU_ATTR_NORMAL   0x07U  /* light grey on black */
-#define FW_MENU_ATTR_SELECTED 0x70U  /* black on light grey */
-#define FW_MENU_ATTR_TITLE    0x1fU  /* white on blue       */
-#define FW_MENU_ATTR_HINT     0x0eU  /* yellow on black     */
+#define FW_MENU_ATTR_NORMAL   0x07U  /* light grey on black           */
+#define FW_MENU_ATTR_SELECTED 0x70U  /* black on light grey (reverse) */
+#define FW_MENU_ATTR_HEADER   0x0eU  /* yellow on black (emphasis)    */
 
 #define FW_MENU_KIND_BOOT   0U
 #define FW_MENU_KIND_SHELL  1U
@@ -414,11 +412,13 @@ static UINTN fw_menu_build(FW_MENU_ENTRY *Entries)
         'B', 'o', 'o', 't', 'O', 'r', 'd', 'e', 'r', 0
     };
     static const CHAR16 shell_label[] = {
-        'E', 'F', 'I', ' ', 'S', 'h', 'e', 'l', 'l', 0
+        'E', 'F', 'I', ' ', 'S', 'h', 'e', 'l', 'l', ' ',
+        '[', 'B', 'u', 'i', 'l', 't', '-', 'i', 'n', ']', 0
     };
     static const CHAR16 maint_label[] = {
-        'B', 'o', 'o', 't', ' ', 'M', 'a', 'i', 'n', 't', 'e', 'n', 'a',
-        'n', 'c', 'e', ' ', 'M', 'a', 'n', 'a', 'g', 'e', 'r', 0
+        'B', 'o', 'o', 't', ' ', 'o', 'p', 't', 'i', 'o', 'n', ' ',
+        'm', 'a', 'i', 'n', 't', 'e', 'n', 'a', 'n', 'c', 'e', ' ',
+        'm', 'e', 'n', 'u', 0
     };
     static UINT8 option[NVRAM_VAR_DATA_MAX];
     UINT16 order[16];
@@ -467,45 +467,67 @@ static UINTN fw_menu_build(FW_MENU_ENTRY *Entries)
     return n;
 }
 
+/* Column at which option rows and the footer text begin. */
+#define FW_MENU_COL 4U
+
+/* Clear the screen and draw the standard header plus a prompt line. */
+static void fw_menu_frame(const CHAR8 *Prompt)
+{
+    (void)fw_console_clear();
+    fw_menu_attr(FW_MENU_ATTR_HEADER);
+    fw_menu_at(0, 0);
+    efi_conout_ascii("EFI Boot Manager ver 1.10 [1.00]");
+    fw_menu_attr(FW_MENU_ATTR_NORMAL);
+    fw_menu_at(0, 2);
+    efi_conout_ascii(Prompt);
+}
+
+/* The arrow-key help line, drawn at the given row.  The up/down glyphs are
+ * written as their Unicode code points; the console's CP437 mapping renders
+ * them from the 8x16 font (codes 0x18/0x19). */
+static void fw_menu_footer(UINTN Row)
+{
+    static const CHAR16 up[] = { 0x2191U, 0 };
+    static const CHAR16 down[] = { 0x2193U, 0 };
+
+    fw_menu_attr(FW_MENU_ATTR_NORMAL);
+    fw_menu_at(FW_MENU_COL, Row);
+    efi_conout_ascii("Use ");
+    fw_menu_put_char16(up);
+    efi_conout_ascii(" and ");
+    fw_menu_put_char16(down);
+    efi_conout_ascii(" to change option(s). Use Enter to select an option");
+}
+
+/* Draw one option row: the description at FW_MENU_COL, reverse if selected. */
+static void fw_menu_option_row(UINTN Row, const CHAR16 *Desc, BOOLEAN Selected)
+{
+    fw_menu_at(FW_MENU_COL, Row);
+    fw_menu_attr(Selected ? FW_MENU_ATTR_SELECTED : FW_MENU_ATTR_NORMAL);
+    fw_menu_put_char16(Desc);
+    fw_menu_attr(FW_MENU_ATTR_NORMAL);
+}
+
 static void fw_menu_render(const FW_MENU_ENTRY *Entries, UINTN Count,
                            UINTN Selected, INTN SecondsLeft)
 {
     UINTN i;
 
-    (void)fw_console_clear();
-    fw_menu_attr(FW_MENU_ATTR_TITLE);
-    fw_menu_at(0, 0);
-    efi_conout_ascii("            Itanium Firmware  --  Boot Manager"
-                     "                          ");
-    fw_menu_attr(FW_MENU_ATTR_NORMAL);
-    fw_menu_at(2, 2);
-    efi_conout_ascii("Up/Down move, Enter selects, Esc continues booting.");
-
+    fw_menu_frame("Please select a boot option");
     for (i = 0; i < Count; i++) {
-        UINTN len;
-        UINTN pad;
-
-        fw_menu_at(4, 4 + i);
-        fw_menu_attr(i == Selected ? FW_MENU_ATTR_SELECTED :
-                     FW_MENU_ATTR_NORMAL);
-        efi_conout_ascii(i == Selected ? "  > " : "    ");
-        fw_menu_put_char16(Entries[i].Desc);
-        len = fw_char16_bounded_len(Entries[i].Desc, FW_MENU_DESC_MAX);
-        for (pad = len; pad < FW_MENU_LINE_WIDTH; pad++) {
-            efi_conout_ascii(" ");
-        }
+        fw_menu_option_row(4 + i, Entries[i].Desc, i == Selected);
     }
+    fw_menu_footer(5 + Count);
 
-    fw_menu_at(2, 5 + Count);
-    fw_menu_attr(FW_MENU_ATTR_HINT);
+    fw_menu_at(FW_MENU_COL, 6 + Count);
     if (SecondsLeft >= 0) {
-        efi_conout_ascii("Booting the default in ");
+        efi_conout_ascii("Default boot selection will be booted in ");
         fw_menu_put_uint((UINTN)SecondsLeft);
-        efi_conout_ascii(SecondsLeft == 1 ? " second...  " : " seconds... ");
+        efi_conout_ascii(" seconds       ");
     } else {
-        efi_conout_ascii("                                            ");
+        efi_conout_ascii("                                            "
+                         "                    ");
     }
-    fw_menu_attr(FW_MENU_ATTR_NORMAL);
 }
 
 static void fw_menu_activate(const FW_MENU_ENTRY *Entry)
@@ -611,19 +633,13 @@ static void fw_maint_set_timeout(void)
     UINT32 value = 0;
     BOOLEAN entered = 0;
 
-    (void)fw_console_clear();
-    fw_menu_attr(FW_MENU_ATTR_TITLE);
-    fw_menu_at(0, 0);
-    efi_conout_ascii("            Boot Maintenance  --  Set Boot Timeout"
-                     "                    ");
-    fw_menu_attr(FW_MENU_ATTR_NORMAL);
-    fw_menu_at(2, 2);
-    efi_conout_ascii("Current auto-boot timeout: ");
+    fw_menu_frame("Set auto boot timeout");
+    fw_menu_at(FW_MENU_COL, 4);
+    efi_conout_ascii("Current TimeOut is : ");
     fw_menu_put_uint(current);
-    efi_conout_ascii(" second(s).");
-    fw_menu_at(2, 4);
-    efi_conout_ascii("Type a new value in seconds, Enter to save, "
-                     "Esc to cancel: ");
+    efi_conout_ascii(" seconds");
+    fw_menu_at(FW_MENU_COL, 6);
+    efi_conout_ascii("New TimeOut in seconds (<= 65535) is : ");
 
     for (;;) {
         EFI_INPUT_KEY key;
@@ -799,34 +815,28 @@ static void fw_maint_add_entry(void)
     CHAR16 name[9];
     EFI_STATUS st;
 
-    (void)fw_console_clear();
-    fw_menu_attr(FW_MENU_ATTR_TITLE);
-    fw_menu_at(0, 0);
-    efi_conout_ascii("            Boot Maintenance  --  Add Boot Entry"
-                     "                      ");
-    fw_menu_attr(FW_MENU_ATTR_NORMAL);
+    fw_menu_frame("Add a boot option");
 
     if (mDefaultFatVolume == NULL || !mDefaultFatVolume->valid) {
-        fw_menu_at(2, 2);
+        fw_menu_at(FW_MENU_COL, 4);
         efi_conout_ascii("No boot volume is available.  Press a key.");
         fw_menu_wait_key();
         return;
     }
 
-    fw_menu_at(2, 2);
-    efi_conout_ascii("Loader path on the boot volume");
-    fw_menu_at(2, 3);
-    efi_conout_ascii("(e.g. \\EFI\\redhat\\elilo.efi), Esc cancels:");
-    fw_menu_at(2, 4);
+    fw_menu_at(FW_MENU_COL, 4);
+    efi_conout_ascii("Loader path (e.g. \\EFI\\redhat\\elilo.efi), "
+                     "Esc cancels:");
+    fw_menu_at(FW_MENU_COL, 5);
     efi_conout_ascii("> ");
     pathlen = fw_menu_read_line(path, sizeof(path) / sizeof(path[0]));
     if (pathlen == 0) {
         return;
     }
 
-    fw_menu_at(2, 6);
+    fw_menu_at(FW_MENU_COL, 7);
     efi_conout_ascii("Description, Esc cancels:");
-    fw_menu_at(2, 7);
+    fw_menu_at(FW_MENU_COL, 8);
     efi_conout_ascii("> ");
     desclen = fw_menu_read_line(desc, sizeof(desc) / sizeof(desc[0]));
     if (desclen == 0) {
@@ -851,7 +861,7 @@ static void fw_maint_add_entry(void)
     st = fw_build_file_device_path(mDefaultFatVolume->handle, hdr,
                                    full_path, sizeof(full_path));
     if (st != EFI_SUCCESS) {
-        fw_menu_at(2, 9);
+        fw_menu_at(FW_MENU_COL, 10);
         efi_conout_ascii("Could not build the device path.  Press a key.");
         fw_menu_wait_key();
         return;
@@ -882,7 +892,7 @@ static void fw_maint_add_entry(void)
     if (st == EFI_SUCCESS) {
         fw_menu_bootorder_append(num);
     }
-    fw_menu_at(2, 9);
+    fw_menu_at(FW_MENU_COL, 10);
     efi_conout_ascii(st == EFI_SUCCESS ?
                      "Boot entry created.  Press a key." :
                      "Failed to save the boot entry.  Press a key.");
@@ -910,29 +920,11 @@ static void fw_maint_delete_entry(void)
             return;
         }
         if (dirty) {
-            (void)fw_console_clear();
-            fw_menu_attr(FW_MENU_ATTR_TITLE);
-            fw_menu_at(0, 0);
-            efi_conout_ascii("            Boot Maintenance  --  Delete Boot "
-                             "Entry                  ");
-            fw_menu_attr(FW_MENU_ATTR_NORMAL);
-            fw_menu_at(2, 2);
-            efi_conout_ascii("Up/Down move, Enter deletes, Esc returns.");
+            fw_menu_frame("Delete boot option(s)");
             for (i = 0; i < boot_count; i++) {
-                UINTN len;
-                UINTN pad;
-
-                fw_menu_at(4, 4 + i);
-                fw_menu_attr(i == selected ? FW_MENU_ATTR_SELECTED :
-                             FW_MENU_ATTR_NORMAL);
-                efi_conout_ascii(i == selected ? "  > " : "    ");
-                fw_menu_put_char16(entries[i].Desc);
-                len = fw_char16_bounded_len(entries[i].Desc, FW_MENU_DESC_MAX);
-                for (pad = len; pad < FW_MENU_LINE_WIDTH; pad++) {
-                    efi_conout_ascii(" ");
-                }
+                fw_menu_option_row(4 + i, entries[i].Desc, i == selected);
             }
-            fw_menu_attr(FW_MENU_ATTR_NORMAL);
+            fw_menu_footer(5 + boot_count);
             dirty = 0;
         }
 
@@ -967,10 +959,10 @@ static void fw_maint_delete_entry(void)
 static void fw_boot_maint_run(void)
 {
     static const CHAR8 *const items[] = {
-        "Add Boot Entry",
-        "Delete Boot Entry",
-        "Set Boot Timeout",
-        "Return to Boot Manager",
+        "Add a Boot Option",
+        "Delete Boot Option(s)",
+        "Set Auto Boot TimeOut",
+        "Exit",
     };
     UINTN count = sizeof(items) / sizeof(items[0]);
     UINTN selected = 0;
@@ -979,31 +971,15 @@ static void fw_boot_maint_run(void)
         EFI_INPUT_KEY key;
         UINTN i;
 
-        (void)fw_console_clear();
-        fw_menu_attr(FW_MENU_ATTR_TITLE);
-        fw_menu_at(0, 0);
-        efi_conout_ascii("            Boot Maintenance Manager"
-                         "                                ");
-        fw_menu_attr(FW_MENU_ATTR_NORMAL);
-        fw_menu_at(2, 2);
-        efi_conout_ascii("Up/Down move, Enter selects, Esc returns.");
+        fw_menu_frame("Boot option maintenance menu");
         for (i = 0; i < count; i++) {
-            UINTN len = 0;
-            UINTN pad;
-
-            fw_menu_at(4, 4 + i);
+            fw_menu_at(FW_MENU_COL, 4 + i);
             fw_menu_attr(i == selected ? FW_MENU_ATTR_SELECTED :
                          FW_MENU_ATTR_NORMAL);
-            efi_conout_ascii(i == selected ? "  > " : "    ");
             efi_conout_ascii(items[i]);
-            while (items[i][len] != 0) {
-                len++;
-            }
-            for (pad = len; pad < FW_MENU_LINE_WIDTH; pad++) {
-                efi_conout_ascii(" ");
-            }
+            fw_menu_attr(FW_MENU_ATTR_NORMAL);
         }
-        fw_menu_attr(FW_MENU_ATTR_NORMAL);
+        fw_menu_footer(5 + count);
 
         for (;;) {
             if (fw_console_read_key(&key) == EFI_SUCCESS) {

@@ -2194,8 +2194,16 @@ static void graphics_program_text_mode(void)
         vga_io_write(VGA_ATT_W, attr[i]);
     }
     vga_io_write(VGA_PEL_MSK, 0xff);
+    /*
+     * The attribute controller maps the 16 text colours to the scattered DAC
+     * indices in attr[0..15] (0x00-0x07, 0x14, 0x38-0x3f), exactly as a real
+     * VGA BIOS programs mode 3.  Load each colour into the DAC slot its ATC
+     * entry selects -- loading 0..15 instead leaves the bright colours (and
+     * brown) pointing at unwritten DAC entries, so e.g. yellow text renders
+     * from QEMU's default palette and can come out black.
+     */
     for (i = 0; i < FW_ARRAY_SIZE(dac); i++) {
-        vga_io_write(VGA_PEL_IW, (UINT8)i);
+        vga_io_write(VGA_PEL_IW, attr[i]);
         vga_io_write(VGA_PEL_D, dac[i][0]);
         vga_io_write(VGA_PEL_D, dac[i][1]);
         vga_io_write(VGA_PEL_D, dac[i][2]);

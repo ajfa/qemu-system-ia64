@@ -1368,7 +1368,7 @@ FW_CONSOLE_OUTPUT_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mConsoleOutputDevicePat
 /* FW_EFI_BOOT_OPTION lives in fw-fs.h. */
 
 const CHAR16 mDefaultBootDescription[14] = {
-    'O', 'p', 't', 'i', 'c', 'a', 'l', ' ', 'S', 'e', 't', 'u', 'p', 0,
+    'E', 'F', 'I', ' ', 'D', 'V', 'D', '/', 'C', 'D', 'R', 'O', 'M', 0,
 };
 
 
