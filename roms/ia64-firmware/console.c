@@ -14,6 +14,7 @@
 #include "fw-base.h"
 #include "fw-services.h"
 #include "fw-platform-layout.h"
+#include "vga_font_8x16.h"
 
 #define FW_CONIN_KEY_NOTIFY_MAX 16U
 
@@ -392,173 +393,16 @@ static UINT8 text_unicode_to_cp437(CHAR16 Ch)
     return (UINT8)'?';
 }
 
-UINT64 text_glyph5x7(CHAR16 Ch)
+static int text_font_glyphs_identical(unsigned char A, unsigned char B)
 {
-    switch (Ch) {
-    case ' ': return GLYPH7(0, 0, 0, 0, 0, 0, 0);
-    case '!': return GLYPH7(4, 4, 4, 4, 4, 0, 4);
-    case '"': return GLYPH7(10, 10, 10, 0, 0, 0, 0);
-    case '#': return GLYPH7(10, 31, 10, 10, 31, 10, 0);
-    case '$': return GLYPH7(4, 15, 20, 14, 5, 30, 4);
-    case '%': return GLYPH7(24, 25, 2, 4, 8, 19, 3);
-    case '&': return GLYPH7(12, 18, 20, 8, 21, 18, 13);
-    case '\'': return GLYPH7(4, 4, 8, 0, 0, 0, 0);
-    case '(': return GLYPH7(2, 4, 8, 8, 8, 4, 2);
-    case ')': return GLYPH7(8, 4, 2, 2, 2, 4, 8);
-    case '*': return GLYPH7(0, 10, 4, 31, 4, 10, 0);
-    case '+': return GLYPH7(0, 4, 4, 31, 4, 4, 0);
-    case ',': return GLYPH7(0, 0, 0, 0, 4, 4, 8);
-    case '-': return GLYPH7(0, 0, 0, 31, 0, 0, 0);
-    case '.': return GLYPH7(0, 0, 0, 0, 0, 12, 12);
-    case '/': return GLYPH7(1, 2, 4, 8, 16, 0, 0);
-    case '0': return GLYPH7(14, 17, 19, 21, 25, 17, 14);
-    case '1': return GLYPH7(4, 12, 4, 4, 4, 4, 14);
-    case '2': return GLYPH7(14, 17, 1, 2, 4, 8, 31);
-    case '3': return GLYPH7(30, 1, 1, 14, 1, 1, 30);
-    case '4': return GLYPH7(2, 6, 10, 18, 31, 2, 2);
-    case '5': return GLYPH7(31, 16, 30, 1, 1, 17, 14);
-    case '6': return GLYPH7(6, 8, 16, 30, 17, 17, 14);
-    case '7': return GLYPH7(31, 1, 2, 4, 8, 8, 8);
-    case '8': return GLYPH7(14, 17, 17, 14, 17, 17, 14);
-    case '9': return GLYPH7(14, 17, 17, 15, 1, 2, 12);
-    case ':': return GLYPH7(0, 12, 12, 0, 12, 12, 0);
-    case ';': return GLYPH7(0, 12, 12, 0, 4, 4, 8);
-    case '<': return GLYPH7(2, 4, 8, 16, 8, 4, 2);
-    case '=': return GLYPH7(0, 0, 31, 0, 31, 0, 0);
-    case '>': return GLYPH7(8, 4, 2, 1, 2, 4, 8);
-    case '?': return GLYPH7(14, 17, 1, 2, 4, 0, 4);
-    case '@': return GLYPH7(14, 17, 1, 13, 21, 21, 14);
-    case 'A': return GLYPH7(14, 17, 17, 31, 17, 17, 17);
-    case 'B': return GLYPH7(30, 17, 17, 30, 17, 17, 30);
-    case 'C': return GLYPH7(14, 17, 16, 16, 16, 17, 14);
-    case 'D': return GLYPH7(30, 17, 17, 17, 17, 17, 30);
-    case 'E': return GLYPH7(31, 16, 16, 30, 16, 16, 31);
-    case 'F': return GLYPH7(31, 16, 16, 30, 16, 16, 16);
-    case 'G': return GLYPH7(14, 17, 16, 23, 17, 17, 15);
-    case 'H': return GLYPH7(17, 17, 17, 31, 17, 17, 17);
-    case 'I': return GLYPH7(14, 4, 4, 4, 4, 4, 14);
-    case 'J': return GLYPH7(1, 1, 1, 1, 17, 17, 14);
-    case 'K': return GLYPH7(17, 18, 20, 24, 20, 18, 17);
-    case 'L': return GLYPH7(16, 16, 16, 16, 16, 16, 31);
-    case 'M': return GLYPH7(17, 27, 21, 21, 17, 17, 17);
-    case 'N': return GLYPH7(17, 25, 21, 19, 17, 17, 17);
-    case 'O': return GLYPH7(14, 17, 17, 17, 17, 17, 14);
-    case 'P': return GLYPH7(30, 17, 17, 30, 16, 16, 16);
-    case 'Q': return GLYPH7(14, 17, 17, 17, 21, 18, 13);
-    case 'R': return GLYPH7(30, 17, 17, 30, 20, 18, 17);
-    case 'S': return GLYPH7(15, 16, 16, 14, 1, 1, 30);
-    case 'T': return GLYPH7(31, 4, 4, 4, 4, 4, 4);
-    case 'U': return GLYPH7(17, 17, 17, 17, 17, 17, 14);
-    case 'V': return GLYPH7(17, 17, 17, 17, 17, 10, 4);
-    case 'W': return GLYPH7(17, 17, 17, 21, 21, 21, 10);
-    case 'X': return GLYPH7(17, 17, 10, 4, 10, 17, 17);
-    case 'Y': return GLYPH7(17, 17, 10, 4, 4, 4, 4);
-    case 'Z': return GLYPH7(31, 1, 2, 4, 8, 16, 31);
-    case '[': return GLYPH7(14, 8, 8, 8, 8, 8, 14);
-    case '\\': return GLYPH7(16, 8, 4, 2, 1, 0, 0);
-    case ']': return GLYPH7(14, 2, 2, 2, 2, 2, 14);
-    case '^': return GLYPH7(4, 10, 17, 0, 0, 0, 0);
-    case '_': return GLYPH7(0, 0, 0, 0, 0, 0, 31);
-    case '`': return GLYPH7(8, 4, 2, 0, 0, 0, 0);
-    case 'a': return GLYPH7(0, 0, 14, 1, 15, 17, 15);
-    case 'b': return GLYPH7(16, 16, 22, 25, 17, 17, 30);
-    case 'c': return GLYPH7(0, 0, 14, 16, 16, 17, 14);
-    case 'd': return GLYPH7(1, 1, 13, 19, 17, 17, 15);
-    case 'e': return GLYPH7(0, 0, 14, 17, 31, 16, 14);
-    case 'f': return GLYPH7(6, 8, 8, 28, 8, 8, 8);
-    case 'g': return GLYPH7(0, 0, 15, 17, 15, 1, 14);
-    case 'h': return GLYPH7(16, 16, 22, 25, 17, 17, 17);
-    case 'i': return GLYPH7(4, 0, 12, 4, 4, 4, 14);
-    case 'j': return GLYPH7(2, 0, 6, 2, 2, 18, 12);
-    case 'k': return GLYPH7(16, 16, 18, 20, 24, 20, 18);
-    case 'l': return GLYPH7(12, 4, 4, 4, 4, 4, 14);
-    case 'm': return GLYPH7(0, 0, 26, 21, 21, 17, 17);
-    case 'n': return GLYPH7(0, 0, 22, 25, 17, 17, 17);
-    case 'o': return GLYPH7(0, 0, 14, 17, 17, 17, 14);
-    case 'p': return GLYPH7(0, 0, 30, 17, 30, 16, 16);
-    case 'q': return GLYPH7(0, 0, 13, 19, 15, 1, 1);
-    case 'r': return GLYPH7(0, 0, 22, 25, 16, 16, 16);
-    case 's': return GLYPH7(0, 0, 15, 16, 14, 1, 30);
-    case 't': return GLYPH7(8, 8, 28, 8, 8, 9, 6);
-    case 'u': return GLYPH7(0, 0, 17, 17, 17, 19, 13);
-    case 'v': return GLYPH7(0, 0, 17, 17, 17, 10, 4);
-    case 'w': return GLYPH7(0, 0, 17, 17, 21, 21, 10);
-    case 'x': return GLYPH7(0, 0, 17, 10, 4, 10, 17);
-    case 'y': return GLYPH7(0, 0, 17, 17, 15, 1, 14);
-    case 'z': return GLYPH7(0, 0, 31, 2, 4, 8, 31);
-    case '{': return GLYPH7(2, 4, 4, 8, 4, 4, 2);
-    case '|': return GLYPH7(4, 4, 4, 0, 4, 4, 4);
-    case '}': return GLYPH7(8, 4, 4, 2, 4, 4, 8);
-    case '~': return GLYPH7(0, 0, 8, 21, 2, 0, 0);
-    case 0x2500:
-    case 0xc4: return GLYPH7(0, 0, 0, 31, 0, 0, 0);
-    case 0x2502:
-    case 0xb3: return GLYPH7(4, 4, 4, 4, 4, 4, 4);
-    case 0x250c:
-    case 0xda: return GLYPH7(0, 0, 0, 7, 4, 4, 4);
-    case 0x2510:
-    case 0xbf: return GLYPH7(0, 0, 0, 28, 4, 4, 4);
-    case 0x2514:
-    case 0xc0: return GLYPH7(4, 4, 4, 7, 0, 0, 0);
-    case 0x2518:
-    case 0xd9: return GLYPH7(4, 4, 4, 28, 0, 0, 0);
-    case 0x251c:
-    case 0xc3: return GLYPH7(4, 4, 4, 28, 4, 4, 4);
-    case 0x2524:
-    case 0xb4: return GLYPH7(4, 4, 4, 7, 4, 4, 4);
-    case 0x252c:
-    case 0xc2: return GLYPH7(0, 0, 0, 31, 4, 4, 4);
-    case 0x2534:
-    case 0xc1: return GLYPH7(4, 4, 4, 31, 0, 0, 0);
-    case 0x253c:
-    case 0xc5: return GLYPH7(4, 4, 4, 31, 4, 4, 4);
-    case 0x2550: return GLYPH7(0, 0, 31, 0, 31, 0, 0);
-    case 0x2551: return GLYPH7(10, 10, 10, 10, 10, 10, 10);
-    case 0x2552:
-    case 0x2553:
-    case 0x2554: return GLYPH7(0, 0, 0, 7, 4, 4, 4);
-    case 0x2555:
-    case 0x2556:
-    case 0x2557: return GLYPH7(0, 0, 0, 28, 4, 4, 4);
-    case 0x2558:
-    case 0x2559:
-    case 0x255a: return GLYPH7(4, 4, 4, 7, 0, 0, 0);
-    case 0x255b:
-    case 0x255c:
-    case 0x255d: return GLYPH7(4, 4, 4, 28, 0, 0, 0);
-    case 0x255e:
-    case 0x255f:
-    case 0x2560: return GLYPH7(4, 4, 4, 28, 4, 4, 4);
-    case 0x2561:
-    case 0x2562:
-    case 0x2563: return GLYPH7(4, 4, 4, 7, 4, 4, 4);
-    case 0x2564:
-    case 0x2565:
-    case 0x2566: return GLYPH7(0, 0, 0, 31, 4, 4, 4);
-    case 0x2567:
-    case 0x2568:
-    case 0x2569: return GLYPH7(4, 4, 4, 31, 0, 0, 0);
-    case 0x256a:
-    case 0x256b:
-    case 0x256c: return GLYPH7(4, 4, 4, 31, 4, 4, 4);
-    case 0x2588: return GLYPH7(31, 31, 31, 31, 31, 31, 31);
-    case 0x2591: return GLYPH7(10, 0, 21, 0, 10, 0, 21);
-    case 0x25b2: return GLYPH7(4, 14, 31, 31, 0, 0, 0);
-    case 0x25ba: return GLYPH7(16, 24, 28, 30, 28, 24, 16);
-    case 0x25bc: return GLYPH7(0, 0, 0, 31, 31, 14, 4);
-    case 0x25c4: return GLYPH7(1, 3, 7, 15, 7, 3, 1);
-    case 0x2191: return GLYPH7(4, 14, 21, 4, 4, 4, 4);
-    case 0x2193: return GLYPH7(4, 4, 4, 4, 21, 14, 4);
-    default:
-        if (Ch >= 0xb3U && Ch <= 0xdaU) {
-            return GLYPH7(31, 17, 17, 17, 17, 17, 31);
+    UINTN i;
+
+    for (i = 0; i < VGA_FONT_8X16_HEIGHT; i++) {
+        if (gVgaFont8x16[A][i] != gVgaFont8x16[B][i]) {
+            return 0;
         }
-        if ((Ch >= 0xb0U && Ch <= 0xb2U) ||
-            (Ch >= 0xdbU && Ch <= 0xdfU)) {
-            return GLYPH7(31, 31, 31, 31, 31, 31, 31);
-        }
-        return GLYPH7(14, 17, 1, 2, 4, 0, 4);
     }
+    return 1;
 }
 
 static UINT32 text_efi_color(UINTN Color)
@@ -587,63 +431,34 @@ static UINT32 text_read_pixel(UINTN X, UINTN Y)
     return *p;
 }
 
-static UINT64 text_cell_pixel_pair(UINT8 Bits, UINTN Pair, UINT32 Fg,
-                                   UINT32 Bg)
-{
-    UINTN x = Pair * 2U;
-    UINT32 left = Bg;
-    UINT32 right = Bg;
-
-    if (x >= VGA_TEXT_GLYPH_X &&
-        x < VGA_TEXT_GLYPH_X + VGA_TEXT_GLYPH_WIDTH &&
-        (Bits & (1U << (VGA_TEXT_GLYPH_WIDTH - 1U -
-                        (x - VGA_TEXT_GLYPH_X))))) {
-        left = Fg;
-    }
-    x++;
-    if (x >= VGA_TEXT_GLYPH_X &&
-        x < VGA_TEXT_GLYPH_X + VGA_TEXT_GLYPH_WIDTH &&
-        (Bits & (1U << (VGA_TEXT_GLYPH_WIDTH - 1U -
-                        (x - VGA_TEXT_GLYPH_X))))) {
-        right = Fg;
-    }
-    return text_pixel_pair(left, right);
-}
-
-static void text_draw_graphics_cell(UINTN X0, UINTN Y0, UINT64 Glyph,
+static void text_draw_graphics_cell(UINTN X0, UINTN Y0, UINT8 Ch,
                                     UINT32 Fg, UINT32 Bg)
 {
-    UINT64 bg_pair = text_pixel_pair(Bg, Bg);
+    const unsigned char *glyph = gVgaFont8x16[Ch];
     UINTN y;
 
+    /*
+     * Rasterise the standard 8x16 VGA glyph: one byte per scan line, bit 0x80
+     * leftmost, eight pixels per row packed as four 32-bit-pixel pairs.  This
+     * matches what the VGA character generator produces from plane 2, so the
+     * graphics-mode console and the hardware text-mode console show an
+     * identical font.
+     */
     for (y = 0; y < VGA_TEXT_CELL_HEIGHT; y++) {
         volatile UINT64 *dst =
             (volatile UINT64 *)(UINTN)(VGA_FB_BASE +
                                        (Y0 + y) * mGraphicsStride +
                                        X0 * sizeof(UINT32));
-        UINT8 bits = 0;
+        UINT8 bits = (y < VGA_FONT_8X16_HEIGHT) ? glyph[y] : 0U;
 
-        if (y >= VGA_TEXT_GLYPH_Y &&
-            y < VGA_TEXT_GLYPH_Y +
-                VGA_TEXT_GLYPH_HEIGHT * VGA_TEXT_GLYPH_SCALE_Y) {
-            UINTN glyph_row = (y - VGA_TEXT_GLYPH_Y) /
-                              VGA_TEXT_GLYPH_SCALE_Y;
-
-            bits = (UINT8)((Glyph >> (glyph_row * VGA_TEXT_GLYPH_WIDTH)) &
-                           0x1fU);
-        }
-
-        if (bits == 0) {
-            dst[0] = bg_pair;
-            dst[1] = bg_pair;
-            dst[2] = bg_pair;
-            dst[3] = bg_pair;
-        } else {
-            dst[0] = text_cell_pixel_pair(bits, 0, Fg, Bg);
-            dst[1] = text_cell_pixel_pair(bits, 1, Fg, Bg);
-            dst[2] = text_cell_pixel_pair(bits, 2, Fg, Bg);
-            dst[3] = text_cell_pixel_pair(bits, 3, Fg, Bg);
-        }
+        dst[0] = text_pixel_pair((bits & 0x80U) ? Fg : Bg,
+                                 (bits & 0x40U) ? Fg : Bg);
+        dst[1] = text_pixel_pair((bits & 0x20U) ? Fg : Bg,
+                                 (bits & 0x10U) ? Fg : Bg);
+        dst[2] = text_pixel_pair((bits & 0x08U) ? Fg : Bg,
+                                 (bits & 0x04U) ? Fg : Bg);
+        dst[3] = text_pixel_pair((bits & 0x02U) ? Fg : Bg,
+                                 (bits & 0x01U) ? Fg : Bg);
     }
 }
 
@@ -673,7 +488,6 @@ static void text_draw_cell(UINTN Column, UINTN Row)
     UINT32 fg = text_efi_color(attr & 0x0fU);
     UINT32 bg = text_efi_color((attr >> 4) & 0x07U);
     UINT8 ch = text_unicode_to_cp437(mTextChars[Row][Column]);
-    UINT64 glyph = text_glyph5x7((CHAR16)ch);
 
     text_write_legacy_cell(Column, Row, ch);
 
@@ -681,7 +495,7 @@ static void text_draw_cell(UINTN Column, UINTN Row)
         return;
     }
 
-    text_draw_graphics_cell(x0, y0, glyph, fg, bg);
+    text_draw_graphics_cell(x0, y0, ch, fg, bg);
 }
 
 void text_redraw_screen(void)
@@ -1039,9 +853,9 @@ BOOLEAN __attribute__((noinline)) uefi_conout_selftest(void)
     if (st != EFI_WARN_UNKNOWN_GLYPH) {
         ok = 0;
     }
-    if (text_glyph5x7('a') == text_glyph5x7('A') ||
-        text_glyph5x7('g') == text_glyph5x7('G') ||
-        text_glyph5x7('z') == text_glyph5x7('Z')) {
+    if (text_font_glyphs_identical('a', 'A') ||
+        text_font_glyphs_identical('g', 'G') ||
+        text_font_glyphs_identical('z', 'Z')) {
         ok = 0;
     }
     saved_chars[0] = mTextChars[0][0];

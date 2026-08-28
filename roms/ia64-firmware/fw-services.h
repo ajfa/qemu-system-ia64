@@ -264,7 +264,6 @@ BOOLEAN uefi_ps2_scancode_selftest(void);
 void text_redraw_screen(void);
 void text_clear_screen(void);
 void text_clear_legacy_cells(void);
-UINT64 text_glyph5x7(CHAR16 Ch);
 
 extern const UINT8 mConOutProtocolGuid[16];
 extern const UINT8 mConInProtocolGuid[16];

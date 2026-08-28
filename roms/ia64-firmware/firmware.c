@@ -32,6 +32,7 @@
 #include "fw-uga-io.h"
 #include "ia64-fw-acpi-aml.h"
 #include "fw-usb.h"
+#include "vga_font_8x16.h"
 
 
 /*
@@ -2129,21 +2130,17 @@ static void graphics_load_text_font(void)
     vga_indexed_write(VGA_GFX_I, VGA_GFX_D, 0x08, 0xff);
 
     for (ch = 0; ch < 256U; ch++) {
-        UINT64 glyph = text_glyph5x7((CHAR16)ch);
         UINTN row;
 
+        /*
+         * VGA plane 2 reserves 32 bytes per glyph; a mode-3 cell is 16 scan
+         * lines tall (CRTC max-scan-line 0x0f).  Load the standard 8x16 VGA
+         * font -- the character generator then rasterises it exactly as the
+         * real i2000 VGA does, one byte per scan line, bit 0x80 leftmost.
+         */
         for (row = 0; row < 32U; row++) {
-            UINT8 bits = 0;
-
-            if (row >= 1U && row < 15U) {
-                UINTN glyph_row = (row - 1U) / 2U;
-                UINT8 glyph_bits =
-                    (UINT8)((glyph >> (glyph_row * VGA_TEXT_GLYPH_WIDTH)) &
-                            0x1fU);
-
-                bits = (UINT8)(glyph_bits << VGA_TEXT_GLYPH_X);
-            }
-            font[ch * 32U + row] = bits;
+            font[ch * 32U + row] = (row < VGA_FONT_8X16_HEIGHT) ?
+                                   gVgaFont8x16[ch][row] : 0U;
         }
     }
 }
@@ -7496,7 +7493,18 @@ static void efi_init_graphics(void)
     mUgaDrawProto.SetMode = uga_set_mode;
     mUgaDrawProto.Blt = uga_blt;
 
-    (void)graphics_select_mode(0, 1);
+    /*
+     * Boot the firmware's own console in hardware VGA text mode: establish the
+     * GOP mode-0 geometry (so a GOP consumer that reads the current mode sees a
+     * valid framebuffer) but leave the display in 80x25 text.  The VGA
+     * character generator rasterises the 8x16 font from plane 2 exactly as a
+     * real i2000 does, which both matches hardware and is far cheaper than
+     * software-blitting every glyph to the uncached linear framebuffer.  A GOP/
+     * UGA consumer switches to graphics via SetMode; a vgacon OS is handed off
+     * already in text mode (see graphics_prepare_os_handoff).
+     */
+    (void)graphics_select_mode(0, 0);
+    graphics_select_text_mode();
 }
 
 static void efi_init_static_handles(void)
