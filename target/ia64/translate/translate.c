@@ -129,6 +129,27 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
         return address == entry_pa;
     }
 
+    /*
+     * A break 0x100000 only ever sits at a PAL entry.  If the virtual IP
+     * equals the physical entry, it is that entry reached through its identity
+     * mapping (virtual==physical), so match it directly -- BEFORE the resolvers
+     * below.  The firmware-identity and SAL-boot resolvers cover only our own
+     * firmware, not a vendor image whose PAL stub sits at 0xff100000, and the
+     * cached-TLB lookup can transiently miss the firmware's own ITLB entry (the
+     * instruction fetch that reached this break used the softmmu TLB while this
+     * match walks the guest TLB, so the two diverge).  Worse, if one of those
+     * resolvers instead resolves this identity-mapped IP to some OTHER physical
+     * address, the pa==entry_pa test wrongly fails and the PAL-hook
+     * interception, decided here at translate time, drops the break into the
+     * firmware's Break vector, which rfi-loops.  Deciding the identity case up
+     * front avoids both the transient miss and the mis-resolution.  (This
+     * supersedes the earlier "last resort" fallback that ran only after every
+     * resolver had failed, which a wrong resolution slipped past.)
+     */
+    if (address == entry_pa) {
+        return true;
+    }
+
     if (ia64_firmware_identity_pa(env->fw_image_base, env->cr_iva, address, env->psr,
                                   address, &pa) ||
         ia64_sal_boot_virtual_pa(env, address, &pa)) {
@@ -147,25 +168,6 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
 
     if (ia64_sal_boot_identity_pa_type(env, address, &pa, true)) {
         return pa == entry_pa;
-    }
-
-    /*
-     * Last resort: none of the resolvers above found a translation for this
-     * virtual IP.  A firmware PAL entry (e.g. a vendor firmware's PAL stub, at
-     * 0xff100000 for the realfw HP i2000 image) is identity-mapped
-     * virtual==physical, but the firmware-identity and SAL-boot resolvers only
-     * cover our own firmware, not a vendor one, and the cached-TLB lookup can
-     * transiently miss the firmware's own ITLB entry -- the instruction fetch
-     * that got us here uses the softmmu TLB while this match walks the guest
-     * TLB, so the two can diverge and the fetch succeeds where this lookup
-     * comes up empty.  A break 0x100000 only ever sits at a PAL entry, so an IP
-     * that equals the physical entry is that entry reached through its identity
-     * mapping: treat it as a match.  Without this the PAL-hook interception,
-     * decided here at translate time, intermittently goes stale in virtual mode
-     * and the break drops into the firmware's Break vector, which rfi-loops.
-     */
-    if (address == entry_pa) {
-        return true;
     }
 
     return false;
