@@ -198,5 +198,6 @@ void fw_reset_cold(VOID);
 BOOLEAN fw_boot_shell_hotkey_window(VOID);
 BOOLEAN fw_boot_shell_selftest(VOID);
 void fw_boot_shell_run(VOID);
+void fw_boot_menu_run(VOID);
 
 #endif /* IA64_FIRMWARE_FW_BOOT_SHELL_H */

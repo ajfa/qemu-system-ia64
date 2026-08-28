@@ -14410,10 +14410,14 @@ static void fw_phase_protocols_and_selftests(void)
 
 static void fw_phase_boot(void)
 {
-
-    if (fw_boot_shell_hotkey_window()) {
-        fw_boot_shell_run();
-    }
+    /*
+     * Interactive boot manager: it lists the Boot#### options, honours the EFI
+     * Timeout variable with a countdown that auto-boots the default, and offers
+     * the EFI shell and a boot-maintenance submenu.  It returns only if the
+     * user pressed Esc to continue, or every boot option failed -- in which
+     * case we fall through to the normal BootOrder/removable-media path below.
+     */
+    fw_boot_menu_run();
     if (mBootServicesExited) {
         while (1) {
         }
