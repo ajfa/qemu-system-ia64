@@ -250,7 +250,7 @@ typedef struct {
 typedef struct {
     UINT32 Attributes;
     UINT16 FilePathListLength;
-    CHAR16 Description[14];
+    CHAR16 Description[21];
     FW_OPTICAL_SETUP_LOADER_DEVICE_PATH FilePath;
 } __attribute__((packed)) FW_EFI_BOOT_OPTION;
 typedef struct {
@@ -345,7 +345,7 @@ extern UINT32 mBootImagePartitionBlocks;
 extern UINT64 mBootImagePartitionCdBlocks;
 extern UINT32 mBootImageStartLba;
 extern FW_CONSOLE_OUTPUT_DEVICE_PATH mConsoleOutputDevicePath;
-extern const CHAR16 mDefaultBootDescription[14];
+extern const CHAR16 mDefaultBootDescription[21];
 extern FW_FAT_VOLUME *mDefaultFatVolume;
 extern FW_RAW_BLOCK_DEVICE_PATH mDiskBlockDevicePath;
 extern EFI_BLOCK_IO_MEDIA    mDiskBlockIoMedia;

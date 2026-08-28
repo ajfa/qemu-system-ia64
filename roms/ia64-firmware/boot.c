@@ -626,53 +626,176 @@ void fw_boot_menu_run(void)
 
 /* --- Boot maintenance ----------------------------------------------------- */
 
-static void fw_maint_set_timeout(void)
-{
-    static CHAR16 name[] = { 'T', 'i', 'm', 'e', 'o', 'u', 't', 0 };
-    UINT16 current = fw_menu_read_timeout();
-    UINT32 value = 0;
-    BOOLEAN entered = 0;
+/*
+ * The Boot Maintenance Manager mirrors the Intel EFI 1.10 sample: a persistent
+ * banner, a Main Menu of operations, and sub-menus that edit the NVRAM boot
+ * configuration.  Each screen re-draws the banner (fw_maint_frame); the
+ * operation sub-menus append the "Save Settings to NVRAM"/"Help"/"Exit"
+ * actions and offer to save on exit when there are unsaved changes.
+ */
 
-    fw_menu_frame("Set auto boot timeout");
-    fw_menu_at(FW_MENU_COL, 4);
-    efi_conout_ascii("Current TimeOut is : ");
-    fw_menu_put_uint(current);
-    efi_conout_ascii(" seconds");
-    fw_menu_at(FW_MENU_COL, 6);
-    efi_conout_ascii("New TimeOut in seconds (<= 65535) is : ");
+/* Draw the persistent maintenance banner plus a per-screen operation header. */
+static void fw_maint_frame(const CHAR8 *Header)
+{
+    (void)fw_console_clear();
+    fw_menu_attr(FW_MENU_ATTR_HEADER);
+    fw_menu_at(0, 0);
+    efi_conout_ascii("EFI Boot Maintenance Manager ver 1.10 [1.00]");
+    fw_menu_at(0, 2);
+    efi_conout_ascii(Header);
+    fw_menu_attr(FW_MENU_ATTR_NORMAL);
+}
+
+/* Block until a key is available, then return it. */
+static void fw_maint_key(EFI_INPUT_KEY *Key)
+{
+    while (fw_console_read_key(Key) != EFI_SUCCESS) {
+        (void)bs_stall(10000U);
+    }
+}
+
+/* Show a prompt at the given row and wait for Y/N (Esc counts as No). */
+static BOOLEAN fw_maint_confirm(const CHAR8 *Prompt, UINTN Row)
+{
+    EFI_INPUT_KEY key;
+
+    fw_menu_attr(FW_MENU_ATTR_NORMAL);
+    fw_menu_at(FW_MENU_COL, Row);
+    efi_conout_ascii(Prompt);
+    for (;;) {
+        fw_maint_key(&key);
+        if (key.UnicodeChar == 'Y' || key.UnicodeChar == 'y') {
+            return 1;
+        }
+        if (key.UnicodeChar == 'N' || key.UnicodeChar == 'n' ||
+            key.ScanCode == EFI_SCAN_ESC) {
+            return 0;
+        }
+    }
+}
+
+/* Show a status line at the given row and wait for any key. */
+static void fw_maint_status(const CHAR8 *Message, UINTN Row)
+{
+    EFI_INPUT_KEY key;
+
+    fw_menu_attr(FW_MENU_ATTR_NORMAL);
+    fw_menu_at(FW_MENU_COL, Row);
+    efi_conout_ascii(Message);
+    fw_maint_key(&key);
+}
+
+/* Render Count CHAR8 items at rows 4.., Selected shown in reverse video. */
+static void fw_maint_list(const CHAR8 *Header, const CHAR8 *const *Items,
+                          UINTN Count, UINTN Selected)
+{
+    UINTN i;
+
+    fw_maint_frame(Header);
+    for (i = 0; i < Count; i++) {
+        fw_menu_at(FW_MENU_COL, 4 + i);
+        fw_menu_attr(i == Selected ? FW_MENU_ATTR_SELECTED :
+                     FW_MENU_ATTR_NORMAL);
+        efi_conout_ascii(Items[i]);
+        fw_menu_attr(FW_MENU_ATTR_NORMAL);
+    }
+    fw_menu_footer(5 + Count);
+}
+
+/* Run a simple selectable CHAR8 list; return the chosen index or Count on Esc. */
+static UINTN fw_maint_choose(const CHAR8 *Header, const CHAR8 *const *Items,
+                             UINTN Count)
+{
+    UINTN sel = 0;
+    BOOLEAN dirty = 1;
 
     for (;;) {
         EFI_INPUT_KEY key;
 
-        if (fw_console_read_key(&key) != EFI_SUCCESS) {
-            (void)bs_stall(10000U);
-            continue;
+        if (dirty) {
+            fw_maint_list(Header, Items, Count, sel);
+            dirty = 0;
         }
-        if (key.ScanCode == EFI_SCAN_ESC) {
-            return;
-        }
-        if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
-            break;
-        }
-        if (key.UnicodeChar >= '0' && key.UnicodeChar <= '9' &&
-            value < 6553U) {
-            CHAR8 echo[2];
-
-            value = value * 10U + (UINT32)(key.UnicodeChar - '0');
-            entered = 1;
-            echo[0] = (CHAR8)key.UnicodeChar;
-            echo[1] = 0;
-            efi_conout_ascii(echo);
+        fw_maint_key(&key);
+        if (key.ScanCode == EFI_SCAN_UP) {
+            sel = (sel == 0) ? Count - 1U : sel - 1U;
+            dirty = 1;
+        } else if (key.ScanCode == EFI_SCAN_DOWN) {
+            sel = (sel + 1U) % Count;
+            dirty = 1;
+        } else if (key.ScanCode == EFI_SCAN_ESC) {
+            return Count;
+        } else if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
+            return sel;
         }
     }
-    if (entered) {
-        UINT16 t = (UINT16)value;
+}
 
-        (void)rs_set_variable(name, (void *)mEfiGlobalVariableGuid,
-                              EFI_VARIABLE_NON_VOLATILE |
-                              EFI_VARIABLE_BOOTSERVICE_ACCESS |
-                              EFI_VARIABLE_RUNTIME_ACCESS,
-                              sizeof(t), &t);
+/* Set Auto Boot TimeOut: a sub-menu to set or clear the Timeout variable. */
+static void fw_maint_set_timeout(void)
+{
+    static const CHAR8 *const items[] = {
+        "Set Timeout Value",
+        "Delete/Disable Timeout",
+        "Exit",
+    };
+    static CHAR16 name[] = { 'T', 'i', 'm', 'e', 'o', 'u', 't', 0 };
+    static const UINT32 nv = EFI_VARIABLE_NON_VOLATILE |
+                             EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                             EFI_VARIABLE_RUNTIME_ACCESS;
+
+    for (;;) {
+        UINTN choice = fw_maint_choose(
+            "Set Auto Boot Timeout. Select an Option", items, 3);
+
+        if (choice == 0) {
+            UINT16 current = fw_menu_read_timeout();
+            UINT32 value = 0;
+            BOOLEAN entered = 0;
+
+            fw_maint_frame("Change Auto Boot TimeOut value");
+            fw_menu_at(FW_MENU_COL, 4);
+            efi_conout_ascii("Current TimeOut is : ");
+            fw_menu_put_uint(current);
+            efi_conout_ascii(" seconds");
+            fw_menu_at(FW_MENU_COL, 6);
+            efi_conout_ascii("New TimeOut in seconds (<= 65535) is : ");
+            for (;;) {
+                EFI_INPUT_KEY key;
+
+                fw_maint_key(&key);
+                if (key.ScanCode == EFI_SCAN_ESC) {
+                    entered = 0;
+                    break;
+                }
+                if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
+                    break;
+                }
+                if (key.UnicodeChar >= '0' && key.UnicodeChar <= '9' &&
+                    value * 10U + (UINT32)(key.UnicodeChar - '0') <= 65535U) {
+                    CHAR8 echo[2];
+
+                    value = value * 10U + (UINT32)(key.UnicodeChar - '0');
+                    entered = 1;
+                    echo[0] = (CHAR8)key.UnicodeChar;
+                    echo[1] = 0;
+                    efi_conout_ascii(echo);
+                }
+            }
+            if (entered) {
+                UINT16 t = (UINT16)value;
+
+                (void)rs_set_variable(name, (void *)mEfiGlobalVariableGuid,
+                                      nv, sizeof(t), &t);
+            }
+        } else if (choice == 1) {
+            (void)rs_set_variable(name, (void *)mEfiGlobalVariableGuid,
+                                  0, 0, NULL);
+            fw_maint_frame("Set Auto Boot Timeout. Select an Option");
+            fw_maint_status("'Timeout' variable cleared.  Press any key...", 4);
+        } else {
+            return;
+        }
     }
 }
 
@@ -726,16 +849,6 @@ static void fw_menu_bootorder_append(UINT16 Option)
     order[n++] = Option;
     (void)rs_set_variable(fw_boot_order_name, (void *)mEfiGlobalVariableGuid,
                           FW_VAR_NV_BS_RT, n * sizeof(UINT16), order);
-}
-
-/* Wait for a key so a status line stays readable. */
-static void fw_menu_wait_key(void)
-{
-    EFI_INPUT_KEY key;
-
-    while (fw_console_read_key(&key) != EFI_SUCCESS) {
-        (void)bs_stall(10000U);
-    }
 }
 
 /* Read a line of CHAR16 into Buf (echoing); Enter ends it, Esc returns 0. */
@@ -799,109 +912,715 @@ static UINT16 fw_menu_free_boot_number(void)
     return 0;
 }
 
-static void fw_maint_add_entry(void)
+static CHAR16 fw_boot_next_name[] = {
+    'B', 'o', 'o', 't', 'N', 'e', 'x', 't', 0
+};
+
+/* Render a boot-option list followed by a blank line and the special action
+ * rows; the row at index Selected (spanning both) is drawn in reverse video. */
+static void fw_maint_ops_render(const CHAR8 *Header,
+                                const FW_MENU_ENTRY *Entries, UINTN BootCount,
+                                const CHAR8 *const *Specials, UINTN SpecCount,
+                                UINTN Selected)
+{
+    UINTN i;
+    UINTN row = 4;
+
+    fw_maint_frame(Header);
+    for (i = 0; i < BootCount; i++, row++) {
+        fw_menu_option_row(row, Entries[i].Desc, i == Selected);
+    }
+    row++;                                  /* blank line before the actions */
+    for (i = 0; i < SpecCount; i++, row++) {
+        fw_menu_at(FW_MENU_COL, row);
+        fw_menu_attr((BootCount + i) == Selected ? FW_MENU_ATTR_SELECTED :
+                     FW_MENU_ATTR_NORMAL);
+        efi_conout_ascii(Specials[i]);
+        fw_menu_attr(FW_MENU_ATTR_NORMAL);
+    }
+    fw_menu_footer(row + 1U);
+}
+
+/* Row at which a sub-menu draws its confirm/status prompts. */
+static UINTN fw_maint_msg_row(UINTN BootCount, UINTN SpecCount)
+{
+    UINTN row = 4U + BootCount + 1U + SpecCount + 2U;
+
+    return (row > 23U) ? 23U : row;
+}
+
+/* Write BootOrder from the option numbers in a (possibly reordered) list. */
+static void fw_maint_save_order(const FW_MENU_ENTRY *Entries, UINTN BootCount)
+{
+    UINT16 old[128];
+    UINT16 neworder[128];
+    UINTN old_size = sizeof(old);
+    UINT32 attr = 0;
+    UINTN n_old;
+    UINTN i;
+    UINTN vidx = 0;
+    UINTN m = 0;
+
+    /*
+     * Only active, readable options appear in Entries[]; the live BootOrder may
+     * also hold inactive or momentarily unreadable Boot#### numbers.  Splice the
+     * reordered visible options back into the slots they occupied, leaving the
+     * hidden entries in place, so a reorder never silently drops them.
+     */
+    if (rs_get_variable(fw_boot_order_name, (void *)mEfiGlobalVariableGuid,
+                        &attr, &old_size, old) != EFI_SUCCESS ||
+        (old_size % sizeof(UINT16)) != 0) {
+        for (i = 0; i < BootCount && i < 128U; i++) {
+            neworder[i] = Entries[i].Option;
+        }
+        (void)rs_set_variable(fw_boot_order_name,
+                              (void *)mEfiGlobalVariableGuid, FW_VAR_NV_BS_RT,
+                              i * sizeof(UINT16), neworder);
+        return;
+    }
+    n_old = old_size / sizeof(UINT16);
+    for (i = 0; i < n_old && m < 128U; i++) {
+        BOOLEAN visible = 0;
+        UINTN j;
+
+        for (j = 0; j < BootCount; j++) {
+            if (Entries[j].Option == old[i]) {
+                visible = 1;
+                break;
+            }
+        }
+        if (visible && vidx < BootCount) {
+            neworder[m++] = Entries[vidx++].Option;
+        } else {
+            neworder[m++] = old[i];
+        }
+    }
+    (void)rs_set_variable(fw_boot_order_name, (void *)mEfiGlobalVariableGuid,
+                          FW_VAR_NV_BS_RT, m * sizeof(UINT16), neworder);
+}
+
+/* Draw a help screen of CHAR8 lines and wait for a key. */
+static void fw_maint_help(const CHAR8 *Header, const CHAR8 *const *Lines,
+                          UINTN Count)
+{
+    UINTN i;
+
+    fw_maint_frame(Header);
+    for (i = 0; i < Count; i++) {
+        fw_menu_at(FW_MENU_COL, 4 + i);
+        efi_conout_ascii(Lines[i]);
+    }
+    fw_maint_status("Press any key to Continue: ", 4U + Count + 1U);
+}
+
+/* Change Boot Order: reorder BootOrder with the U/D keys, save on request. */
+static void fw_maint_change_order(void)
+{
+    static const CHAR8 *const spec[] = {
+        "Save Settings to NVRAM", "Help", "Exit",
+    };
+    static const CHAR8 *const help[] = {
+        "Use the up and down arrow keys to highlight a boot option.",
+        "Press 'U'/'u' to move it up, or 'D'/'d' to move it down.",
+        "Select \"Save Settings to NVRAM\" to store the new order,",
+        "then \"Exit\" to return to the Main Menu.",
+    };
+    static FW_MENU_ENTRY entries[FW_MENU_MAX];
+    UINTN count = fw_menu_build(entries);
+    UINTN boot_count = (count >= 2U) ? count - 2U : 0U;
+    UINTN total = boot_count + 3U;
+    UINTN mrow = fw_maint_msg_row(boot_count, 3U);
+    UINTN selected = 0;
+    BOOLEAN dirty = 1;
+    BOOLEAN changed = 0;
+
+    for (;;) {
+        EFI_INPUT_KEY key;
+
+        if (dirty) {
+            fw_maint_ops_render("Change boot order.  Select an Operation",
+                                entries, boot_count, spec, 3U, selected);
+            dirty = 0;
+        }
+        fw_maint_key(&key);
+        if (key.ScanCode == EFI_SCAN_UP) {
+            selected = (selected == 0) ? total - 1U : selected - 1U;
+            dirty = 1;
+        } else if (key.ScanCode == EFI_SCAN_DOWN) {
+            selected = (selected + 1U) % total;
+            dirty = 1;
+        } else if (key.ScanCode == EFI_SCAN_ESC) {
+            break;
+        } else if (selected < boot_count &&
+                   (key.UnicodeChar == 'U' || key.UnicodeChar == 'u')) {
+            if (selected == 0) {
+                fw_maint_status("Selected option top of list. Cannot move up. "
+                                "Press any key...", mrow);
+            } else {
+                FW_MENU_ENTRY tmp = entries[selected];
+                entries[selected] = entries[selected - 1U];
+                entries[selected - 1U] = tmp;
+                selected--;
+                changed = 1;
+            }
+            dirty = 1;
+        } else if (selected < boot_count &&
+                   (key.UnicodeChar == 'D' || key.UnicodeChar == 'd')) {
+            if (selected + 1U >= boot_count) {
+                fw_maint_status("Selected option bottom of list. Cannot move "
+                                "down. Press any key...", mrow);
+            } else {
+                FW_MENU_ENTRY tmp = entries[selected];
+                entries[selected] = entries[selected + 1U];
+                entries[selected + 1U] = tmp;
+                selected++;
+                changed = 1;
+            }
+            dirty = 1;
+        } else if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
+            if (selected == boot_count) {
+                fw_maint_save_order(entries, boot_count);
+                changed = 0;
+            } else if (selected == boot_count + 1U) {
+                fw_maint_help("Boot Order Menu Help Screen", help, 4U);
+            } else if (selected == boot_count + 2U) {
+                break;                          /* Exit */
+            }
+            /* Enter on a boot option is a no-op; use U/D to reorder. */
+            dirty = 1;
+        }
+    }
+    if (changed &&
+        fw_maint_confirm("NVRAM Not updated. Save NVRAM? "
+                         "[Y to save, N to ignore] ", mrow)) {
+        fw_maint_save_order(entries, boot_count);
+    }
+}
+
+/* Manage BootNext: stage a one-shot BootNext (or clear it), save on request. */
+static void fw_maint_bootnext(void)
+{
+    static const CHAR8 *const spec[] = {
+        "Reset BootNext Setting", "Save Settings to NVRAM", "Help", "Exit",
+    };
+    static const CHAR8 *const help[] = {
+        "Highlight a boot option and press Enter or 'B'/'b' to make it the",
+        "one-shot 'BootNext' selection.  Press 'R'/'r' or select",
+        "\"Reset BootNext Setting\" to clear it.  \"Save Settings to NVRAM\"",
+        "commits the change; \"Exit\" returns to the Main Menu.",
+    };
+    static FW_MENU_ENTRY entries[FW_MENU_MAX];
+    UINTN count = fw_menu_build(entries);
+    UINTN boot_count = (count >= 2U) ? count - 2U : 0U;
+    UINTN total = boot_count + 4U;
+    UINTN mrow = fw_maint_msg_row(boot_count, 4U);
+    UINTN selected = 0;
+    BOOLEAN dirty = 1;
+    BOOLEAN changed = 0;
+    BOOLEAN has_next = 0;
+    UINT16 next = 0;
+
+    for (;;) {
+        EFI_INPUT_KEY key;
+
+        if (dirty) {
+            fw_maint_ops_render("Manage BootNext setting.  Select an Operation",
+                                entries, boot_count, spec, 4U, selected);
+            dirty = 0;
+        }
+        fw_maint_key(&key);
+        if (key.ScanCode == EFI_SCAN_UP) {
+            selected = (selected == 0) ? total - 1U : selected - 1U;
+            dirty = 1;
+        } else if (key.ScanCode == EFI_SCAN_DOWN) {
+            selected = (selected + 1U) % total;
+            dirty = 1;
+        } else if (key.ScanCode == EFI_SCAN_ESC) {
+            break;
+        } else if ((key.UnicodeChar == 'R' || key.UnicodeChar == 'r') ||
+                   (selected == boot_count &&
+                    (key.UnicodeChar == '\r' || key.UnicodeChar == '\n'))) {
+            has_next = 0;
+            changed = 1;
+            dirty = 1;
+        } else if (selected < boot_count &&
+                   (key.UnicodeChar == 'B' || key.UnicodeChar == 'b' ||
+                    key.UnicodeChar == '\r' || key.UnicodeChar == '\n')) {
+            if (fw_maint_confirm("Enter selected Boot Option as 'BootNext' "
+                                 "[Y-Yes N-No]: ", mrow)) {
+                next = entries[selected].Option;
+                has_next = 1;
+                changed = 1;
+            }
+            dirty = 1;
+        } else if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
+            if (selected == boot_count + 1U) {           /* Save */
+                if (has_next) {
+                    (void)rs_set_variable(fw_boot_next_name,
+                                          (void *)mEfiGlobalVariableGuid,
+                                          FW_VAR_NV_BS_RT, sizeof(next), &next);
+                } else {
+                    (void)rs_set_variable(fw_boot_next_name,
+                                          (void *)mEfiGlobalVariableGuid,
+                                          0, 0, NULL);
+                }
+                changed = 0;
+            } else if (selected == boot_count + 2U) {    /* Help */
+                fw_maint_help("BootNext Menu Help Screen", help, 4U);
+            } else {                                     /* Exit */
+                break;
+            }
+            dirty = 1;
+        }
+    }
+    if (changed &&
+        fw_maint_confirm("NVRAM Not updated. Save NVRAM? "
+                         "[Y to save, N to ignore] ", mrow)) {
+        if (has_next) {
+            (void)rs_set_variable(fw_boot_next_name,
+                                  (void *)mEfiGlobalVariableGuid,
+                                  FW_VAR_NV_BS_RT, sizeof(next), &next);
+        } else {
+            (void)rs_set_variable(fw_boot_next_name,
+                                  (void *)mEfiGlobalVariableGuid, 0, 0, NULL);
+        }
+    }
+}
+
+/* --- Maintenance file browser (Boot from a File / Add a Boot Option) ------ */
+
+#define FW_BROWSE_MAX 15U
+
+typedef struct {
+    CHAR16 Name[64];
+    BOOLEAN IsDir;
+} FW_BROWSE_ENTRY;
+
+/* TRUE if Name ends in ".EFI" (case-insensitive). */
+static BOOLEAN fw_name_is_efi(const CHAR16 *Name)
+{
+    UINTN len = 0;
+    const CHAR16 *p;
+
+    while (Name[len]) {
+        len++;
+    }
+    if (len < 4U) {
+        return 0;
+    }
+    p = Name + (len - 4U);
+    return p[0] == '.' &&
+           (p[1] == 'E' || p[1] == 'e') &&
+           (p[2] == 'F' || p[2] == 'f') &&
+           (p[3] == 'I' || p[3] == 'i');
+}
+
+/* Append "\<Name>" to an absolute path (empty Path denotes the volume root). */
+static void fw_path_push(CHAR16 *Path, UINTN Cap, const CHAR16 *Name)
+{
+    UINTN len = 0;
+    UINTN i;
+
+    while (Path[len]) {
+        len++;
+    }
+    if (len + 1U < Cap) {
+        Path[len++] = '\\';
+    }
+    for (i = 0; Name[i] && len + 1U < Cap; i++) {
+        Path[len++] = Name[i];
+    }
+    Path[len] = 0;
+}
+
+/* Drop the last "\<component>" from an absolute path. */
+static void fw_path_pop(CHAR16 *Path)
+{
+    UINTN len = 0;
+
+    while (Path[len]) {
+        len++;
+    }
+    while (len > 0U && Path[len - 1U] != '\\') {
+        len--;
+    }
+    if (len > 0U) {
+        len--;
+    }
+    Path[len] = 0;
+}
+
+/* Read a directory handle, keeping sub-directories and *.EFI files only. */
+static UINTN fw_browse_read_dir(EFI_FILE_HANDLE Dir, FW_BROWSE_ENTRY *Out,
+                                UINTN Max)
+{
+    static UINT8 buf[512];
+    UINTN n = 0;
+
+    for (;;) {
+        UINTN size = sizeof(buf);
+        FW_EFI_FILE_INFO *info = (FW_EFI_FILE_INFO *)(VOID *)buf;
+        BOOLEAN is_dir;
+        UINTN i;
+
+        if (Dir->Read(Dir, &size, buf) != EFI_SUCCESS || size == 0) {
+            break;
+        }
+        if (info->FileName[0] == '.' &&
+            (info->FileName[1] == 0 ||
+             (info->FileName[1] == '.' && info->FileName[2] == 0))) {
+            continue;
+        }
+        is_dir = (info->Attribute & EFI_FILE_DIRECTORY) != 0;
+        if (!is_dir && !fw_name_is_efi(info->FileName)) {
+            continue;
+        }
+        if (n >= Max) {
+            break;
+        }
+        for (i = 0; i < 63U && info->FileName[i]; i++) {
+            Out[n].Name[i] = info->FileName[i];
+        }
+        Out[n].Name[i] = 0;
+        Out[n].IsDir = is_dir;
+        n++;
+    }
+    return n;
+}
+
+/* Build a boot option for VolHandle:FullPath and either boot it or save it. */
+static void fw_browse_make_option(EFI_HANDLE VolHandle, const CHAR16 *FullPath,
+                                  BOOLEAN BootNow)
 {
     static UINT8 node[2U * sizeof(FW_DEVICE_PATH_NODE) + 2U * 128U];
     static UINT8 full_path[256];
     static UINT8 option[NVRAM_VAR_DATA_MAX];
-    CHAR16 path[128];
-    CHAR16 desc[FW_MENU_DESC_MAX + 1U];
     FW_DEVICE_PATH_NODE *hdr = (FW_DEVICE_PATH_NODE *)node;
-    UINTN pathlen;
-    UINTN desclen;
+    UINTN pathlen = 0;
     UINTN dp_size;
-    UINTN off;
-    UINT16 num;
-    CHAR16 name[9];
     EFI_STATUS st;
 
-    fw_menu_frame("Add a boot option");
-
-    if (mDefaultFatVolume == NULL || !mDefaultFatVolume->valid) {
-        fw_menu_at(FW_MENU_COL, 4);
-        efi_conout_ascii("No boot volume is available.  Press a key.");
-        fw_menu_wait_key();
+    while (FullPath[pathlen]) {
+        pathlen++;
+    }
+    if (pathlen == 0U || pathlen > 120U) {
         return;
     }
 
-    fw_menu_at(FW_MENU_COL, 4);
-    efi_conout_ascii("Loader path (e.g. \\EFI\\redhat\\elilo.efi), "
-                     "Esc cancels:");
-    fw_menu_at(FW_MENU_COL, 5);
-    efi_conout_ascii("> ");
-    pathlen = fw_menu_read_line(path, sizeof(path) / sizeof(path[0]));
-    if (pathlen == 0) {
-        return;
-    }
-
-    fw_menu_at(FW_MENU_COL, 7);
-    efi_conout_ascii("Description, Esc cancels:");
-    fw_menu_at(FW_MENU_COL, 8);
-    efi_conout_ascii("> ");
-    desclen = fw_menu_read_line(desc, sizeof(desc) / sizeof(desc[0]));
-    if (desclen == 0) {
-        return;
-    }
-
-    /* FILE_PATH media node: {type 4, subtype 4, length} followed by the path. */
-    hdr->Type = 0x04U;      /* MEDIA_DEVICE_PATH */
-    hdr->SubType = 0x04U;   /* MEDIA_FILEPATH_DP */
+    hdr->Type = 0x04U;      /* MEDIA_DEVICE_PATH  */
+    hdr->SubType = 0x04U;   /* MEDIA_FILEPATH_DP  */
     hdr->Length = (UINT16)(sizeof(FW_DEVICE_PATH_NODE) + (pathlen + 1U) * 2U);
-    fw_copy_mem(node + sizeof(FW_DEVICE_PATH_NODE), path, (pathlen + 1U) * 2U);
-    /* Terminate with an End-Entire node so fw_device_path_size() bounds it. */
+    fw_copy_mem(node + sizeof(FW_DEVICE_PATH_NODE), FullPath,
+                (pathlen + 1U) * 2U);
     {
         FW_DEVICE_PATH_NODE *end =
             (FW_DEVICE_PATH_NODE *)(VOID *)(node + hdr->Length);
 
-        end->Type = 0x7fU;      /* END_DEVICE_PATH_TYPE */
-        end->SubType = 0xffU;   /* END_ENTIRE_DEVICE_PATH_SUBTYPE */
+        end->Type = 0x7fU;
+        end->SubType = 0xffU;
         end->Length = (UINT16)sizeof(FW_DEVICE_PATH_NODE);
     }
-
-    st = fw_build_file_device_path(mDefaultFatVolume->handle, hdr,
-                                   full_path, sizeof(full_path));
+    st = fw_build_file_device_path(VolHandle, hdr, full_path,
+                                   sizeof(full_path));
     if (st != EFI_SUCCESS) {
-        fw_menu_at(FW_MENU_COL, 10);
-        efi_conout_ascii("Could not build the device path.  Press a key.");
-        fw_menu_wait_key();
+        fw_maint_status("Could not build the device path.  Press any key...",
+                        20);
         return;
     }
     dp_size = fw_device_path_size((FW_DEVICE_PATH_NODE *)(VOID *)full_path);
 
-    /* Serialize the EFI_LOAD_OPTION: Attributes, FilePathListLength,
-     * Description (CHAR16), then the file-path device path. */
-    off = 0;
+    if (BootNow) {
+        EFI_HANDLE image = NULL;
+
+        st = fw_load_image(1, full_path, &image);
+        if (st == EFI_SUCCESS) {
+            (void)fw_set_watchdog_timeout(300U);
+            fw_set_sal_loader_handoff_pending(1);
+            st = fw_start_image(image);
+            fw_set_sal_loader_handoff_pending(0);
+            (void)fw_set_watchdog_timeout(0U);
+        }
+        if (st != EFI_SUCCESS) {
+            fw_maint_status("Load failed.  Press any key to continue...", 20);
+        }
+        return;
+    }
+
     {
-        UINT32 active = 0x00000001U;
-        UINT16 fpll = (UINT16)dp_size;
+        CHAR16 desc[FW_MENU_DESC_MAX + 1U];
+        UINTN desclen;
+        UINTN off = 0;
+        UINT16 num;
+        CHAR16 name[9];
 
-        fw_copy_mem(option + off, &active, sizeof(active));
-        off += sizeof(active);
-        fw_copy_mem(option + off, &fpll, sizeof(fpll));
-        off += sizeof(fpll);
-    }
-    fw_copy_mem(option + off, desc, (desclen + 1U) * 2U);
-    off += (desclen + 1U) * 2U;
-    fw_copy_mem(option + off, full_path, dp_size);
-    off += dp_size;
+        fw_maint_frame("Add a Boot Option");
+        fw_menu_at(FW_MENU_COL, 4);
+        efi_conout_ascii("Enter New Description: ");
+        desclen = fw_menu_read_line(desc, sizeof(desc) / sizeof(desc[0]));
+        if (desclen == 0U) {
+            return;
+        }
 
-    num = fw_menu_free_boot_number();
-    fw_boot_option_name(num, name);
-    st = rs_set_variable(name, (void *)mEfiGlobalVariableGuid,
-                         FW_VAR_NV_BS_RT, off, option);
-    if (st == EFI_SUCCESS) {
-        fw_menu_bootorder_append(num);
+        {
+            UINT32 active = 0x00000001U;
+            UINT16 fpll = (UINT16)dp_size;
+
+            fw_copy_mem(option + off, &active, sizeof(active));
+            off += sizeof(active);
+            fw_copy_mem(option + off, &fpll, sizeof(fpll));
+            off += sizeof(fpll);
+        }
+        fw_copy_mem(option + off, desc, (desclen + 1U) * 2U);
+        off += (desclen + 1U) * 2U;
+        fw_copy_mem(option + off, full_path, dp_size);
+        off += dp_size;
+
+        num = fw_menu_free_boot_number();
+        fw_boot_option_name(num, name);
+        st = rs_set_variable(name, (void *)mEfiGlobalVariableGuid,
+                             FW_VAR_NV_BS_RT, off, option);
+        if (st == EFI_SUCCESS) {
+            fw_menu_bootorder_append(num);
+        }
+        fw_maint_status(st == EFI_SUCCESS ?
+                        "Boot option saved.  Press any key..." :
+                        "Failed to save the boot option.  Press any key...", 6);
     }
-    fw_menu_at(FW_MENU_COL, 10);
-    efi_conout_ascii(st == EFI_SUCCESS ?
-                     "Boot entry created.  Press a key." :
-                     "Failed to save the boot entry.  Press a key.");
-    fw_menu_wait_key();
 }
 
+/* Draw the directory listing (entries, then ".." if not root, then Exit). */
+static void fw_browse_render(const FW_BROWSE_ENTRY *Entries, UINTN N,
+                             BOOLEAN HasDotDot, UINTN Selected)
+{
+    UINTN i;
+    UINTN row = 4;
+    UINTN idx;
+
+    fw_maint_frame("Select file or change to new directory:");
+    for (i = 0; i < N; i++, row++) {
+        fw_menu_at(FW_MENU_COL, row);
+        fw_menu_attr(i == Selected ? FW_MENU_ATTR_SELECTED :
+                     FW_MENU_ATTR_NORMAL);
+        efi_conout_ascii(Entries[i].IsDir ? "<DIR>  " : "       ");
+        fw_menu_put_char16(Entries[i].Name);
+        fw_menu_attr(FW_MENU_ATTR_NORMAL);
+    }
+    row++;
+    idx = N;
+    if (HasDotDot) {
+        fw_menu_at(FW_MENU_COL, row);
+        fw_menu_attr(idx == Selected ? FW_MENU_ATTR_SELECTED :
+                     FW_MENU_ATTR_NORMAL);
+        efi_conout_ascii("[ .. ]  Up one directory");
+        fw_menu_attr(FW_MENU_ATTR_NORMAL);
+        row++;
+        idx++;
+    }
+    fw_menu_at(FW_MENU_COL, row);
+    fw_menu_attr(idx == Selected ? FW_MENU_ATTR_SELECTED : FW_MENU_ATTR_NORMAL);
+    efi_conout_ascii("Exit");
+    fw_menu_attr(FW_MENU_ATTR_NORMAL);
+    fw_menu_footer(row + 2U);
+}
+
+/* Walk one volume's directory tree, letting the user pick an *.EFI file. */
+static void fw_browse_volume(EFI_HANDLE VolHandle, BOOLEAN BootNow)
+{
+    static FW_BROWSE_ENTRY entries[FW_BROWSE_MAX];
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs = NULL;
+    EFI_FILE_HANDLE root = NULL;
+    CHAR16 path[224];
+
+    if (bs_handle_protocol(VolHandle, (void *)mSimpleFileSystemProtocolGuid,
+                           (void **)&sfs) != EFI_SUCCESS || sfs == NULL) {
+        return;
+    }
+    if (sfs->OpenVolume(sfs, &root) != EFI_SUCCESS || root == NULL) {
+        return;
+    }
+    path[0] = 0;
+
+    for (;;) {
+        EFI_FILE_HANDLE dir = root;
+        BOOLEAN opened = 0;
+        BOOLEAN has_dotdot = (path[0] != 0);
+        UINTN n;
+        UINTN total;
+        UINTN selected = 0;
+        BOOLEAN dirty = 1;
+        BOOLEAN descend = 0;
+
+        if (path[0] != 0 &&
+            root->Open(root, &dir, path, EFI_FILE_MODE_READ, 0) !=
+                EFI_SUCCESS) {
+            path[0] = 0;
+            continue;
+        }
+        opened = (path[0] != 0);
+        n = fw_browse_read_dir(dir, entries, FW_BROWSE_MAX);
+        if (opened) {
+            (void)dir->Close(dir);
+        }
+        total = n + (has_dotdot ? 2U : 1U);
+
+        while (!descend) {
+            EFI_INPUT_KEY key;
+
+            if (dirty) {
+                fw_browse_render(entries, n, has_dotdot, selected);
+                dirty = 0;
+            }
+            fw_maint_key(&key);
+            if (key.ScanCode == EFI_SCAN_UP) {
+                selected = (selected == 0) ? total - 1U : selected - 1U;
+                dirty = 1;
+            } else if (key.ScanCode == EFI_SCAN_DOWN) {
+                selected = (selected + 1U) % total;
+                dirty = 1;
+            } else if (key.ScanCode == EFI_SCAN_ESC) {
+                (void)root->Close(root);
+                return;
+            } else if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
+                if (selected < n) {
+                    if (entries[selected].IsDir) {
+                        fw_path_push(path, sizeof(path) / sizeof(path[0]),
+                                     entries[selected].Name);
+                        descend = 1;
+                    } else {
+                        CHAR16 full[256];
+                        UINTN i;
+
+                        for (i = 0; path[i]; i++) {
+                            full[i] = path[i];
+                        }
+                        full[i] = 0;
+                        fw_path_push(full, sizeof(full) / sizeof(full[0]),
+                                     entries[selected].Name);
+                        fw_browse_make_option(VolHandle, full, BootNow);
+                        if (!BootNow) {
+                            (void)root->Close(root);
+                            return;
+                        }
+                        dirty = 1;
+                    }
+                } else if (has_dotdot && selected == n) {
+                    fw_path_pop(path);
+                    descend = 1;
+                } else {
+                    (void)root->Close(root);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/* Enumerate the file-system volumes, let the user pick one, then browse it. */
+static void fw_maint_browse(BOOLEAN BootNow)
+{
+    EFI_HANDLE *handles = NULL;
+    UINTN vol_count = 0;
+    const CHAR8 *volhdr = BootNow ? "Boot From a File.  Select a Volume" :
+                          "Add a Boot Option.  Select a Volume";
+
+    if (bs_locate_handle_buffer(EFI_LOCATE_BY_PROTOCOL,
+                                (void *)mSimpleFileSystemProtocolGuid, NULL,
+                                &vol_count, &handles) != EFI_SUCCESS ||
+        vol_count == 0 || handles == NULL) {
+        fw_maint_frame(volhdr);
+        fw_maint_status("No file-system volume is available.  Press any "
+                        "key...", 4);
+        return;
+    }
+    if (vol_count == 1U) {
+        fw_browse_volume(handles[0], BootNow);
+        return;
+    }
+
+    for (;;) {
+        UINTN selected = 0;
+        BOOLEAN dirty = 1;
+        UINTN total = vol_count + 1U;
+
+        for (;;) {
+            EFI_INPUT_KEY key;
+            UINTN i;
+            UINTN row = 4;
+
+            if (dirty) {
+                fw_maint_frame(volhdr);
+                for (i = 0; i < vol_count; i++, row++) {
+                    fw_menu_at(FW_MENU_COL, row);
+                    fw_menu_attr(i == selected ? FW_MENU_ATTR_SELECTED :
+                                 FW_MENU_ATTR_NORMAL);
+                    efi_conout_ascii("Removable Media Boot [Volume ");
+                    fw_menu_put_uint(i);
+                    efi_conout_ascii("]");
+                    fw_menu_attr(FW_MENU_ATTR_NORMAL);
+                }
+                row++;
+                fw_menu_at(FW_MENU_COL, row);
+                fw_menu_attr(vol_count == selected ? FW_MENU_ATTR_SELECTED :
+                             FW_MENU_ATTR_NORMAL);
+                efi_conout_ascii("Exit");
+                fw_menu_attr(FW_MENU_ATTR_NORMAL);
+                fw_menu_footer(row + 2U);
+                dirty = 0;
+            }
+            fw_maint_key(&key);
+            if (key.ScanCode == EFI_SCAN_UP) {
+                selected = (selected == 0) ? total - 1U : selected - 1U;
+                dirty = 1;
+            } else if (key.ScanCode == EFI_SCAN_DOWN) {
+                selected = (selected + 1U) % total;
+                dirty = 1;
+            } else if (key.ScanCode == EFI_SCAN_ESC) {
+                return;
+            } else if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
+                if (selected >= vol_count) {
+                    return;
+                }
+                fw_browse_volume(handles[selected], BootNow);
+                dirty = 1;
+            }
+        }
+    }
+}
+
+static void fw_maint_add_entry(void)
+{
+    fw_maint_browse(0);
+}
+
+/* Commit a list of staged option-number deletions to NVRAM and BootOrder. */
+static void fw_maint_commit_deletes(const UINT16 *Pending, UINTN Count)
+{
+    UINTN i;
+
+    for (i = 0; i < Count; i++) {
+        CHAR16 name[9];
+
+        fw_boot_option_name(Pending[i], name);
+        (void)rs_set_variable(name, (void *)mEfiGlobalVariableGuid, 0, 0, NULL);
+        fw_menu_bootorder_remove(Pending[i]);
+    }
+}
+
+/* Delete Boot Option(s): stage per-option or all deletions, commit on save. */
 static void fw_maint_delete_entry(void)
 {
+    static const CHAR8 *const spec[] = {
+        "Delete All Boot Options", "Save Settings to NVRAM", "Help", "Exit",
+    };
+    static const CHAR8 *const help[] = {
+        "Highlight a boot option and press Enter or 'D'/'d' to remove it,",
+        "answering the confirmation.  Press 'A'/'a' or select \"Delete All",
+        "Boot Options\" to remove every option.  \"Save Settings to NVRAM\"",
+        "commits the deletions; \"Exit\" returns to the Main Menu.",
+    };
     static FW_MENU_ENTRY entries[FW_MENU_MAX];
+    UINT16 pending[FW_MENU_MAX];
+    UINTN pend_count = 0;
     UINTN count = fw_menu_build(entries);
     UINTN boot_count = (count >= 2U) ? count - 2U : 0U;
     UINTN selected = 0;
@@ -909,100 +1628,263 @@ static void fw_maint_delete_entry(void)
 
     for (;;) {
         EFI_INPUT_KEY key;
-        UINTN i;
+        UINTN total = boot_count + 4U;
+        UINTN mrow = fw_maint_msg_row(boot_count, 4U);
 
-        if (boot_count == 0) {
-            (void)fw_console_clear();
-            fw_menu_attr(FW_MENU_ATTR_NORMAL);
-            fw_menu_at(2, 2);
-            efi_conout_ascii("No boot entries to delete.  Press a key.");
-            fw_menu_wait_key();
-            return;
+        if (selected >= total) {
+            selected = total - 1U;
         }
         if (dirty) {
-            fw_menu_frame("Delete boot option(s)");
-            for (i = 0; i < boot_count; i++) {
-                fw_menu_option_row(4 + i, entries[i].Desc, i == selected);
-            }
-            fw_menu_footer(5 + boot_count);
+            fw_maint_ops_render("Delete Boot Option(s).  Select an Option",
+                                entries, boot_count, spec, 4U, selected);
             dirty = 0;
         }
-
-        while (fw_console_read_key(&key) != EFI_SUCCESS) {
-            (void)bs_stall(10000U);
-        }
+        fw_maint_key(&key);
         if (key.ScanCode == EFI_SCAN_UP) {
-            selected = (selected == 0) ? boot_count - 1U : selected - 1U;
+            selected = (selected == 0) ? total - 1U : selected - 1U;
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_DOWN) {
-            selected = (selected + 1U) % boot_count;
+            selected = (selected + 1U) % total;
+            dirty = 1;
+        } else if (key.ScanCode == EFI_SCAN_ESC) {
+            break;
+        } else if ((key.UnicodeChar == 'A' || key.UnicodeChar == 'a') ||
+                   (selected == boot_count &&
+                    (key.UnicodeChar == '\r' || key.UnicodeChar == '\n'))) {
+            if (boot_count > 0U &&
+                fw_maint_confirm("Delete ALL of above Boot Options "
+                                 "[Y-Yes N-No]: ", mrow)) {
+                UINTN i;
+
+                for (i = 0; i < boot_count && pend_count < FW_MENU_MAX; i++) {
+                    pending[pend_count++] = entries[i].Option;
+                }
+                boot_count = 0;
+                selected = 0;
+            }
+            dirty = 1;
+        } else if (selected < boot_count &&
+                   (key.UnicodeChar == 'D' || key.UnicodeChar == 'd' ||
+                    key.UnicodeChar == '\r' || key.UnicodeChar == '\n')) {
+            if (fw_maint_confirm("Delete selected Boot Option [Y-Yes N-No]: ",
+                                 mrow)) {
+                UINTN i;
+
+                if (pend_count < FW_MENU_MAX) {
+                    pending[pend_count++] = entries[selected].Option;
+                }
+                for (i = selected; i + 1U < boot_count; i++) {
+                    entries[i] = entries[i + 1U];
+                }
+                if (boot_count > 0U) {
+                    boot_count--;
+                }
+                if (selected >= boot_count && boot_count > 0U) {
+                    selected = boot_count - 1U;
+                }
+            }
+            dirty = 1;
+        } else if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
+            if (selected == boot_count + 1U) {
+                fw_maint_commit_deletes(pending, pend_count);
+                pend_count = 0;
+            } else if (selected == boot_count + 2U) {
+                fw_maint_help("Delete Menu Help Screen", help, 4U);
+            } else {
+                break;
+            }
+            dirty = 1;
+        }
+    }
+    if (pend_count > 0U &&
+        fw_maint_confirm("NVRAM Not updated. Save NVRAM? "
+                         "[Y to save, N to ignore] ",
+                         fw_maint_msg_row(boot_count, 4U))) {
+        fw_maint_commit_deletes(pending, pend_count);
+    }
+}
+
+/* Boot from a File / console-device selection are implemented below. */
+static void fw_maint_boot_from_file(void);
+static void fw_maint_console_select(const CHAR8 *Header, const CHAR8 *Device);
+
+#define FW_MAINT_BOOTFILE  0U
+#define FW_MAINT_ADD       1U
+#define FW_MAINT_DELETE    2U
+#define FW_MAINT_ORDER     3U
+#define FW_MAINT_BOOTNEXT  4U
+#define FW_MAINT_TIMEOUT   5U
+#define FW_MAINT_CONOUT    6U
+#define FW_MAINT_CONIN     7U
+#define FW_MAINT_CONERR    8U
+#define FW_MAINT_COLDRESET 9U
+#define FW_MAINT_EXIT      10U
+
+typedef struct {
+    const CHAR8 *Label;
+    UINT8 Action;
+    UINT8 GapBefore;
+} FW_MAINT_ITEM;
+
+static const FW_MAINT_ITEM mMaintItems[] = {
+    { "Boot from a File",                     FW_MAINT_BOOTFILE,  0 },
+    { "Add a Boot Option",                    FW_MAINT_ADD,       0 },
+    { "Delete Boot Option(s)",                FW_MAINT_DELETE,    0 },
+    { "Change Boot Order",                    FW_MAINT_ORDER,     0 },
+    { "Manage BootNext setting",              FW_MAINT_BOOTNEXT,  1 },
+    { "Set Auto Boot TimeOut",                FW_MAINT_TIMEOUT,   0 },
+    { "Select Active Console Output Devices", FW_MAINT_CONOUT,    1 },
+    { "Select Active Console Input Devices",  FW_MAINT_CONIN,     0 },
+    { "Select Active Standard Error Devices", FW_MAINT_CONERR,    0 },
+    { "Cold Reset",                           FW_MAINT_COLDRESET, 1 },
+    { "Exit",                                 FW_MAINT_EXIT,      0 },
+};
+
+static void fw_boot_maint_run(void)
+{
+    UINTN count = sizeof(mMaintItems) / sizeof(mMaintItems[0]);
+    UINTN selected = 0;
+    BOOLEAN dirty = 1;
+
+    for (;;) {
+        EFI_INPUT_KEY key;
+        UINTN i;
+        UINTN row = 4;
+
+        if (dirty) {
+            fw_maint_frame("Main Menu. Select an Operation");
+            for (i = 0; i < count; i++) {
+                if (mMaintItems[i].GapBefore) {
+                    row++;
+                }
+                fw_menu_at(FW_MENU_COL, row);
+                fw_menu_attr(i == selected ? FW_MENU_ATTR_SELECTED :
+                             FW_MENU_ATTR_NORMAL);
+                efi_conout_ascii(mMaintItems[i].Label);
+                fw_menu_attr(FW_MENU_ATTR_NORMAL);
+                row++;
+            }
+            fw_menu_footer(row + 1U);
+            dirty = 0;
+        }
+        fw_maint_key(&key);
+        if (key.ScanCode == EFI_SCAN_UP) {
+            selected = (selected == 0) ? count - 1U : selected - 1U;
+            dirty = 1;
+        } else if (key.ScanCode == EFI_SCAN_DOWN) {
+            selected = (selected + 1U) % count;
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_ESC) {
             return;
         } else if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
-            CHAR16 name[9];
-
-            fw_boot_option_name(entries[selected].Option, name);
-            (void)rs_set_variable(name, (void *)mEfiGlobalVariableGuid,
-                                  0, 0, NULL);
-            fw_menu_bootorder_remove(entries[selected].Option);
-            count = fw_menu_build(entries);
-            boot_count = (count >= 2U) ? count - 2U : 0U;
-            if (selected >= boot_count && boot_count > 0U) {
-                selected = boot_count - 1U;
+            switch (mMaintItems[selected].Action) {
+            case FW_MAINT_BOOTFILE:
+                fw_maint_boot_from_file();
+                break;
+            case FW_MAINT_ADD:
+                fw_maint_add_entry();
+                break;
+            case FW_MAINT_DELETE:
+                fw_maint_delete_entry();
+                break;
+            case FW_MAINT_ORDER:
+                fw_maint_change_order();
+                break;
+            case FW_MAINT_BOOTNEXT:
+                fw_maint_bootnext();
+                break;
+            case FW_MAINT_TIMEOUT:
+                fw_maint_set_timeout();
+                break;
+            case FW_MAINT_CONOUT:
+                fw_maint_console_select("Select the Console Output Device(s)",
+                                        "VGA Text Console");
+                break;
+            case FW_MAINT_CONIN:
+                fw_maint_console_select("Select the Console Input Device(s)",
+                                        "PS/2 Keyboard");
+                break;
+            case FW_MAINT_CONERR:
+                fw_maint_console_select("Select the Standard Error Device",
+                                        "VGA Text Console");
+                break;
+            case FW_MAINT_COLDRESET:
+                fw_reset_cold();
+                break;
+            case FW_MAINT_EXIT:
+            default:
+                return;
             }
             dirty = 1;
         }
     }
 }
 
-static void fw_boot_maint_run(void)
+static void fw_maint_boot_from_file(void)
 {
-    static const CHAR8 *const items[] = {
-        "Add a Boot Option",
-        "Delete Boot Option(s)",
-        "Set Auto Boot TimeOut",
-        "Exit",
+    fw_maint_browse(1);
+}
+
+/*
+ * Console-device selection.  The synthetic ia64-vpc console is a single VGA
+ * text device (output/error) with a PS/2 keyboard (input), chosen at launch,
+ * so each of the three menus lists one device that stays active -- the sample
+ * likewise refuses to deselect the last active console.  The list is drawn
+ * with the reference's '*'/' ' active marker and the Save/Exit actions.
+ */
+static void fw_maint_console_select(const CHAR8 *Header, const CHAR8 *Device)
+{
+    static const CHAR8 *const spec[] = {
+        "Save Settings to NVRAM", "Exit",
     };
-    UINTN count = sizeof(items) / sizeof(items[0]);
     UINTN selected = 0;
+    UINTN total = 3;
+    BOOLEAN active = 1;
+    BOOLEAN dirty = 1;
 
     for (;;) {
         EFI_INPUT_KEY key;
         UINTN i;
 
-        fw_menu_frame("Boot option maintenance menu");
-        for (i = 0; i < count; i++) {
-            fw_menu_at(FW_MENU_COL, 4 + i);
-            fw_menu_attr(i == selected ? FW_MENU_ATTR_SELECTED :
+        if (dirty) {
+            fw_maint_frame(Header);
+            fw_menu_at(FW_MENU_COL, 4);
+            fw_menu_attr(selected == 0 ? FW_MENU_ATTR_SELECTED :
                          FW_MENU_ATTR_NORMAL);
-            efi_conout_ascii(items[i]);
+            efi_conout_ascii(active ? "* " : "  ");
+            efi_conout_ascii(Device);
             fw_menu_attr(FW_MENU_ATTR_NORMAL);
-        }
-        fw_menu_footer(5 + count);
-
-        for (;;) {
-            if (fw_console_read_key(&key) == EFI_SUCCESS) {
-                break;
+            for (i = 0; i < 2U; i++) {
+                fw_menu_at(FW_MENU_COL, 6 + i);
+                fw_menu_attr((1U + i) == selected ? FW_MENU_ATTR_SELECTED :
+                             FW_MENU_ATTR_NORMAL);
+                efi_conout_ascii(spec[i]);
+                fw_menu_attr(FW_MENU_ATTR_NORMAL);
             }
-            (void)bs_stall(10000U);
+            fw_menu_footer(9);
+            dirty = 0;
         }
+        fw_maint_key(&key);
         if (key.ScanCode == EFI_SCAN_UP) {
-            selected = (selected == 0) ? count - 1U : selected - 1U;
+            selected = (selected == 0) ? total - 1U : selected - 1U;
+            dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_DOWN) {
-            selected = (selected + 1U) % count;
+            selected = (selected + 1U) % total;
+            dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_ESC) {
             return;
         } else if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
             if (selected == 0) {
-                fw_maint_add_entry();
-            } else if (selected == 1) {
-                fw_maint_delete_entry();
+                if (active) {
+                    fw_maint_status("At least one console device must stay "
+                                    "active.  Press any key...", 11);
+                } else {
+                    active = 1;
+                }
             } else if (selected == 2) {
-                fw_maint_set_timeout();
-            } else {
                 return;
             }
+            dirty = 1;
         }
     }
 }
