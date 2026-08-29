@@ -36,6 +36,14 @@ static const VMStateDescription vmstate_nv15 = {
     .name = "nv15gl-vga",
     .version_id = 1,
     .minimum_version_id = 1,
+    /*
+     * The full GPU runtime state (PMC/PFIFO/PGRAPH/PTIMER/PCRTC/PRAMDAC
+     * registers, the per-channel 2D/3D state, cursor, timers and the base
+     * VGACommonState) is not serialized yet.  Migrating/snapshotting with
+     * only the PCI config + VRAM would silently restore a corrupt device,
+     * so mark it unmigratable until a complete vmstate is written.
+     */
+    .unmigratable = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, NV15State),
         VMSTATE_END_OF_LIST()
@@ -79,36 +87,39 @@ uint8_t nv_vram_read8(NV15State *s, uint32_t address)
 
 uint16_t nv_vram_read16(NV15State *s, uint32_t address)
 {
-    address &= s->memsize_mask;
-    return s->vga.vram_ptr[address + 0] << 0 |
-           s->vga.vram_ptr[address + 1] << 8;
+    /* Mask every byte, not just the base: an access at memsize_mask must
+     * wrap inside the aperture rather than run past the VRAM RAMBlock. */
+    return s->vga.vram_ptr[(address + 0) & s->memsize_mask] << 0 |
+           s->vga.vram_ptr[(address + 1) & s->memsize_mask] << 8;
 }
 
 uint32_t nv_vram_read32(NV15State *s, uint32_t address)
 {
-    address &= s->memsize_mask;
-    return (uint32_t)s->vga.vram_ptr[address + 0] << 0 |
-           (uint32_t)s->vga.vram_ptr[address + 1] << 8 |
-           (uint32_t)s->vga.vram_ptr[address + 2] << 16 |
-           (uint32_t)s->vga.vram_ptr[address + 3] << 24;
+    return (uint32_t)s->vga.vram_ptr[(address + 0) & s->memsize_mask] << 0 |
+           (uint32_t)s->vga.vram_ptr[(address + 1) & s->memsize_mask] << 8 |
+           (uint32_t)s->vga.vram_ptr[(address + 2) & s->memsize_mask] << 16 |
+           (uint32_t)s->vga.vram_ptr[(address + 3) & s->memsize_mask] << 24;
 }
 
 uint64_t nv_vram_read64(NV15State *s, uint32_t address)
 {
-    address &= s->memsize_mask;
-    return (uint64_t)s->vga.vram_ptr[address + 0] << 0 |
-           (uint64_t)s->vga.vram_ptr[address + 1] << 8 |
-           (uint64_t)s->vga.vram_ptr[address + 2] << 16 |
-           (uint64_t)s->vga.vram_ptr[address + 3] << 24 |
-           (uint64_t)s->vga.vram_ptr[address + 4] << 32 |
-           (uint64_t)s->vga.vram_ptr[address + 5] << 40 |
-           (uint64_t)s->vga.vram_ptr[address + 6] << 48 |
-           (uint64_t)s->vga.vram_ptr[address + 7] << 56;
+    return (uint64_t)s->vga.vram_ptr[(address + 0) & s->memsize_mask] << 0 |
+           (uint64_t)s->vga.vram_ptr[(address + 1) & s->memsize_mask] << 8 |
+           (uint64_t)s->vga.vram_ptr[(address + 2) & s->memsize_mask] << 16 |
+           (uint64_t)s->vga.vram_ptr[(address + 3) & s->memsize_mask] << 24 |
+           (uint64_t)s->vga.vram_ptr[(address + 4) & s->memsize_mask] << 32 |
+           (uint64_t)s->vga.vram_ptr[(address + 5) & s->memsize_mask] << 40 |
+           (uint64_t)s->vga.vram_ptr[(address + 6) & s->memsize_mask] << 48 |
+           (uint64_t)s->vga.vram_ptr[(address + 7) & s->memsize_mask] << 56;
 }
 
 static void nv_vram_touch(NV15State *s, uint32_t address, uint32_t len)
 {
-    memory_region_set_dirty(&s->vga.vram, address & s->memsize_mask, len);
+    address &= s->memsize_mask;
+    if (len > s->memsize_mask + 1 - address) {
+        len = s->memsize_mask + 1 - address;
+    }
+    memory_region_set_dirty(&s->vga.vram, address, len);
 }
 
 void nv_vram_write8(NV15State *s, uint32_t address, uint8_t value)
@@ -120,27 +131,25 @@ void nv_vram_write8(NV15State *s, uint32_t address, uint8_t value)
 
 void nv_vram_write16(NV15State *s, uint32_t address, uint16_t value)
 {
-    address &= s->memsize_mask;
-    s->vga.vram_ptr[address + 0] = (value >> 0) & 0xFF;
-    s->vga.vram_ptr[address + 1] = (value >> 8) & 0xFF;
+    s->vga.vram_ptr[(address + 0) & s->memsize_mask] = (value >> 0) & 0xFF;
+    s->vga.vram_ptr[(address + 1) & s->memsize_mask] = (value >> 8) & 0xFF;
     nv_vram_touch(s, address, 2);
 }
 
 void nv_vram_write32(NV15State *s, uint32_t address, uint32_t value)
 {
-    address &= s->memsize_mask;
-    s->vga.vram_ptr[address + 0] = (value >> 0) & 0xFF;
-    s->vga.vram_ptr[address + 1] = (value >> 8) & 0xFF;
-    s->vga.vram_ptr[address + 2] = (value >> 16) & 0xFF;
-    s->vga.vram_ptr[address + 3] = (value >> 24) & 0xFF;
+    s->vga.vram_ptr[(address + 0) & s->memsize_mask] = (value >> 0) & 0xFF;
+    s->vga.vram_ptr[(address + 1) & s->memsize_mask] = (value >> 8) & 0xFF;
+    s->vga.vram_ptr[(address + 2) & s->memsize_mask] = (value >> 16) & 0xFF;
+    s->vga.vram_ptr[(address + 3) & s->memsize_mask] = (value >> 24) & 0xFF;
     nv_vram_touch(s, address, 4);
 }
 
 void nv_vram_write64(NV15State *s, uint32_t address, uint64_t value)
 {
-    address &= s->memsize_mask;
     for (int i = 0; i < 8; i++) {
-        s->vga.vram_ptr[address + i] = (value >> (i * 8)) & 0xFF;
+        s->vga.vram_ptr[(address + i) & s->memsize_mask] =
+            (value >> (i * 8)) & 0xFF;
     }
     nv_vram_touch(s, address, 8);
 }

@@ -2848,7 +2848,9 @@ static void d3d_mh_flip_modulo(NV15State *s, gf_channel *ch, uint32_t cls, uint3
 static void d3d_mh_flip_incr(NV15State *s, gf_channel *ch, uint32_t cls, uint32_t method, uint32_t param)
 {
   s->graph_flip_write++;
-  s->graph_flip_write %= s->graph_flip_modulo;
+  if (s->graph_flip_modulo) {
+    s->graph_flip_write %= s->graph_flip_modulo;
+  }
 }
 
 static void d3d_mh_fifo_wait(NV15State *s, gf_channel *ch, uint32_t cls, uint32_t method, uint32_t param)
@@ -3695,10 +3697,17 @@ static void d3d_mh_draw_arrays(NV15State *s, gf_channel *ch, uint32_t cls, uint3
 static void d3d_mh_inline_array(NV15State *s, gf_channel *ch, uint32_t cls, uint32_t method, uint32_t param)
 {
   if (cls == 0x0096)
-    while (ch->d3d_vertex_data_array_format_size[ch->d3d_attrib_index] == 0) {
+    while (ch->d3d_attrib_index < 16 &&
+           ch->d3d_vertex_data_array_format_size[ch->d3d_attrib_index] == 0) {
       for (uint32_t ci = 0; ci < 4; ci++) {
         ch->d3d_vertex_data[ch->d3d_vertex_index][ch->d3d_attrib_index][ci] =
           ch->d3d_vertex_data_imm[ch->d3d_attrib_index][ci];
+      }
+      /* Stop before d3d_attrib_index (uint32_t) underflows to ~0u, which
+       * would index d3d_vertex_data_array_format_size[] and the vertex
+       * arrays far out of bounds. */
+      if (ch->d3d_attrib_index == 0) {
+        break;
       }
       ch->d3d_attrib_index--;
     }

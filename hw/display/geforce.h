@@ -163,6 +163,7 @@ typedef struct gf_channel {
     uint32_t iifc_shw;
     uint32_t iifc_words_ptr;
     uint32_t iifc_words_left;
+    uint32_t iifc_words_count;
     uint32_t *iifc_words;
 
     uint32_t sifc_operation;
@@ -176,6 +177,7 @@ typedef struct gf_channel {
     uint32_t sifc_syx;
     uint32_t sifc_words_ptr;
     uint32_t sifc_words_left;
+    uint32_t sifc_words_count;
     uint32_t *sifc_words;
 
     bool blit_color_key_enable;
@@ -406,6 +408,7 @@ typedef struct gf_channel {
     uint32_t gdi_image_xy;
     uint32_t gdi_words_ptr;
     uint32_t gdi_words_left;
+    uint32_t gdi_words_count;
     uint32_t *gdi_words;
 
     uint32_t rect_operation;

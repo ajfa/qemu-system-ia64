@@ -415,7 +415,12 @@ static void gdi_blit(NV15State *s, gf_channel *ch, uint32_t type)
                 if (ch->gdi_mono_fmt == 1) {
                     bit_offset ^= 7;
                 }
-                bool pixel = (ch->gdi_words[word_offset] >> bit_offset) & 1;
+                /* word_offset can run past the allocation when the guest sets
+                 * dwidth > swidth (unsigned underflow of swidth - dwidth) or
+                 * an overflowed wordCount; clamp to the allocated buffer. */
+                bool pixel = (ch->gdi_words != NULL &&
+                              word_offset < ch->gdi_words_count) ?
+                    ((ch->gdi_words[word_offset] >> bit_offset) & 1) : 0;
                 if (type || (!type && pixel)) {
                     uint32_t dstcolor = nv_get_pixel(s, ch->s2d_img_dst,
                         draw_offset, x, ch->s2d_color_bytes);
@@ -537,11 +542,17 @@ static void iifc(NV15State *s, gf_channel *ch)
                 if (ch->iifc_bpp4) {
                     uint32_t word_offset = symbol_index / 8;
                     uint32_t symbol_offset = (symbol_index % 8 ^ 1) * 4;
-                    symbol = ch->iifc_words[word_offset] >> symbol_offset & 0xF;
+                    symbol = (ch->iifc_words != NULL &&
+                              word_offset < ch->iifc_words_count) ?
+                        ((ch->iifc_words[word_offset] >> symbol_offset) & 0xF)
+                        : 0;
                 } else {
                     uint32_t word_offset = symbol_index / 4;
                     uint32_t symbol_offset = symbol_index % 4 * 8;
-                    symbol = ch->iifc_words[word_offset] >> symbol_offset & 0xFF;
+                    symbol = (ch->iifc_words != NULL &&
+                              word_offset < ch->iifc_words_count) ?
+                        ((ch->iifc_words[word_offset] >> symbol_offset) & 0xFF)
+                        : 0;
                 }
                 uint32_t dstcolor = nv_get_pixel(s, ch->s2d_img_dst,
                     draw_offset, x, ch->s2d_color_bytes);
@@ -574,6 +585,11 @@ static void iifc(NV15State *s, gf_channel *ch)
 
 static void sifc(NV15State *s, gf_channel *ch)
 {
+    /* dxds/dydt are raw guest scale factors and default to 0; a zero divisor
+     * would SIGFPE.  A zero scale is degenerate, so skip the blit. */
+    if (ch->sifc_dxds == 0 || ch->sifc_dydt == 0) {
+        return;
+    }
     uint16_t dx = ch->sifc_clip_yx & 0xFFFF;
     uint16_t dy = ch->sifc_clip_yx >> 16;
     uint32_t dsdx = (uint32_t)(1099511627776ULL / ch->sifc_dxds);
@@ -602,14 +618,25 @@ static void sifc(NV15State *s, gf_channel *ch)
                                              x, ch->s2d_color_bytes);
             uint32_t srccolor;
             uint32_t symbol_offset = symbol_offset_y + (sx >> 20);
+            /* symbol_offset is driven by guest scale factors independently of
+             * the allocation size; clamp to the buffer (counted in 32-bit
+             * words, so *2 for 16-bit and *4 for 8-bit reinterpretations). */
             if (ch->sifc_color_bytes == 4) {
-                srccolor = ch->sifc_words[symbol_offset];
+                srccolor = (ch->sifc_words != NULL &&
+                            symbol_offset < ch->sifc_words_count) ?
+                           ch->sifc_words[symbol_offset] : 0;
             } else if (ch->sifc_color_bytes == 2) {
                 uint16_t *sifc_words16 = (uint16_t *)ch->sifc_words;
-                srccolor = sifc_words16[symbol_offset];
+                srccolor = (sifc_words16 != NULL &&
+                            (uint64_t)symbol_offset <
+                                (uint64_t)ch->sifc_words_count * 2) ?
+                           sifc_words16[symbol_offset] : 0;
             } else {
                 uint8_t *sifc_words8 = (uint8_t *)ch->sifc_words;
-                srccolor = sifc_words8[symbol_offset];
+                srccolor = (sifc_words8 != NULL &&
+                            (uint64_t)symbol_offset <
+                                (uint64_t)ch->sifc_words_count * 4) ?
+                           sifc_words8[symbol_offset] : 0;
             }
             if (ch->sifc_color_bytes == 4 && ch->s2d_color_bytes == 2) {
                 dstcolor = color_565_to_888(dstcolor);
@@ -1009,15 +1036,18 @@ void nv2d_execute_gdi(NV15State *s, gf_channel *ch, uint32_t cls,
         g_free(ch->gdi_words);
         ch->gdi_words_ptr = 0;
         ch->gdi_words_left = wordCount;
+        ch->gdi_words_count = wordCount;
         ch->gdi_words = g_new(uint32_t, wordCount);
     } else if ((method >= 0x200 && method < 0x280 && cls == 0x004a) ||
                (method >= 0x300 && method < 0x380 && cls == 0x004b)) {
-        ch->gdi_words[ch->gdi_words_ptr++] = param;
-        ch->gdi_words_left--;
-        if (!ch->gdi_words_left) {
-            gdi_blit(s, ch, 0);
-            g_free(ch->gdi_words);
-            ch->gdi_words = NULL;
+        if (ch->gdi_words != NULL && ch->gdi_words_left > 0) {
+            ch->gdi_words[ch->gdi_words_ptr++] = param;
+            ch->gdi_words_left--;
+            if (!ch->gdi_words_left) {
+                gdi_blit(s, ch, 0);
+                g_free(ch->gdi_words);
+                ch->gdi_words = NULL;
+            }
         }
     } else if ((method == 0x2f9 && cls == 0x004a) ||
                (method == 0x4f9 && cls == 0x004b)) {
@@ -1046,15 +1076,18 @@ void nv2d_execute_gdi(NV15State *s, gf_channel *ch, uint32_t cls,
         g_free(ch->gdi_words);
         ch->gdi_words_ptr = 0;
         ch->gdi_words_left = wordCount;
+        ch->gdi_words_count = wordCount;
         ch->gdi_words = g_new(uint32_t, wordCount);
     } else if ((method >= 0x300 && method < 0x380 && cls == 0x004a) ||
                (method >= 0x500 && method < 0x580 && cls == 0x004b)) {
-        ch->gdi_words[ch->gdi_words_ptr++] = param;
-        ch->gdi_words_left--;
-        if (!ch->gdi_words_left) {
-            gdi_blit(s, ch, 1);
-            g_free(ch->gdi_words);
-            ch->gdi_words = NULL;
+        if (ch->gdi_words != NULL && ch->gdi_words_left > 0) {
+            ch->gdi_words[ch->gdi_words_ptr++] = param;
+            ch->gdi_words_left--;
+            if (!ch->gdi_words_left) {
+                gdi_blit(s, ch, 1);
+                g_free(ch->gdi_words);
+                ch->gdi_words = NULL;
+            }
         }
     } else if (method == 0x3fd) {
         ch->gdi_clip_yx0 = param;
@@ -1152,7 +1185,10 @@ void nv2d_execute_ifc(NV15State *s, gf_channel *ch, uint32_t method,
     } else if (method == 0x0c0) {
         ch->ifc_color_fmt = param;
         update_color_bytes_ifc(s, ch);
-        ch->ifc_pixels_per_word = 4 / ch->ifc_color_bytes;
+        /* update_color_bytes() leaves ifc_color_bytes at 0 for an unknown
+         * format; guard the divide so a bad SET_COLOR_FORMAT cannot crash. */
+        ch->ifc_pixels_per_word =
+            ch->ifc_color_bytes ? 4 / ch->ifc_color_bytes : 0;
     } else if (method == 0x0c1) {
         ch->ifc_x = 0;
         ch->ifc_y = 0;
@@ -1243,14 +1279,17 @@ void nv2d_execute_iifc(NV15State *s, gf_channel *ch, uint32_t method,
         g_free(ch->iifc_words);
         ch->iifc_words_ptr = 0;
         ch->iifc_words_left = wordCount;
+        ch->iifc_words_count = wordCount;
         ch->iifc_words = g_new(uint32_t, wordCount);
     } else if (method >= 0x100 && method < 0x800) {
-        ch->iifc_words[ch->iifc_words_ptr++] = param;
-        ch->iifc_words_left--;
-        if (!ch->iifc_words_left) {
-            iifc(s, ch);
-            g_free(ch->iifc_words);
-            ch->iifc_words = NULL;
+        if (ch->iifc_words != NULL && ch->iifc_words_left > 0) {
+            ch->iifc_words[ch->iifc_words_ptr++] = param;
+            ch->iifc_words_left--;
+            if (!ch->iifc_words_left) {
+                iifc(s, ch);
+                g_free(ch->iifc_words);
+                ch->iifc_words = NULL;
+            }
         }
     }
 }
@@ -1281,14 +1320,17 @@ void nv2d_execute_sifc(NV15State *s, gf_channel *ch, uint32_t method,
         g_free(ch->sifc_words);
         ch->sifc_words_ptr = 0;
         ch->sifc_words_left = wordCount;
+        ch->sifc_words_count = wordCount;
         ch->sifc_words = g_new(uint32_t, wordCount);
     } else if (method >= 0x100 && method < 0x800) {
-        ch->sifc_words[ch->sifc_words_ptr++] = param;
-        ch->sifc_words_left--;
-        if (!ch->sifc_words_left) {
-            sifc(s, ch);
-            g_free(ch->sifc_words);
-            ch->sifc_words = NULL;
+        if (ch->sifc_words != NULL && ch->sifc_words_left > 0) {
+            ch->sifc_words[ch->sifc_words_ptr++] = param;
+            ch->sifc_words_left--;
+            if (!ch->sifc_words_left) {
+                sifc(s, ch);
+                g_free(ch->sifc_words);
+                ch->sifc_words = NULL;
+            }
         }
     }
 }
