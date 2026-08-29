@@ -1239,9 +1239,13 @@ static void fw_shell_help(void)
 
 static void fw_shell_prompt(void)
 {
+    /* Like the sample shell: "<fsN:\path>> " when a file system is selected,
+     * otherwise the bare "Shell> " prompt (newshell/init.c). */
     if (mShellFileSystemCount != 0) {
         fw_shell_print_fs_name(mShellCurrentFileSystem);
         fw_shell_puts(mShellCurrentDirectory);
+    } else {
+        fw_shell_puts("Shell");
     }
     fw_shell_puts("> ");
 }
@@ -1279,9 +1283,13 @@ static BOOLEAN fw_shell_dispatch(UINTN ArgumentCount, CHAR8 **Arguments)
         fw_shell_ascii_equal_ci(Arguments[0], "?")) {
         fw_shell_help();
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "ver")) {
+        /* Same fields and layout as the sample shell's `ver` (SHELL/ver): the
+         * EFI/firmware revisions use %d.%d (minor un-padded), the vendor and
+         * build version keep the QEMU branding we publish via SMBIOS. */
         fw_shell_puts("EFI Specification Revision : 1.10\r\n");
         fw_shell_puts("EFI Vendor                 : QEMU IA-64 Firmware\r\n");
-        fw_shell_puts("EFI Revision               : 1.00\r\n");
+        fw_shell_puts("EFI Revision               : 1.0\r\n");
+        fw_shell_puts("EFI Build Version          : ia64-firmware\r\n");
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "info")) {
         fw_shell_system_info();
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "map")) {
@@ -1480,7 +1488,7 @@ void fw_boot_shell_run(VOID)
     /* Greeting: the emphasised version banner then the device-mapping table,
      * matching the sample's "EFI Shell version x.y" + "map -r" startup. */
     fw_console_set_attr(0x0eU);          /* emphasis (yellow), like %E */
-    fw_shell_puts("\r\nEFI Shell version 1.10 [1.00]\r\n");
+    fw_shell_puts("\r\nEFI Shell version 1.10 [1.0]\r\n");
     fw_console_set_attr(0x07U);          /* normal (light grey), like %N */
     fw_shell_map();
     fw_shell_puts("\r\n");

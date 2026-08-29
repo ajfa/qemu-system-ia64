@@ -14534,14 +14534,17 @@ static void fw_post_emit_hex2(UINT8 Value)
     efi_conout_ascii(out);
 }
 
-/* Emit an EFI-style "major.minor" version (minor zero-padded to two digits). */
+/*
+ * Emit a "major.minor" version.  The sample shows the firmware revision minor
+ * un-padded ("[%d.%d]" -> "1.0") and the EFI spec minor two-wide ("%01d.%02d"
+ * -> "1.10"); our two revisions here are EFI 1.10 and firmware 1.00, whose
+ * minors (10 and 0) both fall outside the 1..9 range that would differ, so a
+ * plain decimal minor matches the sample's display for both.
+ */
 static void fw_post_emit_version(UINT32 Revision)
 {
     fw_post_emit_udec(Revision >> 16);
     efi_conout_ascii(".");
-    if ((Revision & 0xffffU) < 10U) {
-        efi_conout_ascii("0");
-    }
     fw_post_emit_udec(Revision & 0xffffU);
 }
 

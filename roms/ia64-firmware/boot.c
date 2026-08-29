@@ -502,7 +502,7 @@ static void fw_menu_frame(const CHAR8 *Prompt)
     fw_console_set_cursor_visible(0);
     fw_menu_attr(FW_MENU_ATTR_HEADER);
     fw_menu_at(0, 0);
-    efi_conout_ascii("EFI Boot Manager ver 1.10 [1.00]");
+    efi_conout_ascii("EFI Boot Manager ver 1.10 [1.0]");
     /* The sample leaves the emphasis attribute active, so the prompt line
      * inherits the header's colour -- keep it yellow to match. */
     fw_menu_at(0, 2);
@@ -719,7 +719,7 @@ static void fw_maint_frame_ex(const CHAR8 *Header, UINTN HeaderAttr)
     fw_console_set_cursor_visible(0);
     fw_menu_attr(FW_MENU_ATTR_HEADER);
     fw_menu_at(0, 0);
-    efi_conout_ascii("EFI Boot Maintenance Manager ver 1.10 [1.00]");
+    efi_conout_ascii("EFI Boot Maintenance Manager ver 1.10 [1.0]");
     fw_menu_attr(HeaderAttr);
     fw_menu_at(0, 2);
     efi_conout_ascii(Header);
