@@ -1471,6 +1471,7 @@ void fw_boot_shell_run(VOID)
      */
     fw_shell_puts("\r\n\r\nIA-64 EFI shell\r\n"
                   "Type 'help' for commands; 'exit' resumes boot.\r\n\r\n");
+    fw_console_set_cursor_visible(1);
     while (!fw_boot_services_exited()) {
         UINTN argument_count;
 
@@ -1482,6 +1483,7 @@ void fw_boot_shell_run(VOID)
             break;
         }
     }
+    fw_console_set_cursor_visible(0);
     if (!fw_boot_services_exited()) {
         fw_shell_puts("Leaving EFI shell.\r\n");
     }

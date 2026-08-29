@@ -474,6 +474,7 @@ static UINTN fw_menu_build(FW_MENU_ENTRY *Entries)
 static void fw_menu_frame(const CHAR8 *Prompt)
 {
     (void)fw_console_clear();
+    fw_console_set_cursor_visible(0);
     fw_menu_attr(FW_MENU_ATTR_HEADER);
     fw_menu_at(0, 0);
     efi_conout_ascii("EFI Boot Manager ver 1.10 [1.00]");
@@ -638,6 +639,7 @@ void fw_boot_menu_run(void)
 static void fw_maint_frame(const CHAR8 *Header)
 {
     (void)fw_console_clear();
+    fw_console_set_cursor_visible(0);
     fw_menu_attr(FW_MENU_ATTR_HEADER);
     fw_menu_at(0, 0);
     efi_conout_ascii("EFI Boot Maintenance Manager ver 1.10 [1.00]");

@@ -2033,6 +2033,21 @@ static void vga_indexed_write(UINTN IndexPort, UINTN DataPort,
     vga_io_write(DataPort, Value);
 }
 
+/*
+ * Move the hardware text cursor to a character offset (Row * 80 + Column) and
+ * show or hide it.  The console tracks the logical cursor in software; without
+ * this the VGA cursor is stuck wherever the CRTC left it (top-left) and blinks
+ * there permanently.  CRTC 0x0a bit 5 disables the cursor; the scan-line range
+ * (13..14) matches graphics_program_text_mode().
+ */
+void graphics_set_text_cursor(UINT16 Location, BOOLEAN Visible)
+{
+    vga_indexed_write(VGA_CRTC_I, VGA_CRTC_D, 0x0a,
+                      Visible ? 0x0dU : (0x0dU | 0x20U));
+    vga_indexed_write(VGA_CRTC_I, VGA_CRTC_D, 0x0e, (UINT8)(Location >> 8));
+    vga_indexed_write(VGA_CRTC_I, VGA_CRTC_D, 0x0f, (UINT8)(Location & 0xffU));
+}
+
 static void vga_enable_attribute_output(void)
 {
     vga_io_write(VGA_MIS_W, VGA_MIS_COLOR);
@@ -2151,10 +2166,12 @@ static void graphics_program_text_mode(void)
     static const UINT8 seq[] = { 0x03, 0x01, 0x03, 0x00, 0x02 };
     static const UINT8 crtc[] = {
         0x5f, 0x4f, 0x50, 0x82, 0x55, 0x81, 0xbf, 0x1f,
-        0x00, 0x4f, 0x0d, 0x0e, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x4f, 0x2d, 0x0e, 0x00, 0x00, 0x00, 0x00,
         0x9c, 0x8e, 0x8f, 0x28, 0x1f, 0x96, 0xb9, 0xa3,
         0xff,
     };
+    /* CRTC 0x0a bit 5 (0x20) starts the text cursor disabled; the console
+     * drives it explicitly via graphics_set_text_cursor(). */
     static const UINT8 attr[] = {
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
         0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,

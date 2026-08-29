@@ -510,6 +510,15 @@ void text_redraw_screen(void)
     }
 }
 
+/* Push the software cursor position and visibility to the VGA hardware. */
+static void text_sync_cursor(void)
+{
+    UINT16 loc = (UINT16)((UINTN)mConOutMode.CursorRow * VGA_TEXT_COLUMNS +
+                          (UINTN)mConOutMode.CursorColumn);
+
+    graphics_set_text_cursor(loc, mConOutMode.CursorVisible ? 1 : 0);
+}
+
 static void text_clear_row(UINTN Row)
 {
     UINTN col;
@@ -531,6 +540,7 @@ void text_clear_screen(void)
     mConOutMode.CursorColumn = 0;
     mConOutMode.CursorRow = 0;
     mTextWrapPending = 0;
+    text_sync_cursor();
 }
 
 static void text_scroll(void)
@@ -678,6 +688,9 @@ EFI_STATUS efi_conout_string(VOID *This, CHAR16 *String)
         text_put_char(*String);
         String++;
     }
+    if (mConOutMode.CursorVisible) {
+        text_sync_cursor();
+    }
     return st;
 }
 
@@ -751,6 +764,7 @@ EFI_STATUS efi_conout_set_cursor(VOID *This, UINTN Column, UINTN Row)
     mConOutMode.CursorColumn = (INT32)Column;
     mConOutMode.CursorRow = (INT32)Row;
     mTextWrapPending = 0;
+    text_sync_cursor();
     return EFI_SUCCESS;
 }
 
@@ -758,7 +772,14 @@ EFI_STATUS efi_conout_enable_cursor(VOID *This, BOOLEAN Enable)
 {
     (void)This;
     mConOutMode.CursorVisible = Enable ? 1 : 0;
+    text_sync_cursor();
     return EFI_SUCCESS;
+}
+
+/* Show or hide the text cursor -- the boot menu hides it, the shell shows it. */
+void fw_console_set_cursor_visible(BOOLEAN Visible)
+{
+    (void)efi_conout_enable_cursor(&mConOutProto, Visible);
 }
 
 static BOOLEAN text_graphics_a_cell_selftest(UINTN Column, UINTN Row)

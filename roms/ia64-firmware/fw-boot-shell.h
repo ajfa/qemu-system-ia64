@@ -149,6 +149,7 @@ UINT16 conin_ansi_numeric_scan(UINTN number);
 
 EFI_STATUS fw_console_read_key(EFI_INPUT_KEY *key);
 EFI_STATUS fw_console_clear(VOID);
+void fw_console_set_cursor_visible(BOOLEAN Visible);
 BOOLEAN fw_boot_services_exited(VOID);
 
 EFI_STATUS bs_handle_protocol(EFI_HANDLE handle, VOID *protocol,
@@ -191,6 +192,7 @@ UINT64 fw_installed_ram_size(VOID);
 BOOLEAN fw_handoff_vga_console_primary(VOID);
 UINT32 fw_graphics_width(VOID);
 UINT32 fw_graphics_height(VOID);
+void graphics_set_text_cursor(UINT16 Location, BOOLEAN Visible);
 const CHAR8 *fw_storage_description(BOOLEAN boot_device);
 BOOLEAN fw_handoff_nvram_persistent(VOID);
 void fw_reset_cold(VOID);
