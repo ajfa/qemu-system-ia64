@@ -8,7 +8,7 @@ from pathlib import Path
 from qemu_test import QemuSystemTest
 
 from ia64.efi_build import firmware_path
-from ia64.protocol import wait_for_suite
+from ia64.protocol import select_default_boot, wait_for_suite
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[3]
@@ -54,6 +54,13 @@ class Ia64FirmwareTest(QemuSystemTest):
 
     def wait_ia64_suite(self, vm, suite: str, required_cases,
                         timeout: float = 25.0, on_case=None):
+        # The boot manager waits forever on the default Timeout=0xFFFF, so the
+        # supplied medium is not auto-booted.  Select the highlighted default
+        # option ('Removable Media Boot') to boot it, as a user would.  This
+        # also covers the post-system_reset reboot, which shows the menu again.
+        # (Tests that drive the boot themselves -- hotkeys, shell commands --
+        # do not go through wait_ia64_suite.)
+        select_default_boot(vm.console_socket)
         result = wait_for_suite(
             vm.console_socket, suite, required_cases, timeout,
             on_case=on_case, process_alive=vm.is_running)

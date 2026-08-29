@@ -131,6 +131,35 @@ class ProtocolParser:
         raise ProtocolError(f"malformed IA64TEST line: {line!r}")
 
 
+def select_default_boot(console_socket, timeout: float = 60.0,
+                        marker: str = "select a boot option") -> None:
+    """Trigger a bare-media boot from the wait-forever (0xFFFF) boot menu.
+
+    Real firmware -- and ours -- defaults ``Timeout`` to 0xFFFF, so the boot
+    manager waits for a selection instead of auto-booting.  A test that supplies
+    bootable media must therefore select the highlighted default option
+    ('Removable Media Boot').  Wait for the menu prompt on the serial console,
+    then send Enter.
+    """
+    deadline = time.monotonic() + timeout
+    buf = ""
+    while time.monotonic() < deadline:
+        remaining = max(0.0, deadline - time.monotonic())
+        readable, _, _ = select.select(
+            [console_socket], [], [], min(0.5, remaining))
+        if not readable:
+            continue
+        data = console_socket.recv(4096)
+        if not data:
+            raise ProtocolError("console closed before the boot menu appeared")
+        buf += data.decode("utf-8", errors="replace")
+        if marker in buf:
+            console_socket.sendall(b"\r")
+            return
+    raise ProtocolError(
+        f"timed out waiting for the boot menu\n{buf[-2000:]}")
+
+
 def wait_for_suite(console_socket, suite: str, required_cases: Iterable[str],
                    timeout: float,
                    on_case: Callable[[CaseResult], None] | None = None,
