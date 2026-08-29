@@ -14438,9 +14438,10 @@ static void fw_phase_boot(void)
     /*
      * Interactive boot manager: it lists the Boot#### options, honours the EFI
      * Timeout variable with a countdown that auto-boots the default, and offers
-     * the EFI shell and a boot-maintenance submenu.  It returns only if the
-     * user pressed Esc to continue, or every boot option failed -- in which
-     * case we fall through to the normal BootOrder/removable-media path below.
+     * the EFI shell and a boot-maintenance submenu.  Like the sample it has no
+     * exit key and normally loops until a selection boots; it returns here only
+     * when there is nothing to show, in which case we fall through to the
+     * BootOrder/removable-media path below.
      */
     fw_boot_menu_run();
     if (mBootServicesExited) {

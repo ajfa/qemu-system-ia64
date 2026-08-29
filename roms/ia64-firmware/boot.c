@@ -470,6 +470,11 @@ static UINTN fw_menu_build(FW_MENU_ENTRY *Entries)
 /* Column at which option rows and the footer text begin. */
 #define FW_MENU_COL 4U
 
+/* First option row in a maintenance screen.  The maintenance banner and header
+ * each end in "\n\n", so options start two rows below the header (row 5),
+ * whereas the boot-manager prompt has no trailing blank line (options at 4). */
+#define FW_MAINT_TOP 5U
+
 /* Clear the screen and draw the standard header plus a prompt line. */
 static void fw_menu_frame(const CHAR8 *Prompt)
 {
@@ -478,9 +483,11 @@ static void fw_menu_frame(const CHAR8 *Prompt)
     fw_menu_attr(FW_MENU_ATTR_HEADER);
     fw_menu_at(0, 0);
     efi_conout_ascii("EFI Boot Manager ver 1.10 [1.00]");
-    fw_menu_attr(FW_MENU_ATTR_NORMAL);
+    /* The sample leaves the emphasis attribute active, so the prompt line
+     * inherits the header's colour -- keep it yellow to match. */
     fw_menu_at(0, 2);
     efi_conout_ascii(Prompt);
+    fw_menu_attr(FW_MENU_ATTR_NORMAL);
 }
 
 /* The arrow-key help line, drawn at the given row.  The up/down glyphs are
@@ -500,12 +507,55 @@ static void fw_menu_footer(UINTN Row)
     efi_conout_ascii(" to change option(s). Use Enter to select an option");
 }
 
-/* Draw one option row: the description at FW_MENU_COL, reverse if selected. */
+/* Option rows are drawn as a fixed-width field, matching the sample's %-.64s
+ * format: the text is space-padded so the selection is a full-width bar. */
+#define FW_MENU_FIELD 64U
+
+/* Emit (FW_MENU_FIELD - Used) trailing spaces to fill the option field. */
+static void fw_menu_pad_field(UINTN Used)
+{
+    static CHAR8 spaces[FW_MENU_FIELD + 1U];
+
+    if (spaces[0] == 0) {
+        UINTN i;
+
+        for (i = 0; i < FW_MENU_FIELD; i++) {
+            spaces[i] = ' ';
+        }
+        spaces[FW_MENU_FIELD] = 0;
+    }
+    if (Used < FW_MENU_FIELD) {
+        efi_conout_ascii(spaces + Used);
+    }
+}
+
+/* Draw one CHAR16 option row at FW_MENU_COL, padded, reverse if selected. */
 static void fw_menu_option_row(UINTN Row, const CHAR16 *Desc, BOOLEAN Selected)
 {
+    UINTN len = 0;
+
+    while (Desc[len]) {
+        len++;
+    }
     fw_menu_at(FW_MENU_COL, Row);
     fw_menu_attr(Selected ? FW_MENU_ATTR_SELECTED : FW_MENU_ATTR_NORMAL);
     fw_menu_put_char16(Desc);
+    fw_menu_pad_field(len);
+    fw_menu_attr(FW_MENU_ATTR_NORMAL);
+}
+
+/* Draw one CHAR8 option row at FW_MENU_COL, padded, reverse if selected. */
+static void fw_menu_field8(UINTN Row, const CHAR8 *Text, BOOLEAN Selected)
+{
+    UINTN len = 0;
+
+    while (Text[len]) {
+        len++;
+    }
+    fw_menu_at(FW_MENU_COL, Row);
+    fw_menu_attr(Selected ? FW_MENU_ATTR_SELECTED : FW_MENU_ATTR_NORMAL);
+    efi_conout_ascii(Text);
+    fw_menu_pad_field(len);
     fw_menu_attr(FW_MENU_ATTR_NORMAL);
 }
 
@@ -518,13 +568,14 @@ static void fw_menu_render(const FW_MENU_ENTRY *Entries, UINTN Count,
     for (i = 0; i < Count; i++) {
         fw_menu_option_row(4 + i, Entries[i].Desc, i == Selected);
     }
-    fw_menu_footer(5 + Count);
+    /* Two blank rows separate the last option from the footer (sample). */
+    fw_menu_footer(6 + Count);
 
-    fw_menu_at(FW_MENU_COL, 6 + Count);
+    fw_menu_at(FW_MENU_COL, 7 + Count);
     if (SecondsLeft >= 0) {
         efi_conout_ascii("Default boot selection will be booted in ");
         fw_menu_put_uint((UINTN)SecondsLeft);
-        efi_conout_ascii(" seconds       ");
+        efi_conout_ascii(" seconds  ");
     } else {
         efi_conout_ascii("                                            "
                          "                    ");
@@ -590,14 +641,19 @@ void fw_boot_menu_run(void)
         if (got_key) {
             counting = 0;   /* any key cancels the countdown */
             dirty = 1;
-            if (key.ScanCode == EFI_SCAN_UP) {
-                selected = (selected == 0) ? count - 1U : selected - 1U;
-            } else if (key.ScanCode == EFI_SCAN_DOWN) {
-                selected = (selected + 1U) % count;
-            } else if (key.ScanCode == EFI_SCAN_ESC) {
-                (void)fw_console_clear();
-                return;
-            } else if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
+            /* Sample key map: arrows or '^'/'V'/'v' move (clamped, no wrap);
+             * Enter or Space selects; there is no Esc/exit key. */
+            if (key.ScanCode == EFI_SCAN_UP || key.UnicodeChar == '^') {
+                if (selected > 0) {
+                    selected--;
+                }
+            } else if (key.ScanCode == EFI_SCAN_DOWN ||
+                       key.UnicodeChar == 'V' || key.UnicodeChar == 'v') {
+                if (selected + 1U < count) {
+                    selected++;
+                }
+            } else if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n' ||
+                       key.UnicodeChar == ' ') {
                 fw_menu_activate(&entries[selected]);
                 /* Only reached if the boot failed or an action returned:
                  * rebuild (entries may have changed) and re-render. */
@@ -636,16 +692,25 @@ void fw_boot_menu_run(void)
  */
 
 /* Draw the persistent maintenance banner plus a per-screen operation header. */
-static void fw_maint_frame(const CHAR8 *Header)
+/* Banner (always emphasised) plus a per-screen header in HeaderAttr.  Most
+ * maintenance headers are emphasised (%E in the sample); the console-device
+ * headers use the plain screen attribute. */
+static void fw_maint_frame_ex(const CHAR8 *Header, UINTN HeaderAttr)
 {
     (void)fw_console_clear();
     fw_console_set_cursor_visible(0);
     fw_menu_attr(FW_MENU_ATTR_HEADER);
     fw_menu_at(0, 0);
     efi_conout_ascii("EFI Boot Maintenance Manager ver 1.10 [1.00]");
+    fw_menu_attr(HeaderAttr);
     fw_menu_at(0, 2);
     efi_conout_ascii(Header);
     fw_menu_attr(FW_MENU_ATTR_NORMAL);
+}
+
+static void fw_maint_frame(const CHAR8 *Header)
+{
+    fw_maint_frame_ex(Header, FW_MENU_ATTR_HEADER);
 }
 
 /* Block until a key is available, then return it. */
@@ -698,13 +763,9 @@ static void fw_maint_list(const CHAR8 *Header, const CHAR8 *const *Items,
 
     fw_maint_frame(Header);
     for (i = 0; i < Count; i++) {
-        fw_menu_at(FW_MENU_COL, 4 + i);
-        fw_menu_attr(i == Selected ? FW_MENU_ATTR_SELECTED :
-                     FW_MENU_ATTR_NORMAL);
-        efi_conout_ascii(Items[i]);
-        fw_menu_attr(FW_MENU_ATTR_NORMAL);
+        fw_menu_field8(FW_MAINT_TOP + i, Items[i], i == Selected);
     }
-    fw_menu_footer(5 + Count);
+    fw_menu_footer(FW_MAINT_TOP + 1U + Count);
 }
 
 /* Run a simple selectable CHAR8 list; return the chosen index or Count on Esc. */
@@ -723,10 +784,14 @@ static UINTN fw_maint_choose(const CHAR8 *Header, const CHAR8 *const *Items,
         }
         fw_maint_key(&key);
         if (key.ScanCode == EFI_SCAN_UP) {
-            sel = (sel == 0) ? Count - 1U : sel - 1U;
+            if (sel > 0) {
+                sel--;
+            }
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_DOWN) {
-            sel = (sel + 1U) % Count;
+            if (sel + 1U < Count) {
+                sel++;
+            }
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_ESC) {
             return Count;
@@ -737,12 +802,22 @@ static UINTN fw_maint_choose(const CHAR8 *Header, const CHAR8 *const *Items,
 }
 
 /* Set Auto Boot TimeOut: a sub-menu to set or clear the Timeout variable. */
+static void fw_maint_help(const CHAR8 *Header, const CHAR8 *const *Lines,
+                          UINTN Count);
+
 static void fw_maint_set_timeout(void)
 {
     static const CHAR8 *const items[] = {
         "Set Timeout Value",
         "Delete/Disable Timeout",
+        "Help",
         "Exit",
+    };
+    static const CHAR8 *const help[] = {
+        "\"Set Timeout Value\" sets how many seconds the boot manager waits",
+        "before booting the default selection.  \"Delete/Disable Timeout\"",
+        "removes the timeout so the menu waits for a key; a value of 65535",
+        "also disables the automatic boot.",
     };
     static CHAR16 name[] = { 'T', 'i', 'm', 'e', 'o', 'u', 't', 0 };
     static const UINT32 nv = EFI_VARIABLE_NON_VOLATILE |
@@ -751,7 +826,7 @@ static void fw_maint_set_timeout(void)
 
     for (;;) {
         UINTN choice = fw_maint_choose(
-            "Set Auto Boot Timeout. Select an Option", items, 3);
+            "Set Auto Boot Timeout. Select an Option", items, 4);
 
         if (choice == 0) {
             UINT16 current = fw_menu_read_timeout();
@@ -799,7 +874,9 @@ static void fw_maint_set_timeout(void)
             (void)rs_set_variable(name, (void *)mEfiGlobalVariableGuid,
                                   0, 0, NULL);
             fw_maint_frame("Set Auto Boot Timeout. Select an Option");
-            fw_maint_status("'Timeout' variable cleared.  Press any key...", 4);
+            fw_maint_status("'Timeout' variable cleared. Press any key...", 4);
+        } else if (choice == 2) {
+            fw_maint_help("Timeout Menu Help Screen", help, 4U);
         } else {
             return;
         }
@@ -934,7 +1011,7 @@ static void fw_maint_ops_render(const CHAR8 *Header,
                                 UINTN Selected)
 {
     UINTN i;
-    UINTN row = 4;
+    UINTN row = FW_MAINT_TOP;
 
     fw_maint_frame(Header);
     for (i = 0; i < BootCount; i++, row++) {
@@ -942,11 +1019,7 @@ static void fw_maint_ops_render(const CHAR8 *Header,
     }
     row++;                                  /* blank line before the actions */
     for (i = 0; i < SpecCount; i++, row++) {
-        fw_menu_at(FW_MENU_COL, row);
-        fw_menu_attr((BootCount + i) == Selected ? FW_MENU_ATTR_SELECTED :
-                     FW_MENU_ATTR_NORMAL);
-        efi_conout_ascii(Specials[i]);
-        fw_menu_attr(FW_MENU_ATTR_NORMAL);
+        fw_menu_field8(row, Specials[i], (BootCount + i) == Selected);
     }
     fw_menu_footer(row + 1U);
 }
@@ -954,7 +1027,7 @@ static void fw_maint_ops_render(const CHAR8 *Header,
 /* Row at which a sub-menu draws its confirm/status prompts. */
 static UINTN fw_maint_msg_row(UINTN BootCount, UINTN SpecCount)
 {
-    UINTN row = 4U + BootCount + 1U + SpecCount + 2U;
+    UINTN row = FW_MAINT_TOP + BootCount + 1U + SpecCount + 2U;
 
     return (row > 23U) ? 23U : row;
 }
@@ -1054,10 +1127,10 @@ static void fw_maint_change_order(void)
         }
         fw_maint_key(&key);
         if (key.ScanCode == EFI_SCAN_UP) {
-            selected = (selected == 0) ? total - 1U : selected - 1U;
+            if (selected > 0) { selected--; }   /* clamp, no wrap */
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_DOWN) {
-            selected = (selected + 1U) % total;
+            if (selected + 1U < total) { selected++; }
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_ESC) {
             break;
@@ -1102,7 +1175,7 @@ static void fw_maint_change_order(void)
     }
     if (changed &&
         fw_maint_confirm("NVRAM Not updated. Save NVRAM? "
-                         "[Y to save, N to ignore] ", mrow)) {
+                         "[Y to save, N to ignore]", mrow)) {
         fw_maint_save_order(entries, boot_count);
     }
 }
@@ -1140,10 +1213,10 @@ static void fw_maint_bootnext(void)
         }
         fw_maint_key(&key);
         if (key.ScanCode == EFI_SCAN_UP) {
-            selected = (selected == 0) ? total - 1U : selected - 1U;
+            if (selected > 0) { selected--; }   /* clamp, no wrap */
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_DOWN) {
-            selected = (selected + 1U) % total;
+            if (selected + 1U < total) { selected++; }
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_ESC) {
             break;
@@ -1152,6 +1225,8 @@ static void fw_maint_bootnext(void)
                     (key.UnicodeChar == '\r' || key.UnicodeChar == '\n'))) {
             has_next = 0;
             changed = 1;
+            fw_maint_status("'BootNext' variable cleared. Press any key...",
+                            mrow);
             dirty = 1;
         } else if (selected < boot_count &&
                    (key.UnicodeChar == 'B' || key.UnicodeChar == 'b' ||
@@ -1185,7 +1260,7 @@ static void fw_maint_bootnext(void)
     }
     if (changed &&
         fw_maint_confirm("NVRAM Not updated. Save NVRAM? "
-                         "[Y to save, N to ignore] ", mrow)) {
+                         "[Y to save, N to ignore]", mrow)) {
         if (has_next) {
             (void)rs_set_variable(fw_boot_next_name,
                                   (void *)mEfiGlobalVariableGuid,
@@ -1403,33 +1478,33 @@ static void fw_browse_render(const FW_BROWSE_ENTRY *Entries, UINTN N,
                              BOOLEAN HasDotDot, UINTN Selected)
 {
     UINTN i;
-    UINTN row = 4;
+    UINTN row = FW_MAINT_TOP;
     UINTN idx;
 
     fw_maint_frame("Select file or change to new directory:");
     for (i = 0; i < N; i++, row++) {
+        UINTN len = 7U;                     /* the "<DIR>  "/"       " prefix */
+        UINTN j;
+
+        for (j = 0; Entries[i].Name[j]; j++) {
+            len++;
+        }
         fw_menu_at(FW_MENU_COL, row);
         fw_menu_attr(i == Selected ? FW_MENU_ATTR_SELECTED :
                      FW_MENU_ATTR_NORMAL);
         efi_conout_ascii(Entries[i].IsDir ? "<DIR>  " : "       ");
         fw_menu_put_char16(Entries[i].Name);
+        fw_menu_pad_field(len);
         fw_menu_attr(FW_MENU_ATTR_NORMAL);
     }
     row++;
     idx = N;
     if (HasDotDot) {
-        fw_menu_at(FW_MENU_COL, row);
-        fw_menu_attr(idx == Selected ? FW_MENU_ATTR_SELECTED :
-                     FW_MENU_ATTR_NORMAL);
-        efi_conout_ascii("[ .. ]  Up one directory");
-        fw_menu_attr(FW_MENU_ATTR_NORMAL);
+        fw_menu_field8(row, "[ .. ]  Up one directory", idx == Selected);
         row++;
         idx++;
     }
-    fw_menu_at(FW_MENU_COL, row);
-    fw_menu_attr(idx == Selected ? FW_MENU_ATTR_SELECTED : FW_MENU_ATTR_NORMAL);
-    efi_conout_ascii("Exit");
-    fw_menu_attr(FW_MENU_ATTR_NORMAL);
+    fw_menu_field8(row, "Exit", idx == Selected);
     fw_menu_footer(row + 2U);
 }
 
@@ -1482,10 +1557,10 @@ static void fw_browse_volume(EFI_HANDLE VolHandle, BOOLEAN BootNow)
             }
             fw_maint_key(&key);
             if (key.ScanCode == EFI_SCAN_UP) {
-                selected = (selected == 0) ? total - 1U : selected - 1U;
+                if (selected > 0) { selected--; }   /* clamp, no wrap */
                 dirty = 1;
             } else if (key.ScanCode == EFI_SCAN_DOWN) {
-                selected = (selected + 1U) % total;
+                if (selected + 1U < total) { selected++; }
                 dirty = 1;
             } else if (key.ScanCode == EFI_SCAN_ESC) {
                 (void)root->Close(root);
@@ -1555,34 +1630,38 @@ static void fw_maint_browse(BOOLEAN BootNow)
         for (;;) {
             EFI_INPUT_KEY key;
             UINTN i;
-            UINTN row = 4;
+            UINTN row = FW_MAINT_TOP;
 
             if (dirty) {
                 fw_maint_frame(volhdr);
                 for (i = 0; i < vol_count; i++, row++) {
+                    UINTN len = 30U;        /* "Removable Media Boot [Volume ]" */
+                    UINTN v = i;
+
+                    do {
+                        len++;
+                        v /= 10U;
+                    } while (v);
                     fw_menu_at(FW_MENU_COL, row);
                     fw_menu_attr(i == selected ? FW_MENU_ATTR_SELECTED :
                                  FW_MENU_ATTR_NORMAL);
                     efi_conout_ascii("Removable Media Boot [Volume ");
                     fw_menu_put_uint(i);
                     efi_conout_ascii("]");
+                    fw_menu_pad_field(len);
                     fw_menu_attr(FW_MENU_ATTR_NORMAL);
                 }
                 row++;
-                fw_menu_at(FW_MENU_COL, row);
-                fw_menu_attr(vol_count == selected ? FW_MENU_ATTR_SELECTED :
-                             FW_MENU_ATTR_NORMAL);
-                efi_conout_ascii("Exit");
-                fw_menu_attr(FW_MENU_ATTR_NORMAL);
+                fw_menu_field8(row, "Exit", vol_count == selected);
                 fw_menu_footer(row + 2U);
                 dirty = 0;
             }
             fw_maint_key(&key);
             if (key.ScanCode == EFI_SCAN_UP) {
-                selected = (selected == 0) ? total - 1U : selected - 1U;
+                if (selected > 0) { selected--; }   /* clamp, no wrap */
                 dirty = 1;
             } else if (key.ScanCode == EFI_SCAN_DOWN) {
-                selected = (selected + 1U) % total;
+                if (selected + 1U < total) { selected++; }
                 dirty = 1;
             } else if (key.ScanCode == EFI_SCAN_ESC) {
                 return;
@@ -1651,10 +1730,10 @@ static void fw_maint_delete_entry(void)
         }
         fw_maint_key(&key);
         if (key.ScanCode == EFI_SCAN_UP) {
-            selected = (selected == 0) ? total - 1U : selected - 1U;
+            if (selected > 0) { selected--; }   /* clamp, no wrap */
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_DOWN) {
-            selected = (selected + 1U) % total;
+            if (selected + 1U < total) { selected++; }
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_ESC) {
             break;
@@ -1708,7 +1787,7 @@ static void fw_maint_delete_entry(void)
     }
     if (pend_count > 0U &&
         fw_maint_confirm("NVRAM Not updated. Save NVRAM? "
-                         "[Y to save, N to ignore] ",
+                         "[Y to save, N to ignore]",
                          fw_maint_msg_row(boot_count, 4U))) {
         fw_maint_commit_deletes(pending, pend_count);
     }
@@ -1736,18 +1815,19 @@ typedef struct {
     UINT8 GapBefore;
 } FW_MAINT_ITEM;
 
+/* The sample indents every Main Menu entry by four spaces within the row. */
 static const FW_MAINT_ITEM mMaintItems[] = {
-    { "Boot from a File",                     FW_MAINT_BOOTFILE,  0 },
-    { "Add a Boot Option",                    FW_MAINT_ADD,       0 },
-    { "Delete Boot Option(s)",                FW_MAINT_DELETE,    0 },
-    { "Change Boot Order",                    FW_MAINT_ORDER,     0 },
-    { "Manage BootNext setting",              FW_MAINT_BOOTNEXT,  1 },
-    { "Set Auto Boot TimeOut",                FW_MAINT_TIMEOUT,   0 },
-    { "Select Active Console Output Devices", FW_MAINT_CONOUT,    1 },
-    { "Select Active Console Input Devices",  FW_MAINT_CONIN,     0 },
-    { "Select Active Standard Error Devices", FW_MAINT_CONERR,    0 },
-    { "Cold Reset",                           FW_MAINT_COLDRESET, 1 },
-    { "Exit",                                 FW_MAINT_EXIT,      0 },
+    { "    Boot from a File",                     FW_MAINT_BOOTFILE,  0 },
+    { "    Add a Boot Option",                    FW_MAINT_ADD,       0 },
+    { "    Delete Boot Option(s)",                FW_MAINT_DELETE,    0 },
+    { "    Change Boot Order",                    FW_MAINT_ORDER,     0 },
+    { "    Manage BootNext setting",              FW_MAINT_BOOTNEXT,  1 },
+    { "    Set Auto Boot TimeOut",                FW_MAINT_TIMEOUT,   0 },
+    { "    Select Active Console Output Devices", FW_MAINT_CONOUT,    1 },
+    { "    Select Active Console Input Devices",  FW_MAINT_CONIN,     0 },
+    { "    Select Active Standard Error Devices", FW_MAINT_CONERR,    0 },
+    { "    Cold Reset",                           FW_MAINT_COLDRESET, 1 },
+    { "    Exit",                                 FW_MAINT_EXIT,      0 },
 };
 
 static void fw_boot_maint_run(void)
@@ -1759,7 +1839,7 @@ static void fw_boot_maint_run(void)
     for (;;) {
         EFI_INPUT_KEY key;
         UINTN i;
-        UINTN row = 4;
+        UINTN row = FW_MAINT_TOP;
 
         if (dirty) {
             fw_maint_frame("Main Menu. Select an Operation");
@@ -1767,11 +1847,7 @@ static void fw_boot_maint_run(void)
                 if (mMaintItems[i].GapBefore) {
                     row++;
                 }
-                fw_menu_at(FW_MENU_COL, row);
-                fw_menu_attr(i == selected ? FW_MENU_ATTR_SELECTED :
-                             FW_MENU_ATTR_NORMAL);
-                efi_conout_ascii(mMaintItems[i].Label);
-                fw_menu_attr(FW_MENU_ATTR_NORMAL);
+                fw_menu_field8(row, mMaintItems[i].Label, i == selected);
                 row++;
             }
             fw_menu_footer(row + 1U);
@@ -1779,10 +1855,10 @@ static void fw_boot_maint_run(void)
         }
         fw_maint_key(&key);
         if (key.ScanCode == EFI_SCAN_UP) {
-            selected = (selected == 0) ? count - 1U : selected - 1U;
+            if (selected > 0) { selected--; }   /* clamp, no wrap */
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_DOWN) {
-            selected = (selected + 1U) % count;
+            if (selected + 1U < count) { selected++; }
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_ESC) {
             return;
@@ -1857,29 +1933,34 @@ static void fw_maint_console_select(const CHAR8 *Header, const CHAR8 *Device)
         UINTN i;
 
         if (dirty) {
-            fw_maint_frame(Header);
-            fw_menu_at(FW_MENU_COL, 4);
+            UINTN len = 2U;                 /* the "* "/"  " marker */
+            UINTN j;
+
+            /* Console headers are drawn plain (the sample omits %E here). */
+            fw_maint_frame_ex(Header, FW_MENU_ATTR_NORMAL);
+            for (j = 0; Device[j]; j++) {
+                len++;
+            }
+            fw_menu_at(FW_MENU_COL, FW_MAINT_TOP);
             fw_menu_attr(selected == 0 ? FW_MENU_ATTR_SELECTED :
                          FW_MENU_ATTR_NORMAL);
             efi_conout_ascii(active ? "* " : "  ");
             efi_conout_ascii(Device);
+            fw_menu_pad_field(len);
             fw_menu_attr(FW_MENU_ATTR_NORMAL);
             for (i = 0; i < 2U; i++) {
-                fw_menu_at(FW_MENU_COL, 6 + i);
-                fw_menu_attr((1U + i) == selected ? FW_MENU_ATTR_SELECTED :
-                             FW_MENU_ATTR_NORMAL);
-                efi_conout_ascii(spec[i]);
-                fw_menu_attr(FW_MENU_ATTR_NORMAL);
+                fw_menu_field8(FW_MAINT_TOP + 2U + i, spec[i],
+                               (1U + i) == selected);
             }
-            fw_menu_footer(9);
+            fw_menu_footer(FW_MAINT_TOP + 5U);
             dirty = 0;
         }
         fw_maint_key(&key);
         if (key.ScanCode == EFI_SCAN_UP) {
-            selected = (selected == 0) ? total - 1U : selected - 1U;
+            if (selected > 0) { selected--; }   /* clamp, no wrap */
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_DOWN) {
-            selected = (selected + 1U) % total;
+            if (selected + 1U < total) { selected++; }
             dirty = 1;
         } else if (key.ScanCode == EFI_SCAN_ESC) {
             return;
