@@ -14503,6 +14503,122 @@ static void fw_phase_protocols_and_selftests(void)
     uart_puts("\r\nFirmware ready.\r\n");
 }
 
+/* Emit a decimal integer to the EFI console (ConOut = serial + VGA text). */
+static void fw_post_emit_udec(UINT64 Value)
+{
+    CHAR8 digits[21];
+    CHAR8 out[22];
+    UINTN count = 0;
+    UINTN i = 0;
+
+    do {
+        digits[count++] = (CHAR8)('0' + (CHAR8)(Value % 10U));
+        Value /= 10U;
+    } while (Value != 0 && count < FW_ARRAY_SIZE(digits));
+    while (count != 0) {
+        out[i++] = digits[--count];
+    }
+    out[i] = 0;
+    efi_conout_ascii(out);
+}
+
+/* Emit a two-digit lowercase hex byte to the EFI console. */
+static void fw_post_emit_hex2(UINT8 Value)
+{
+    static const CHAR8 hex[] = "0123456789abcdef";
+    CHAR8 out[3];
+
+    out[0] = hex[(Value >> 4) & 0xfU];
+    out[1] = hex[Value & 0xfU];
+    out[2] = 0;
+    efi_conout_ascii(out);
+}
+
+/* Emit an EFI-style "major.minor" version (minor zero-padded to two digits). */
+static void fw_post_emit_version(UINT32 Revision)
+{
+    fw_post_emit_udec(Revision >> 16);
+    efi_conout_ascii(".");
+    if ((Revision & 0xffffU) < 10U) {
+        efi_conout_ascii("0");
+    }
+    fw_post_emit_udec(Revision & 0xffffU);
+}
+
+#define FW_POST_HOLD_MS   2000U
+
+/*
+ * A reference-platform-style POST summary on the video console.
+ *
+ * Our firmware POSTs almost instantly and, before this, dropped straight into
+ * the boot manager with a blank screen -- unlike a real Itanium platform, which
+ * shows a firmware/version banner and a processor/memory/device summary during
+ * POST.  Mirror that look (the Intel EFI sample prints a one-line
+ * "EFI version ... Running on Intel(R) Itanium Processor" banner from its core
+ * init before the boot manager clears the screen).  We keep the QEMU branding
+ * for the firmware name and version and fill the rest from the values we
+ * actually detected, then hold briefly so the screen is perceptible; any key
+ * skips ahead to the boot manager.  All figures are read live, so the summary
+ * cannot drift from what the firmware published.
+ */
+static void fw_phase_post_summary(void)
+{
+    UINT64 cpuid3 = fw_read_cpuid3();
+    UINT8 family = (UINT8)((cpuid3 >> IA64_CPUID3_FAMILY_SHIFT) &
+                           IA64_CPUID3_FAMILY_MASK);
+    UINT8 model = (UINT8)((cpuid3 >> 16) & 0xffU);
+    const CHAR8 *cpu_name;
+    UINTN elapsed;
+    EFI_INPUT_KEY key;
+
+    if (family == IA64_CPUID3_FAMILY_MERCED) {
+        cpu_name = "Intel Itanium";
+    } else if (family == 0x1fU) {
+        cpu_name = "Intel Itanium 2";
+    } else if (family == 0x20U) {
+        cpu_name = "Intel Itanium 2 9000";
+    } else {
+        cpu_name = "Intel Itanium";
+    }
+
+    (void)fw_console_clear();
+
+    fw_console_set_attr(0x0eU);   /* yellow (emphasis) */
+    efi_conout_ascii("qemu-system-ia64 Firmware\r\n");
+    fw_console_set_attr(0x07U);   /* light grey on black */
+    efi_conout_ascii("QEMU IA-64 Firmware  -  EFI ");
+    fw_post_emit_version((UINT32)mSystemTable.Hdr.Revision);
+    efi_conout_ascii("  -  Firmware Revision ");
+    fw_post_emit_version(mSystemTable.FirmwareRevision);
+    efi_conout_ascii("\r\n\r\n");
+
+    efi_conout_ascii("Processor      ");
+    fw_post_emit_udec(fw_processor_count());
+    efi_conout_ascii(" x ");
+    efi_conout_ascii(cpu_name);
+    efi_conout_ascii("  (family ");
+    fw_post_emit_hex2(family);
+    efi_conout_ascii("h model ");
+    fw_post_emit_hex2(model);
+    efi_conout_ascii("h)\r\n");
+
+    efi_conout_ascii("System Memory  ");
+    fw_post_emit_udec(fw_installed_ram_size() / (1024U * 1024U));
+    efi_conout_ascii(" MB\r\n");
+
+    efi_conout_ascii("Boot Device    ");
+    efi_conout_ascii((const CHAR8 *)fw_storage_description(1));
+    efi_conout_ascii("\r\n\r\n");
+
+    /* Hold the summary briefly so it is perceptible; any key skips ahead. */
+    for (elapsed = 0; elapsed < FW_POST_HOLD_MS; elapsed += 20U) {
+        if (fw_console_read_key(&key) == EFI_SUCCESS) {
+            break;
+        }
+        (void)bs_stall(20000U);
+    }
+}
+
 static void fw_phase_boot(void)
 {
     /*
@@ -14513,6 +14629,7 @@ static void fw_phase_boot(void)
      * when there is nothing to show, in which case we fall through to the
      * BootOrder/removable-media path below.
      */
+    fw_phase_post_summary();
     fw_boot_menu_run();
     if (mBootServicesExited) {
         while (1) {
