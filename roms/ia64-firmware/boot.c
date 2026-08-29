@@ -394,14 +394,20 @@ static void fw_menu_copy_desc(const UINT8 *Option, UINTN OptionSize,
 static UINT16 fw_menu_read_timeout(void)
 {
     static CHAR16 name[] = { 'T', 'i', 'm', 'e', 'o', 'u', 't', 0 };
-    UINT16 timeout = 5U;
+    /*
+     * With no "Timeout" variable the sample waits for the user indefinitely
+     * (0xFFFF) rather than auto-booting: an installed OS writes the variable
+     * alongside its Boot#### entry, and a user can always set one, so the
+     * wait-forever default only applies to a bare machine with nothing to run.
+     */
+    UINT16 timeout = 0xffffU;
     UINTN size = sizeof(timeout);
     UINT32 attr = 0;
 
     if (rs_get_variable(name, (void *)mEfiGlobalVariableGuid,
                         &attr, &size, &timeout) != EFI_SUCCESS ||
         size != sizeof(timeout)) {
-        timeout = 5U;
+        timeout = 0xffffU;
     }
     return timeout;
 }

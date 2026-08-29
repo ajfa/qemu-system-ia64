@@ -150,6 +150,7 @@ UINT16 conin_ansi_numeric_scan(UINTN number);
 EFI_STATUS fw_console_read_key(EFI_INPUT_KEY *key);
 EFI_STATUS fw_console_clear(VOID);
 void fw_console_set_cursor_visible(BOOLEAN Visible);
+void fw_console_set_attr(UINTN Attribute);
 BOOLEAN fw_boot_services_exited(VOID);
 
 EFI_STATUS bs_handle_protocol(EFI_HANDLE handle, VOID *protocol,

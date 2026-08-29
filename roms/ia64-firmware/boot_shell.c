@@ -552,6 +552,9 @@ static void fw_shell_map(void)
     UINTN index;
 
     fw_shell_refresh_file_systems();
+    fw_console_set_attr(0x0eU);
+    fw_shell_puts("Device mapping table\r\n");
+    fw_console_set_attr(0x07U);
     if (mShellFileSystemCount == 0) {
         fw_shell_puts("No readable file systems were found.\r\n");
         return;
@@ -1216,6 +1219,7 @@ static void fw_shell_help(void)
     fw_shell_puts(
         "Commands:\r\n"
         "  help                         Show this help\r\n"
+        "  ver                          Displays the version information\r\n"
         "  info                         Show system configuration\r\n"
         "  map                          List readable file systems\r\n"
         "  fsN:                         Select a file system\r\n"
@@ -1274,6 +1278,10 @@ static BOOLEAN fw_shell_dispatch(UINTN ArgumentCount, CHAR8 **Arguments)
     if (fw_shell_ascii_equal_ci(Arguments[0], "help") ||
         fw_shell_ascii_equal_ci(Arguments[0], "?")) {
         fw_shell_help();
+    } else if (fw_shell_ascii_equal_ci(Arguments[0], "ver")) {
+        fw_shell_puts("EFI Specification Revision : 1.10\r\n");
+        fw_shell_puts("EFI Vendor                 : QEMU IA-64 Firmware\r\n");
+        fw_shell_puts("EFI Revision               : 1.00\r\n");
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "info")) {
         fw_shell_system_info();
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "map")) {
@@ -1469,20 +1477,30 @@ void fw_boot_shell_run(VOID)
      * the shell banner from the preceding output.  (The 'clear'/'cls' command
      * still clears on demand.)
      */
-    fw_shell_puts("\r\n\r\nIA-64 EFI shell\r\n"
-                  "Type 'help' for commands; 'exit' resumes boot.\r\n\r\n");
+    /* Greeting: the emphasised version banner then the device-mapping table,
+     * matching the sample's "EFI Shell version x.y" + "map -r" startup. */
+    fw_console_set_attr(0x0eU);          /* emphasis (yellow), like %E */
+    fw_shell_puts("\r\nEFI Shell version 1.10 [1.00]\r\n");
+    fw_console_set_attr(0x07U);          /* normal (light grey), like %N */
+    fw_shell_map();
+    fw_shell_puts("\r\n");
     fw_console_set_cursor_visible(1);
     while (!fw_boot_services_exited()) {
         UINTN argument_count;
 
+        /* The prompt and the text the user types are shown emphasised; command
+         * output is drawn in the normal attribute (as in the sample). */
+        fw_console_set_attr(0x0eU);
         fw_shell_prompt();
         (void)fw_shell_read_line(line, sizeof(line));
+        fw_console_set_attr(0x07U);
         argument_count = fw_shell_split_line(
             line, arguments, FW_ARRAY_SIZE(arguments));
         if (!fw_shell_dispatch(argument_count, arguments)) {
             break;
         }
     }
+    fw_console_set_attr(0x07U);
     fw_console_set_cursor_visible(0);
     if (!fw_boot_services_exited()) {
         fw_shell_puts("Leaving EFI shell.\r\n");

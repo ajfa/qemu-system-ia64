@@ -782,6 +782,12 @@ void fw_console_set_cursor_visible(BOOLEAN Visible)
     (void)efi_conout_enable_cursor(&mConOutProto, Visible);
 }
 
+/* Set the console text attribute (foreground | background<<4). */
+void fw_console_set_attr(UINTN Attribute)
+{
+    (void)efi_conout_set_attribute(&mConOutProto, Attribute);
+}
+
 static BOOLEAN text_graphics_a_cell_selftest(UINTN Column, UINTN Row)
 {
     static const UINT8 expected_rows[VGA_TEXT_CELL_HEIGHT] = {
