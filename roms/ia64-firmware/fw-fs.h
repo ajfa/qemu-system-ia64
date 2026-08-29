@@ -253,6 +253,20 @@ typedef struct {
     CHAR16 Description[21];
     FW_OPTICAL_SETUP_LOADER_DEVICE_PATH FilePath;
 } __attribute__((packed)) FW_EFI_BOOT_OPTION;
+/* A HW_VENDOR device-path node (Type 0x01, SubType 0x04) carrying a 16-byte
+ * GUID.  The sample fires up its built-in shell from a Boot#### whose file
+ * path is exactly such a node; we mirror that for the internal EFI shell. */
+typedef struct {
+    FW_DEVICE_PATH_NODE Header;
+    UINT8 Guid[16];
+} __attribute__((packed)) FW_VENDOR_DEVICE_PATH_NODE;
+typedef struct {
+    UINT32 Attributes;
+    UINT16 FilePathListLength;
+    CHAR16 Description[21];
+    FW_VENDOR_DEVICE_PATH_NODE Vendor;
+    FW_DEVICE_PATH_NODE End;
+} __attribute__((packed)) FW_SHELL_BOOT_OPTION;
 typedef struct {
     FW_GRAPHICS_DEVICE_PATH Graphics;
     FW_SERIAL_DEVICE_PATH Serial;

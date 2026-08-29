@@ -422,6 +422,8 @@ void fw_copy_mem(VOID *Destination, const VOID *Source, UINTN Length);
 void fw_set_mem(VOID *Buffer, UINTN Size, UINT8 Value);
 EFI_STATUS rs_get_boot0000_variable(UINT32 *Attributes,
                                            UINTN *DataSize, VOID *Data);
+EFI_STATUS rs_get_shell_variable(UINT32 *Attributes,
+                                 UINTN *DataSize, VOID *Data);
 EFI_STATUS rs_convert_pointer_value(UINTN *Address);
 BOOLEAN ranges_overlap(UINT64 a_base, UINT64 a_size,
                               UINT64 b_base, UINT64 b_size);
@@ -8263,6 +8265,14 @@ static FW_FIRMWARE_VARIABLE mFirmwareVariables[] = {
         NULL, sizeof(FW_EFI_BOOT_OPTION), rs_get_boot0000_variable,
     },
     {
+        /* The built-in EFI shell, at a high number to avoid clashing with the
+         * low Boot#### an installed OS assigns itself. */
+        "Boot00FF", mEfiGlobalVariableGuid,
+        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+            EFI_VARIABLE_RUNTIME_ACCESS,
+        NULL, sizeof(FW_SHELL_BOOT_OPTION), rs_get_shell_variable,
+    },
+    {
         "BootCurrent", mEfiGlobalVariableGuid,
         EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
         &mBootCurrentValue, sizeof(mBootCurrentValue), NULL,
@@ -12925,6 +12935,66 @@ EFI_STATUS rs_get_boot0000_variable(UINT32 *Attributes,
         EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
             EFI_VARIABLE_RUNTIME_ACCESS,
         &option, sizeof(FW_EFI_BOOT_OPTION),
+        Attributes, DataSize, Data);
+}
+
+/*
+ * Built-in EFI shell as a Boot#### option.  The Intel sample publishes the
+ * internal shell behind a HW_VENDOR device-path node identified by this GUID
+ * ({d65a6b8c-71e5-4df0-a909-f0d2992b5aa9}) and the boot manager turns that
+ * handle into a Boot#### variable; selecting it runs the built-in shell rather
+ * than loading an image.  We mirror that: a firmware-provided Boot#### carries
+ * the same vendor node, and the loader recognises the GUID.
+ */
+static const UINT8 mInternalShellGuid[16] = {
+    0x8c, 0x6b, 0x5a, 0xd6, 0xe5, 0x71, 0xf0, 0x4d,
+    0xa9, 0x09, 0xf0, 0xd2, 0x99, 0x2b, 0x5a, 0xa9,
+};
+
+BOOLEAN fw_device_path_is_internal_shell(const VOID *DevicePath)
+{
+    const FW_DEVICE_PATH_NODE *node = (const FW_DEVICE_PATH_NODE *)DevicePath;
+    const UINT8 *guid;
+    UINTN i;
+
+    if (node == NULL || node->Type != 0x01U || node->SubType != 0x04U ||
+        node->Length != (UINT16)sizeof(FW_VENDOR_DEVICE_PATH_NODE)) {
+        return 0;
+    }
+    guid = (const UINT8 *)DevicePath + sizeof(FW_DEVICE_PATH_NODE);
+    for (i = 0; i < 16U; i++) {
+        if (guid[i] != mInternalShellGuid[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+EFI_STATUS rs_get_shell_variable(UINT32 *Attributes, UINTN *DataSize,
+                                 VOID *Data)
+{
+    static const CHAR16 shell_desc[21] = {
+        'E', 'F', 'I', ' ', 'S', 'h', 'e', 'l', 'l', ' ',
+        '[', 'B', 'u', 'i', 'l', 't', '-', 'i', 'n', ']', 0,
+    };
+    FW_SHELL_BOOT_OPTION option;
+
+    fw_set_mem(&option, sizeof(option), 0);
+    option.Attributes = 0x00000001U;
+    fw_copy_mem(option.Description, shell_desc, sizeof(option.Description));
+    option.Vendor.Header.Type = 0x01U;      /* HARDWARE_DEVICE_PATH */
+    option.Vendor.Header.SubType = 0x04U;   /* HW_VENDOR_DP */
+    option.Vendor.Header.Length = (UINT16)sizeof(FW_VENDOR_DEVICE_PATH_NODE);
+    fw_copy_mem(option.Vendor.Guid, mInternalShellGuid, 16);
+    option.End.Type = 0x7fU;
+    option.End.SubType = 0xffU;
+    option.End.Length = (UINT16)sizeof(FW_DEVICE_PATH_NODE);
+    option.FilePathListLength =
+        (UINT16)(sizeof(option.Vendor) + sizeof(option.End));
+    return rs_copy_variable(
+        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+            EFI_VARIABLE_RUNTIME_ACCESS,
+        &option, sizeof(FW_SHELL_BOOT_OPTION),
         Attributes, DataSize, Data);
 }
 

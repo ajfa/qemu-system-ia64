@@ -119,6 +119,16 @@ static EFI_STATUS boot_image_from_load_option(UINT16 OptionNumber,
     uart_put_hex64(OptionNumber);
     uart_puts("\r\n");
 
+    /* The built-in EFI shell is a Boot#### whose file path is a lone
+     * HW_VENDOR node with our shell GUID (mirroring the sample's
+     * "EFI Shell [Built-in]" entry).  It has no image to load — hand off
+     * to the interactive shell directly. */
+    if (fw_device_path_is_internal_shell(file_path)) {
+        (void)fw_set_boot_current(OptionNumber);
+        fw_boot_shell_run();
+        return EFI_SUCCESS;
+    }
+
     st = mBootServices.LoadImage(1, mImageHandle, file_path,
                                  NULL, 0, &image);
     if (st != EFI_SUCCESS) {
@@ -333,7 +343,6 @@ EFI_STATUS __attribute__((noinline)) boot_image_from_disk(void)
 #define FW_MENU_ATTR_HEADER   0x0eU  /* yellow on black (emphasis)    */
 
 #define FW_MENU_KIND_BOOT   0U
-#define FW_MENU_KIND_SHELL  1U
 #define FW_MENU_KIND_MAINT  2U
 
 typedef struct {
@@ -464,7 +473,12 @@ static UINTN fw_menu_build(FW_MENU_ENTRY *Entries)
         }
     }
 
-    Entries[n].Kind = FW_MENU_KIND_SHELL;
+    /* The built-in EFI shell is a genuine Boot#### (Boot00FF, provided by the
+     * firmware variable table): selecting it runs the normal boot-option engine
+     * exactly like the sample, which then hands off to the interactive shell
+     * via its vendor-GUID device path. */
+    Entries[n].Option = 0x00ffU;
+    Entries[n].Kind = FW_MENU_KIND_BOOT;
     fw_copy_mem(Entries[n].Desc, shell_label, sizeof(shell_label));
     n++;
     Entries[n].Kind = FW_MENU_KIND_MAINT;
@@ -591,9 +605,7 @@ static void fw_menu_render(const FW_MENU_ENTRY *Entries, UINTN Count,
 static void fw_menu_activate(const FW_MENU_ENTRY *Entry)
 {
     (void)fw_console_clear();
-    if (Entry->Kind == FW_MENU_KIND_SHELL) {
-        fw_boot_shell_run();
-    } else if (Entry->Kind == FW_MENU_KIND_MAINT) {
+    if (Entry->Kind == FW_MENU_KIND_MAINT) {
         fw_boot_maint_run();
     } else {
         (void)fw_boot_image_from_boot_option(Entry->Option);

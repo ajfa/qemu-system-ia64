@@ -186,6 +186,7 @@ void fw_boot_option_name(UINT16 option, CHAR16 name[9]);
 UINTN fw_load_option_description_size(const UINT8 *option,
                                       UINTN option_size);
 EFI_STATUS fw_boot_image_from_boot_option(UINT16 option_number);
+BOOLEAN fw_device_path_is_internal_shell(const VOID *DevicePath);
 
 UINTN fw_partition_count(VOID);
 UINTN fw_processor_count(VOID);
