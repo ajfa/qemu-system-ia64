@@ -10,7 +10,7 @@ from qemu_test import QemuSystemTest, wait_for_console_pattern
 from ia64.console import Ia64FirmwareTest
 from ia64.efi_build import app_path
 from ia64.media import make_fat_disk
-from ia64.protocol import select_default_boot, wait_for_menu
+from ia64.protocol import wait_for_menu
 
 
 class Ia64BootShell(Ia64FirmwareTest):
@@ -35,7 +35,7 @@ class Ia64BootShell(Ia64FirmwareTest):
         make_fat_disk(disk, app_path("smoke"))
 
         vm = self.launch_ia64(
-            name="shell-first", media=disk,
+            name="shell-first", media=disk, boot_timeout=None,
             machine_options=f"firmware-console=serial,nvram={nvram}")
         self._open_shell(vm)
         self._command(vm, "info", "NVRAM backing:  persistent")
@@ -58,27 +58,29 @@ class Ia64BootShell(Ia64FirmwareTest):
         self.assertIn("BootOrder".encode("utf-16le") + b"\0\0", contents)
         self.assertIn(b"IRT64OFT", contents)
 
+        # A timed auto-boot (1s countdown) runs boot_image_from_boot_order(),
+        # which honours BootNext=Boot0000 and -- per the UEFI spec -- deletes
+        # it, so the smoke app boots once from BootNext.
         vm = self.launch_ia64(
-            name="shell-second", media=disk,
+            name="shell-bootnext", media=disk, boot_timeout=1,
             machine_options=f"firmware-console=serial,nvram={nvram}")
-        self._open_shell(vm)
-        self._command(vm, "date", "2024-02-29")
-        self._command(vm, "time", "12:34:")
-        self._command(vm, "bootorder", "BootOrder: Boot0000")
-        self._command(vm, "bootnext", "BootNext: Boot0000")
-        # 'exit' resumes the boot flow, which returns to the wait-forever menu;
-        # selecting the default boots the smoke app.
-        vm.console_socket.sendall(b"exit\r")
-        select_default_boot(vm.console_socket)
         wait_for_console_pattern(
             self, "IA64TEST suite=smoke status=DONE", vm=vm)
         vm.shutdown()
-        # NB: BootNext one-shot consumption is not verified here.  The boot
-        # manager only deletes BootNext when it auto-boots via
-        # boot_image_from_boot_order(); with the wait-forever menu (Timeout
-        # 0xFFFF, the sample default) a manually selected option does not run
-        # that path, so BootNext is not consumed.  Whether the menu should
-        # honour/consume BootNext per the UEFI spec is a firmware decision.
+
+        # Reopen the shell: the date/time/BootOrder settings persisted, and the
+        # one-shot BootNext was consumed by the auto-boot above.
+        vm = self.launch_ia64(
+            name="shell-verify", media=disk, boot_timeout=None,
+            machine_options=f"firmware-console=serial,nvram={nvram}")
+        self._open_shell(vm)
+        self._command(vm, "date", "2024-02-29")
+        # The RTC keeps running from the value set above, so only the date and
+        # hour are stable across the intervening reboots.
+        self._command(vm, "time", "2024-02-29 12:")
+        self._command(vm, "bootorder", "BootOrder: Boot0000")
+        self._command(vm, "bootnext", "BootNext is not set")
+        vm.shutdown()
 
     def test_usb_menu_and_device_boot(self):
         # Drive the menu with a USB keyboard (i8042 disabled): open the shell
@@ -86,7 +88,7 @@ class Ia64BootShell(Ia64FirmwareTest):
         disk = Path(self.scratch_file("device-boot.img"))
         make_fat_disk(disk, app_path("smoke"))
         vm = self.launch_ia64(
-            name="device-boot", media=disk,
+            name="device-boot", media=disk, boot_timeout=None,
             machine_options="i8042=off,firmware-console=serial,nvram=none")
         wait_for_menu(vm.console_socket)
         for qcode in ("down", "ret"):

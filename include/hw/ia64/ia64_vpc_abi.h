@@ -33,7 +33,11 @@
  */
 #define IA64_FW_HANDOFF_ADDR          IA64_U64(0x00000000ff0ff000)
 #define IA64_FW_HANDOFF_MAGIC         IA64_U64(0x4d41523436414951) /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION       12ULL
+#define IA64_FW_HANDOFF_VERSION       13ULL
+/* Handoff version that first carries IA64VpcHandoff.BootTimeout. */
+#define IA64_FW_HANDOFF_BOOT_TIMEOUT_VERSION 13ULL
+/* Default boot-manager Timeout: wait for the user forever (EFI sample). */
+#define IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER 0xffffU
 /* Offset of IA64VpcHandoff.RamSize, re-derived by entry.S. */
 #define IA64_FW_HANDOFF_RAMSIZE_OFFSET 16
 
@@ -260,6 +264,12 @@ typedef struct __attribute__((packed)) IA64VpcHandoff {
     unsigned long long CoresPerSocket;
     unsigned long long ThreadsPerCore;
     unsigned long long MapQuirkDisable;   /* version 11+ */
+    unsigned long long BootTimeout;       /* version 13+; default boot-manager
+                                           * Timeout (seconds) when no NVRAM
+                                           * Timeout variable exists.  0xFFFF
+                                           * (the default) waits for the user
+                                           * like the EFI sample; 0 boots the
+                                           * BootOrder immediately. */
 } IA64VpcHandoff;
 
 _Static_assert(__builtin_offsetof(IA64VpcHandoff, RamSize) ==

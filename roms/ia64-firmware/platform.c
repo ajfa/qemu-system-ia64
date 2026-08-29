@@ -147,7 +147,7 @@ typedef struct {
     UINT64 DebugPortBase;
 } FW_HANDOFF_LEGACY;
 
-FW_STATIC_ASSERT(sizeof(IA64VpcHandoff) == 112, fw_handoff_size);
+FW_STATIC_ASSERT(sizeof(IA64VpcHandoff) == 120, fw_handoff_size);
 FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, ProcessorCount) == 64,
                  fw_handoff_processor_count_offset);
 FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, NvramPersistent) == 72,
@@ -428,6 +428,20 @@ UINT64 fw_handoff_map_quirk_disable(void)
         return 0;
     }
     return handoff->MapQuirkDisable & IA64_FW_QUIRK_ALL;
+}
+
+UINT16 fw_handoff_boot_timeout(void)
+{
+    const FW_HANDOFF_HEADER *header =
+        (const FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    const IA64VpcHandoff *handoff =
+        (const IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+
+    if (!fw_handoff_valid(header) ||
+        header->Version < IA64_FW_HANDOFF_BOOT_TIMEOUT_VERSION) {
+        return IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER;
+    }
+    return (UINT16)handoff->BootTimeout;
 }
 
 static void fw_handoff_processor_topology(UINTN ProcessorCount)

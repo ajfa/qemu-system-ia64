@@ -20,6 +20,7 @@
 #include "qemu/error-report.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
+#include "qapi/visitor.h"
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
 #include "hw/core/qdev-properties.h"
@@ -448,6 +449,7 @@ struct IA64VpcMachineState {
     bool firmware_ide_dma;
     bool agp_enabled;
     uint64_t firmware_console;
+    uint16_t firmware_boot_timeout;
     char *nvram_path;
     char *realfw_path;
     char *realfw_vga_rom_path;
@@ -2270,6 +2272,27 @@ static void ia64_vpc_set_firmware_console(Object *obj, const char *value,
     error_setg(errp, "firmware-console must be 'serial' or 'vga'");
 }
 
+static void ia64_vpc_get_boot_timeout(Object *obj, Visitor *v, const char *name,
+                                      void *opaque, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+    uint16_t value = s->firmware_boot_timeout;
+
+    visit_type_uint16(v, name, &value, errp);
+}
+
+static void ia64_vpc_set_boot_timeout(Object *obj, Visitor *v, const char *name,
+                                      void *opaque, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+    uint16_t value;
+
+    if (!visit_type_uint16(v, name, &value, errp)) {
+        return;
+    }
+    s->firmware_boot_timeout = value;
+}
+
 static char *ia64_vpc_get_vga(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -2673,7 +2696,7 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     IA64VpcHandoff handoff = { 0 };
     bool debug_port_present = debug_port_get_chardev() != NULL;
 
-    _Static_assert(sizeof(IA64VpcHandoff) == 112,
+    _Static_assert(sizeof(IA64VpcHandoff) == 120,
                    "IA-64 firmware handoff ABI size changed");
     _Static_assert(offsetof(IA64VpcHandoff, ProcessorCount) == 64,
                    "IA-64 firmware handoff CPU count offset changed");
@@ -2703,6 +2726,7 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     handoff.CoresPerSocket = cpu_to_le64(machine->smp.cores);
     handoff.ThreadsPerCore = cpu_to_le64(machine->smp.threads);
     handoff.MapQuirkDisable = cpu_to_le64(s->fw_map_quirk_disable);
+    handoff.BootTimeout = cpu_to_le64(s->firmware_boot_timeout);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, &handoff,
                               sizeof(handoff));
 }
@@ -4822,6 +4846,8 @@ static void ia64_vpc_machine_instance_init(Object *obj)
 #else
     s->firmware_console = IA64_FW_CONSOLE_SERIAL;
 #endif
+    /* Boot manager waits for the user by default (like the EFI sample). */
+    s->firmware_boot_timeout = IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER;
     /* The 460GX GXB AGP GART is on by default, as on real hardware. */
     s->agp_enabled = true;
     /* Default display adapter: the Rage 128 (honouring -vga); mach64 opt-in. */
@@ -4948,6 +4974,13 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                   ia64_vpc_set_firmware_console);
     object_class_property_set_description(oc, "firmware-console",
         "Set firmware HCDP primary console to 'serial' or 'vga'");
+    object_class_property_add(oc, "firmware-boot-timeout", "uint16",
+                              ia64_vpc_get_boot_timeout,
+                              ia64_vpc_set_boot_timeout, NULL, NULL);
+    object_class_property_set_description(oc, "firmware-boot-timeout",
+        "Default boot-manager Timeout in seconds when no NVRAM 'Timeout' "
+        "variable exists: 0 boots the BootOrder immediately, 0xFFFF (the "
+        "default) waits for the user like the EFI sample.");
     object_class_property_add_str(oc, "realfw",
                                   ia64_vpc_get_realfw,
                                   ia64_vpc_set_realfw);

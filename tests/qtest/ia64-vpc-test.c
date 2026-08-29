@@ -644,7 +644,7 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
 {
     IA64VpcHandoff handoff;
 
-    g_assert_cmpuint(sizeof(handoff), ==, 112);
+    g_assert_cmpuint(sizeof(handoff), ==, 120);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
     g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
     g_assert_cmphex(le64_to_cpu(handoff.Version), ==,
@@ -665,13 +665,15 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
                     IA64_FW_QUIRK_ACPI_LOW_ISLAND | IA64_FW_QUIRK_SCRATCH_2G |
                     IA64_FW_QUIRK_LOW_BOUNDARIES | IA64_FW_QUIRK_LOW_ANCHOR |
                     IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF);
+    g_assert_cmphex(le64_to_cpu(handoff.BootTimeout), ==,
+                    IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER);
 }
 
 static void test_firmware_handoff_defaults(void)
 {
-    static const uint8_t expected_v12[sizeof(IA64VpcHandoff)] = {
+    static const uint8_t expected_v13[sizeof(IA64VpcHandoff)] = {
         0x51, 0x49, 0x41, 0x36, 0x34, 0x52, 0x41, 0x4d,
-        0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -684,6 +686,7 @@ static void test_firmware_handoff_defaults(void)
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x5e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
     uint8_t actual[sizeof(IA64VpcHandoff)];
     QTestState *qts = ia64_vpc_start(NULL);
@@ -691,7 +694,7 @@ static void test_firmware_handoff_defaults(void)
     assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, actual, sizeof(actual));
     g_assert_cmpmem(actual, sizeof(actual),
-                    expected_v12, sizeof(expected_v12));
+                    expected_v13, sizeof(expected_v13));
     qtest_quit(qts);
 }
 
@@ -792,6 +795,21 @@ static void test_firmware_handoff_i8042_off(void)
                                  "-m 256M -S");
 
     assert_firmware_handoff(qts, 0, 1, 0, 1, 1, 1);
+    qtest_quit(qts);
+}
+
+static void test_firmware_handoff_boot_timeout(void)
+{
+    IA64VpcHandoff handoff;
+    /* A finite firmware-boot-timeout overrides the wait-forever default and
+     * reaches the OS handoff verbatim, driving the boot manager's countdown. */
+    QTestState *qts = qtest_init("-machine ia64-vpc,firmware-boot-timeout=5 "
+                                 "-m 256M -S");
+
+    qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
+    g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
+    g_assert_cmphex(le64_to_cpu(handoff.Version), ==, IA64_FW_HANDOFF_VERSION);
+    g_assert_cmphex(le64_to_cpu(handoff.BootTimeout), ==, 5);
     qtest_quit(qts);
 }
 
@@ -3315,6 +3333,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/cpu/itanium-alias", test_cpu_itanium_alias);
     qtest_add_func("/ia64-vpc/firmware-handoff/i8042-off",
                    test_firmware_handoff_i8042_off);
+    qtest_add_func("/ia64-vpc/firmware-handoff/boot-timeout",
+                   test_firmware_handoff_boot_timeout);
     for (cpus = 1; cpus <= 8; cpus++) {
         g_autofree char *path =
             g_strdup_printf("/ia64-vpc/smp/topology/%u", cpus);

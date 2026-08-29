@@ -408,15 +408,18 @@ static UINT16 fw_menu_read_timeout(void)
      * (0xFFFF) rather than auto-booting: an installed OS writes the variable
      * alongside its Boot#### entry, and a user can always set one, so the
      * wait-forever default only applies to a bare machine with nothing to run.
+     * The platform can override that fallback via the firmware-boot-timeout
+     * machine property (default 0xFFFF); the functional tests set a short
+     * finite value so bare media boots without an interactive menu selection.
      */
-    UINT16 timeout = 0xffffU;
+    UINT16 timeout = fw_handoff_boot_timeout();
     UINTN size = sizeof(timeout);
     UINT32 attr = 0;
 
     if (rs_get_variable(name, (void *)mEfiGlobalVariableGuid,
                         &attr, &size, &timeout) != EFI_SUCCESS ||
         size != sizeof(timeout)) {
-        timeout = 0xffffU;
+        timeout = fw_handoff_boot_timeout();
     }
     return timeout;
 }
