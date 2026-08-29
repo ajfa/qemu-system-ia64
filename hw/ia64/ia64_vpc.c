@@ -4872,7 +4872,15 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
 #else
     mc->block_default_type = IF_NONE;
 #endif
-    mc->no_serial = 0;
+    /*
+     * The firmware UART is created explicitly below (serial_mm_init with
+     * serial_hd(0)); do not also let QEMU synthesise a default serial VC.
+     * With -display sdl that default would pop a separate console window
+     * streaming the firmware's UART diagnostics -- which reads as a garbled,
+     * never-cleared display.  A user who wants the serial still gets it by
+     * passing -serial explicitly; no_serial only suppresses the auto VC.
+     */
+    mc->no_serial = 1;
     mc->no_parallel = 1;
     mc->no_floppy = 1;
     mc->no_cdrom = 1;
