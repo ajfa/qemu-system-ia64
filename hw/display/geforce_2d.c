@@ -1,10 +1,17 @@
 /*
  * NVIDIA GeForce2 (NV15) 2D acceleration engine.
  *
- * Ported from the Bochs Project's bx_geforce_c device (LGPL v2+).  Contains the
- * blit/raster primitives and the 2D-class FIFO method executors.  The forward
- * and ternary raster-op helpers, originally in Bochs' bitblt.h, are
+ * Ported to QEMU from the Bochs Project's bx_geforce_c SVGA device
+ * (Copyright (C) 2025-2026 The Bochs Project, LGPL v2+).  Only the NV15
+ * (card_type 0x15) code path is retained.  Contains the blit/raster
+ * primitives and the 2D-class FIFO method executors.  The forward and
+ * ternary raster-op helpers, originally in Bochs' bitblt.h, are
  * reconstructed here.
+ *
+ * This library is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or (at your
+ * option) any later version.
  */
 
 #include "qemu/osdep.h"

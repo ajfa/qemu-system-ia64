@@ -4,8 +4,15 @@
  * Core: PCI/AGP config, MMIO register file, VRAM/RAMIN/DMA/RAMHT/FIFO, IRQ,
  * timers, legacy + extended CRTC I/O, and the QEMU display path.
  *
- * Ported from the Bochs Project's bx_geforce_c device (LGPL v2+), NV15 path
- * only.  The NV20/NV35/NV40 code of the original is dropped.
+ * Ported to QEMU from the Bochs Project's bx_geforce_c SVGA device
+ * (Copyright (C) 2025-2026 The Bochs Project, LGPL v2+).  Only the NV15
+ * (card_type 0x15) code path is retained; the NV20/NV35/NV40 code of the
+ * original is dropped.
+ *
+ * This library is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or (at your
+ * option) any later version.
  */
 
 #include "qemu/osdep.h"
