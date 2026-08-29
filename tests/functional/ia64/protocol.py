@@ -131,15 +131,13 @@ class ProtocolParser:
         raise ProtocolError(f"malformed IA64TEST line: {line!r}")
 
 
-def select_default_boot(console_socket, timeout: float = 60.0,
-                        marker: str = "select a boot option") -> None:
-    """Trigger a bare-media boot from the wait-forever (0xFFFF) boot menu.
+def wait_for_menu(console_socket, timeout: float = 60.0,
+                  marker: str = "to change option") -> None:
+    """Wait for the boot manager menu prompt on the serial console.
 
-    Real firmware -- and ours -- defaults ``Timeout`` to 0xFFFF, so the boot
-    manager waits for a selection instead of auto-booting.  A test that supplies
-    bootable media must therefore select the highlighted default option
-    ('Removable Media Boot').  Wait for the menu prompt on the serial console,
-    then send Enter.
+    The menu waits forever on the default Timeout=0xFFFF (as the EFI sample
+    does), so a test must interact with it: select the highlighted default to
+    boot (see select_default_boot), or navigate to another entry.
     """
     deadline = time.monotonic() + timeout
     buf = ""
@@ -154,10 +152,21 @@ def select_default_boot(console_socket, timeout: float = 60.0,
             raise ProtocolError("console closed before the boot menu appeared")
         buf += data.decode("utf-8", errors="replace")
         if marker in buf:
-            console_socket.sendall(b"\r")
             return
     raise ProtocolError(
         f"timed out waiting for the boot menu\n{buf[-2000:]}")
+
+
+def select_default_boot(console_socket, timeout: float = 60.0) -> None:
+    """Boot 'Removable Media Boot' (the first menu entry) from the boot menu.
+
+    Wait for the menu, move the highlight to the top -- the boot manager keeps
+    its selection across activations, so it may be sitting on a different entry
+    if the shell was opened and exited -- then press Enter.  Up-arrow clamps at
+    the first entry, so three of them reach it from anywhere in the menu.
+    """
+    wait_for_menu(console_socket, timeout)
+    console_socket.sendall(b"\x1b[A\x1b[A\x1b[A\r")   # Up x3 (VT100), Enter
 
 
 def wait_for_suite(console_socket, suite: str, required_cases: Iterable[str],

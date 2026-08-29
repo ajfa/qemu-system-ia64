@@ -199,7 +199,6 @@ const CHAR8 *fw_storage_description(BOOLEAN boot_device);
 BOOLEAN fw_handoff_nvram_persistent(VOID);
 void fw_reset_cold(VOID);
 
-BOOLEAN fw_boot_shell_hotkey_window(VOID);
 BOOLEAN fw_boot_shell_selftest(VOID);
 void fw_boot_shell_run(VOID);
 void fw_boot_menu_run(VOID);

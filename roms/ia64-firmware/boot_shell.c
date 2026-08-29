@@ -12,8 +12,6 @@
 #define FW_SHELL_PATH_MAX       256U
 #define FW_SHELL_DEVICE_PATH_MAX 1024U
 #define FW_SHELL_BOOT_ORDER_MAX 16U
-#define FW_SHELL_HOTKEY_POLLS   300U
-#define FW_SHELL_HOTKEY_POLL_US 10000U
 
 typedef struct {
     EFI_HANDLE handle;
@@ -157,26 +155,6 @@ static BOOLEAN fw_shell_hotkey(const EFI_INPUT_KEY *Key)
             Key->ScanCode == EFI_SCAN_F12 ||
             Key->ScanCode == EFI_SCAN_DELETE ||
             Key->UnicodeChar == 0x7fU);
-}
-
-BOOLEAN fw_boot_shell_hotkey_window(VOID)
-{
-    EFI_INPUT_KEY key;
-    UINTN poll;
-
-    fw_shell_puts("\r\nPress F2, F12, or Delete within 3 seconds for "
-                  "the EFI shell.\r\n");
-    for (poll = 0; poll < FW_SHELL_HOTKEY_POLLS; poll++) {
-        while (fw_console_read_key(&key) == EFI_SUCCESS) {
-            if (fw_shell_hotkey(&key)) {
-                fw_shell_puts("Opening EFI shell...\r\n");
-                return 1;
-            }
-        }
-        (void)bs_stall(FW_SHELL_HOTKEY_POLL_US);
-    }
-    fw_shell_puts("Continuing normal boot.\r\n");
-    return 0;
 }
 
 static UINTN fw_shell_read_line(CHAR8 *Line, UINTN Capacity)
