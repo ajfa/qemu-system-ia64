@@ -1954,8 +1954,14 @@ static void fw_maint_console_select(const CHAR8 *Header, const CHAR8 *Device)
             UINTN len = 2U;                 /* the "* "/"  " marker */
             UINTN j;
 
-            /* Console headers are drawn plain (the sample omits %E here). */
-            fw_maint_frame_ex(Header, FW_MENU_ATTR_NORMAL);
+            /*
+             * The console-select header is yellow like every other menu.  The
+             * sample's console Header string omits %E, but the menu framework
+             * prints it right after PrintBanner(), which leaves the attribute
+             * at %E/yellow (its banner never resets to %N), so the header
+             * inherits yellow (Maint/menu.c PrintBanner + Print(Menu->Header)).
+             */
+            fw_maint_frame_ex(Header, FW_MENU_ATTR_HEADER);
             for (j = 0; Device[j]; j++) {
                 len++;
             }
