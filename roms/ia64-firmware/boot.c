@@ -664,13 +664,16 @@ static BOOLEAN fw_maint_confirm(const CHAR8 *Prompt, UINTN Row)
     fw_menu_attr(FW_MENU_ATTR_NORMAL);
     fw_menu_at(FW_MENU_COL, Row);
     efi_conout_ascii(Prompt);
+    fw_console_set_cursor_visible(1);
     for (;;) {
         fw_maint_key(&key);
         if (key.UnicodeChar == 'Y' || key.UnicodeChar == 'y') {
+            fw_console_set_cursor_visible(0);
             return 1;
         }
         if (key.UnicodeChar == 'N' || key.UnicodeChar == 'n' ||
             key.ScanCode == EFI_SCAN_ESC) {
+            fw_console_set_cursor_visible(0);
             return 0;
         }
     }
@@ -762,6 +765,7 @@ static void fw_maint_set_timeout(void)
             efi_conout_ascii(" seconds");
             fw_menu_at(FW_MENU_COL, 6);
             efi_conout_ascii("New TimeOut in seconds (<= 65535) is : ");
+            fw_console_set_cursor_visible(1);
             for (;;) {
                 EFI_INPUT_KEY key;
 
@@ -784,6 +788,7 @@ static void fw_maint_set_timeout(void)
                     efi_conout_ascii(echo);
                 }
             }
+            fw_console_set_cursor_visible(0);
             if (entered) {
                 UINT16 t = (UINT16)value;
 
@@ -862,6 +867,7 @@ static UINTN fw_menu_read_line(CHAR16 *Buf, UINTN Cap)
         return 0;
     }
     Buf[0] = 0;
+    fw_console_set_cursor_visible(1);       /* show the cursor while typing */
     for (;;) {
         EFI_INPUT_KEY key;
 
@@ -871,11 +877,13 @@ static UINTN fw_menu_read_line(CHAR16 *Buf, UINTN Cap)
         }
         if (key.ScanCode == EFI_SCAN_ESC) {
             Buf[0] = 0;
+            fw_console_set_cursor_visible(0);
             return 0;
         }
         if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
             Buf[len] = 0;
             efi_conout_ascii("\r\n");
+            fw_console_set_cursor_visible(0);
             return len;
         }
         if ((key.UnicodeChar == 0x08 || key.UnicodeChar == 0x7f) && len > 0) {
