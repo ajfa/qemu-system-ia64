@@ -1122,6 +1122,37 @@ static void nv_update_fifo_wait(NV15State *s)
                    s->fifo_wait_flip || s->fifo_wait_acquire;
 }
 
+/* Per-CONTEXT_BETA1-object blend-factor cache (see NV15State). */
+static void nv_beta_store(NV15State *s, uint32_t obj, uint32_t val)
+{
+    int i;
+    for (i = 0; i < 16; i++) {
+        if (s->beta_obj_addr[i] == obj) {
+            s->beta_obj_val[i] = val;
+            return;
+        }
+    }
+    for (i = 0; i < 16; i++) {
+        if (s->beta_obj_addr[i] == 0) {
+            s->beta_obj_addr[i] = obj;
+            s->beta_obj_val[i] = val;
+            return;
+        }
+    }
+    s->beta_obj_addr[0] = obj;   /* cache full: evict slot 0 */
+    s->beta_obj_val[0] = val;
+}
+
+static uint32_t nv_beta_load(NV15State *s, uint32_t obj, uint32_t def)
+{
+    for (int i = 0; i < 16; i++) {
+        if (s->beta_obj_addr[i] == obj) {
+            return s->beta_obj_val[i];
+        }
+    }
+    return def;
+}
+
 static int nv_execute_command(NV15State *s, uint32_t chid, uint32_t subc,
                               uint32_t method, uint32_t param)
 {
@@ -1221,6 +1252,27 @@ static int nv_execute_command(NV15State *s, uint32_t chid, uint32_t subc,
             uint8_t cls8 = cls;
             NV_TRACE(s, "nv15 M  ch%u sub%u cls 0x%02x mthd 0x%03x p 0x%08x\n",
                      chid, subc, cls8, method, param);
+            /*
+             * Beta (the op-5 blend factor) is a per-object context.  SetBeta
+             * (class 0x72 method 0xc0) sets the value of the beta object bound
+             * to this subchannel; a 2D op binds a CONTEXT_BETA1 object (class
+             * 0x72) via one of its SetContext* methods -- the method number
+             * differs per class (e.g. 0x066 for IFC), so detect the beta
+             * object by its class when any context object is bound.  Track the
+             * value per object and refresh ch->beta from the op's own beta
+             * object, so a stale global beta from an unrelated operation cannot
+             * leak into an opaque blit and render it semi-transparent.
+             */
+            if (method >= 0x060 && method < 0x080 &&
+                (nv_ramin_read32(s, param) & s->class_mask) == 0x72) {
+                ch->schs[subc].beta_object = param;
+            } else if (cls8 == 0x72 && method == 0x0c0) {
+                nv_beta_store(s, ch->schs[subc].object, param);
+            }
+            if (ch->schs[subc].beta_object) {
+                ch->beta = nv_beta_load(s, ch->schs[subc].beta_object,
+                                        ch->beta);
+            }
             switch (cls8) {
             case 0x19:
                 nv2d_execute_clip(s, ch, method, param);

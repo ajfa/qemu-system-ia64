@@ -123,6 +123,7 @@ typedef struct gf_channel {
         uint32_t object;
         uint8_t engine;
         uint32_t notifier;
+        uint32_t beta_object;   /* CONTEXT_BETA1 bound via SetContextBeta1 */
     } schs[GEFORCE_SUBCHANNEL_COUNT];
 
     bool notify_pending;
@@ -480,6 +481,16 @@ struct NV15State {
     /* Diagnostic MMIO/FIFO tracing (enabled via the GEFORCE_LOG env var). */
     bool log_traffic;
     uint64_t log_budget;
+
+    /*
+     * Per-CONTEXT_BETA1-object blend factor.  The blend (op 5) beta belongs to
+     * the beta object a 2D op binds via SetContextBeta1, not to a single
+     * channel-global value; a stale global beta from another operation
+     * otherwise leaks into (e.g.) an opaque IFC blit and renders it
+     * semi-transparent.  Small object->beta cache.
+     */
+    uint32_t beta_obj_addr[16];
+    uint32_t beta_obj_val[16];
 
     /* extended CRTC file (0x3b4/0x3d4), indices up to GEFORCE_CRTC_MAX */
     struct {
