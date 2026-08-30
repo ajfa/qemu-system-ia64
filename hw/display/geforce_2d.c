@@ -231,6 +231,18 @@ void nv_pixel_operation(NV15State *s, gf_channel *ch, uint32_t op,
                 uint8_t sg = *srccolor >> 8;
                 uint8_t sr = *srccolor >> 16;
                 uint8_t sa = *srccolor >> 24;
+                /*
+                 * A source with zero alpha but non-zero colour is an opaque
+                 * (non-premultiplied / X8) source blended by a constant
+                 * SourceConstantAlpha (beta) -- AlphaBlend without
+                 * AC_SRC_ALPHA.  Treat it as fully opaque so the over-coverage
+                 * comes from beta; otherwise a per-pixel alpha of 0 keeps the
+                 * whole destination and adds src*beta on top, over-brightening
+                 * and tinting the result.
+                 */
+                if (sa == 0 && (sb | sg | sr)) {
+                    sa = 0xFF;
+                }
                 uint32_t beta = ch->beta;
                 if (beta != 0xFFFFFFFF) {
                     uint8_t bb = beta;
