@@ -824,6 +824,10 @@ static uint32_t nv_register_read32(NV15State *s, uint32_t address)
         value = s->ramdac_cu_start_pos;
     } else if (address == 0x680404) {
         value = 0x00000000;
+    } else if (address == 0x680500) {
+        value = s->ramdac_nvpll;
+    } else if (address == 0x680504) {
+        value = s->ramdac_mpll;
     } else if (address == 0x680508) {
         value = s->ramdac_vpll;
     } else if (address == 0x68050c) {
@@ -1073,6 +1077,10 @@ static void nv_register_write32(NV15State *s, uint32_t address, uint32_t value)
         s->hw_cursor.x = (int32_t)s->ramdac_cu_start_pos << 20 >> 20;
         s->hw_cursor.y = (int32_t)s->ramdac_cu_start_pos << 4 >> 20;
         s->full_update_pending = true;
+    } else if (address == 0x680500) {
+        s->ramdac_nvpll = value;
+    } else if (address == 0x680504) {
+        s->ramdac_mpll = value;
     } else if (address == 0x680508) {
         s->ramdac_vpll = value;
     } else if (address == 0x68050c) {
@@ -2079,6 +2087,18 @@ static void nv_init_state(NV15State *s)
     s->crtc_cursor_config = 0;
     s->crtc_gpio_ext = 0;
     s->ramdac_cu_start_pos = 0;
+    /*
+     * Core (NVPLL) and memory (MPLL) clock PLL coefficients.  On a real
+     * Quadro2 Pro the VBIOS programs these at POST; the pixel PLL (VPLL) is
+     * (re)programmed by the driver, but NVPLL/MPLL are only read back.  With
+     * no NVIDIA VBIOS to seed them, nv4_mini.sys reads a zero core/memory
+     * clock during mode-set and asserts -> the retail exception unwinder then
+     * bugchecks 0xD3 in RtlLookupFunctionEntry.  Seed sane non-zero
+     * coefficients (~200 MHz).  Format matches VPLL: bits 0-7 M, 8-15 N,
+     * 16-18 P; f = refclk * N / (M << P), refclk 13.5 MHz.
+     */
+    s->ramdac_nvpll = 0x0000c00d;   /* N=0xC0 M=0x0D P=0 -> ~199 MHz core */
+    s->ramdac_mpll  = 0x0000c00d;   /* ~199 MHz memory                    */
     s->ramdac_vpll = 0;
     s->ramdac_vpll_b = 0;
     s->ramdac_pll_select = 0;

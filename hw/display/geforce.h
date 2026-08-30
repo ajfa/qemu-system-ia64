@@ -533,6 +533,8 @@ struct NV15State {
 
     /* PRAMDAC */
     uint32_t ramdac_cu_start_pos;
+    uint32_t ramdac_nvpll;
+    uint32_t ramdac_mpll;
     uint32_t ramdac_vpll;
     uint32_t ramdac_vpll_b;
     uint32_t ramdac_pll_select;
