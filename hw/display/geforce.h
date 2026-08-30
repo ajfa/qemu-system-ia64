@@ -22,9 +22,23 @@
 #include "hw/display/i2c-ddc.h"
 #include "vga_int.h"
 #include "qemu/timer.h"
+#include "qemu/log.h"
 
 #define TYPE_NV15_VGA "nv15gl-vga"
 OBJECT_DECLARE_SIMPLE_TYPE(NV15State, NV15_VGA)
+
+/*
+ * Diagnostic trace of guest<->GPU traffic to the -D logfile, gated by the
+ * GEFORCE_LOG env var (see nv_realize) and budget-capped so a wedged guest
+ * cannot fill the host disk.  Available to all geforce translation units.
+ */
+#define NV_TRACE(s, ...)                                                       \
+    do {                                                                       \
+        if ((s)->log_traffic && (s)->log_budget) {                            \
+            (s)->log_budget--;                                                 \
+            qemu_log(__VA_ARGS__);                                             \
+        }                                                                      \
+    } while (0)
 
 /* NV15 is fixed at card_type 0x15 throughout this port. */
 #define GEFORCE_CARD_TYPE          0x15
@@ -416,6 +430,27 @@ typedef struct gf_channel {
     uint32_t rect_color;
     uint32_t rect_yx;
     uint32_t rect_hw;
+
+    /* NV4_LIN (0x5c) solid line */
+    uint32_t lin_operation;
+    uint32_t lin_color_fmt;
+    uint32_t lin_color;
+    uint32_t lin_point0;        /* pending first endpoint, Y<<16 | X */
+    uint32_t lin_l32[4];        /* Lin32 accumulator: x0,y0,x1,y1 */
+    uint32_t lin_l32_idx;
+    int32_t  lin_poly_x;        /* PolyLin running point */
+    int32_t  lin_poly_y;
+    bool     lin_poly_valid;
+
+    /* NV4_TRI (0x5d) solid triangle */
+    uint32_t tri_operation;
+    uint32_t tri_color_fmt;
+    uint32_t tri_color;
+    int32_t  tri_x[3];
+    int32_t  tri_y[3];
+    uint32_t tri_count;         /* points accumulated (triangle / mesh) */
+    uint32_t tri_t32[6];        /* Triangle32 accumulator */
+    uint32_t tri_t32_idx;
 } gf_channel;
 
 struct NV15State; /* forward */
@@ -674,6 +709,8 @@ void nv2d_execute_gdi(NV15State *s, gf_channel *ch, uint32_t cls, uint32_t metho
 void nv2d_execute_swzsurf(NV15State *s, gf_channel *ch, uint32_t method, uint32_t param);
 void nv2d_execute_chroma(NV15State *s, gf_channel *ch, uint32_t method, uint32_t param);
 void nv2d_execute_rect(NV15State *s, gf_channel *ch, uint32_t method, uint32_t param);
+void nv2d_execute_lin(NV15State *s, gf_channel *ch, uint32_t method, uint32_t param);
+void nv2d_execute_tri(NV15State *s, gf_channel *ch, uint32_t method, uint32_t param);
 void nv2d_execute_imageblit(NV15State *s, gf_channel *ch, uint32_t method, uint32_t param);
 void nv2d_execute_ifc(NV15State *s, gf_channel *ch, uint32_t method, uint32_t param);
 void nv2d_execute_surf2d(NV15State *s, gf_channel *ch, uint32_t method, uint32_t param);

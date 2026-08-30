@@ -39,14 +39,7 @@
 /* Refresh / vblank cadence. */
 #define NV_VBLANK_HZ 60
 
-/* Diagnostic trace to the -D logfile, gated by GEFORCE_LOG and budget-capped. */
-#define NV_TRACE(s, ...)                                                       \
-    do {                                                                       \
-        if ((s)->log_traffic && (s)->log_budget) {                            \
-            (s)->log_budget--;                                                 \
-            qemu_log(__VA_ARGS__);                                             \
-        }                                                                      \
-    } while (0)
+/* NV_TRACE (GEFORCE_LOG diagnostic trace) is defined in geforce.h. */
 
 static const VMStateDescription vmstate_nv15 = {
     .name = "nv15gl-vga",
@@ -1252,6 +1245,12 @@ static int nv_execute_command(NV15State *s, uint32_t chid, uint32_t subc,
                 break;
             case 0x57:
                 nv2d_execute_chroma(s, ch, method, param);
+                break;
+            case 0x5c:
+                nv2d_execute_lin(s, ch, method, param);
+                break;
+            case 0x5d:
+                nv2d_execute_tri(s, ch, method, param);
                 break;
             case 0x5e:
                 nv2d_execute_rect(s, ch, method, param);

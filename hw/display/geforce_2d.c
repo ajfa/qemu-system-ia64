@@ -1163,6 +1163,192 @@ void nv2d_execute_rect(NV15State *s, gf_channel *ch, uint32_t method,
     }
 }
 
+/* ---- NV4_LIN (0x5c) / NV4_TRI (0x5d): solid line and triangle ---------- */
+
+/* One solid pixel through the destination surface, honouring the ROP/op. */
+static void nv2d_solid_pixel(NV15State *s, gf_channel *ch, uint32_t op,
+                             uint32_t color, int px, int py)
+{
+    if (px < 0 || py < 0) {
+        return;
+    }
+    uint32_t draw_offset = ch->s2d_ofs_dst + (uint32_t)py * ch->s2d_pitch_dst;
+    uint32_t dstcolor = nv_get_pixel(s, ch->s2d_img_dst, draw_offset,
+                                     (uint32_t)px, ch->s2d_color_bytes);
+    uint32_t srccolor = color;
+    nv_pixel_operation(s, ch, op, &dstcolor, &srccolor, ch->s2d_color_bytes,
+                       (uint32_t)px, (uint32_t)py);
+    nv_put_pixel(s, ch, draw_offset, (uint32_t)px, dstcolor);
+}
+
+/* Bresenham line from (x0,y0) to (x1,y1). */
+static void nv2d_lin_draw(NV15State *s, gf_channel *ch, uint32_t op,
+                          int x0, int y0, int x1, int y1)
+{
+    int dx = abs(x1 - x0);
+    int dy = -abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    /* Bound the step count against absurd guest coordinates. */
+    int guard = dx - dy + 2;
+    for (;;) {
+        nv2d_solid_pixel(s, ch, op, ch->lin_color, x0, y0);
+        if ((x0 == x1 && y0 == y1) || guard-- <= 0) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+/* x coordinate where edge (ax,ay)-(bx,by) crosses scanline y. */
+static int nv2d_edge_x(int ax, int ay, int bx, int by, int y)
+{
+    if (by == ay) {
+        return ax;
+    }
+    return ax + (int)((int64_t)(bx - ax) * (y - ay) / (by - ay));
+}
+
+/* Filled triangle via scanline spans. */
+static void nv2d_tri_fill(NV15State *s, gf_channel *ch, uint32_t op,
+                          int x0, int y0, int x1, int y1, int x2, int y2)
+{
+    int t;
+    if (y0 > y1) { t = x0; x0 = x1; x1 = t; t = y0; y0 = y1; y1 = t; }
+    if (y0 > y2) { t = x0; x0 = x2; x2 = t; t = y0; y0 = y2; y2 = t; }
+    if (y1 > y2) { t = x1; x1 = x2; x2 = t; t = y1; y1 = y2; y2 = t; }
+    if (y2 == y0) {
+        return; /* degenerate / zero height */
+    }
+    int ymin = y0 < 0 ? 0 : y0;
+    int ymax = y2 > 8192 ? 8192 : y2;   /* clamp work against wild coords */
+    for (int y = ymin; y <= ymax; y++) {
+        int xa = nv2d_edge_x(x0, y0, x2, y2, y);
+        int xb = (y < y1) ? nv2d_edge_x(x0, y0, x1, y1, y)
+                          : nv2d_edge_x(x1, y1, x2, y2, y);
+        int xl = xa < xb ? xa : xb;
+        int xr = xa < xb ? xb : xa;
+        if (xl < 0) {
+            xl = 0;
+        }
+        if (xr > 16384) {
+            xr = 16384;
+        }
+        for (int x = xl; x <= xr; x++) {
+            nv2d_solid_pixel(s, ch, op, ch->tri_color, x, y);
+        }
+    }
+}
+
+void nv2d_execute_lin(NV15State *s, gf_channel *ch, uint32_t method,
+                      uint32_t param)
+{
+    if (method == 0x0bf) {
+        ch->lin_operation = param;
+    } else if (method == 0x0c0) {
+        ch->lin_color_fmt = param;
+    } else if (method == 0x0c1) {
+        ch->lin_color = param;
+    } else if (method >= 0x100 && method < 0x120) {
+        /* Lin[16]: point0 (even) then point1 (odd); draw on point1. */
+        if (method & 1) {
+            nv2d_lin_draw(s, ch, ch->lin_operation,
+                          (int16_t)(ch->lin_point0 & 0xFFFF),
+                          (int16_t)(ch->lin_point0 >> 16),
+                          (int16_t)(param & 0xFFFF),
+                          (int16_t)(param >> 16));
+        } else {
+            ch->lin_point0 = param;
+        }
+    } else if (method >= 0x120 && method < 0x140) {
+        /* Lin32[8]: x0, y0, x1, y1 (4 dwords each). */
+        ch->lin_l32[ch->lin_l32_idx & 3] = param;
+        if ((++ch->lin_l32_idx & 3) == 0) {
+            nv2d_lin_draw(s, ch, ch->lin_operation,
+                          (int32_t)ch->lin_l32[0], (int32_t)ch->lin_l32[1],
+                          (int32_t)ch->lin_l32[2], (int32_t)ch->lin_l32[3]);
+        }
+    } else if (method >= 0x140 && method < 0x160) {
+        /* PolyLin: connect consecutive points (Y<<16 | X). */
+        int x = (int16_t)(param & 0xFFFF);
+        int y = (int16_t)(param >> 16);
+        if (method == 0x140) {
+            ch->lin_poly_valid = false;   /* first point restarts the run */
+        }
+        if (ch->lin_poly_valid) {
+            nv2d_lin_draw(s, ch, ch->lin_operation,
+                          ch->lin_poly_x, ch->lin_poly_y, x, y);
+        }
+        ch->lin_poly_x = x;
+        ch->lin_poly_y = y;
+        ch->lin_poly_valid = true;
+    } else if (method >= 0x100) {
+        NV_TRACE(s, "nv15 LIN unhandled method 0x%03x param 0x%08x\n",
+                 method, param);
+    }
+}
+
+void nv2d_execute_tri(NV15State *s, gf_channel *ch, uint32_t method,
+                      uint32_t param)
+{
+    if (method == 0x0bf) {
+        ch->tri_operation = param;
+    } else if (method == 0x0c0) {
+        ch->tri_color_fmt = param;
+    } else if (method == 0x0c1) {
+        ch->tri_color = param;
+    } else if (method >= 0x0c4 && method <= 0x0c6) {
+        /* Triangle: point0/1/2 (Y<<16 | X); draw on point2. */
+        uint32_t i = method - 0x0c4;
+        ch->tri_x[i] = (int16_t)(param & 0xFFFF);
+        ch->tri_y[i] = (int16_t)(param >> 16);
+        if (method == 0x0c6) {
+            nv2d_tri_fill(s, ch, ch->tri_operation,
+                          ch->tri_x[0], ch->tri_y[0], ch->tri_x[1],
+                          ch->tri_y[1], ch->tri_x[2], ch->tri_y[2]);
+        }
+    } else if (method >= 0x0c8 && method <= 0x0cd) {
+        /* Triangle32: x0, y0, x1, y1, x2, y2. */
+        ch->tri_t32[method - 0x0c8] = param;
+        if (method == 0x0cd) {
+            nv2d_tri_fill(s, ch, ch->tri_operation,
+                          (int32_t)ch->tri_t32[0], (int32_t)ch->tri_t32[1],
+                          (int32_t)ch->tri_t32[2], (int32_t)ch->tri_t32[3],
+                          (int32_t)ch->tri_t32[4], (int32_t)ch->tri_t32[5]);
+        }
+    } else if (method >= 0x100 && method < 0x140) {
+        /* TriangleMesh: sliding window of the last three vertices (strip). */
+        int x = (int16_t)(param & 0xFFFF);
+        int y = (int16_t)(param >> 16);
+        if (method == 0x100) {
+            ch->tri_count = 0;            /* first point restarts the mesh */
+        }
+        ch->tri_x[0] = ch->tri_x[1];
+        ch->tri_y[0] = ch->tri_y[1];
+        ch->tri_x[1] = ch->tri_x[2];
+        ch->tri_y[1] = ch->tri_y[2];
+        ch->tri_x[2] = x;
+        ch->tri_y[2] = y;
+        if (++ch->tri_count >= 3) {
+            nv2d_tri_fill(s, ch, ch->tri_operation,
+                          ch->tri_x[0], ch->tri_y[0], ch->tri_x[1],
+                          ch->tri_y[1], ch->tri_x[2], ch->tri_y[2]);
+        }
+    } else if (method >= 0x100) {
+        NV_TRACE(s, "nv15 TRI unhandled method 0x%03x param 0x%08x\n",
+                 method, param);
+    }
+}
+
 void nv2d_execute_imageblit(NV15State *s, gf_channel *ch, uint32_t method,
                             uint32_t param)
 {
