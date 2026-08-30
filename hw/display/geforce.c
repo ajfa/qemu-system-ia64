@@ -1949,11 +1949,27 @@ static bool nv_gfx_update(void *opaque)
         s->fbsection_base != s->disp_offset ||
         s->fbsection_rows != (unsigned)height ||
         s->fbsection_src_width != s->svga_pitch) {
-        if (s->fbsection_valid) {
+        if (s->fbsection_valid && s->fbsection.mr) {
+            memory_region_set_log(s->fbsection.mr, false, DIRTY_MEMORY_VGA);
             memory_region_unref(s->fbsection.mr);
         }
-        framebuffer_update_memory_section(&s->fbsection, &vga->vram,
-                                          s->disp_offset, height, s->svga_pitch);
+        /*
+         * Build the framebuffer section directly on vga->vram.  The VRAM is a
+         * subregion of the BAR1 aperture container (fb_aper), and
+         * framebuffer_update_memory_section() resolves it with
+         * memory_region_find(), which cannot locate a nested leaf and returns
+         * a NULL section -- so framebuffer_update_display() drew nothing and
+         * the screen stayed black (only the separately-composited hardware
+         * cursor showed, and ghosted).  Point the section straight at the VRAM
+         * region at the scanout offset and enable VGA dirty logging on it.
+         */
+        s->fbsection = (MemoryRegionSection) {
+            .mr = &vga->vram,
+            .offset_within_region = s->disp_offset,
+            .size = int128_make64((uint64_t)s->svga_pitch * height),
+        };
+        memory_region_ref(&vga->vram);
+        memory_region_set_log(&vga->vram, true, DIRTY_MEMORY_VGA);
         s->fbsection_valid = true;
         s->fbsection_base = s->disp_offset;
         s->fbsection_rows = height;
@@ -1961,6 +1977,15 @@ static bool nv_gfx_update(void *opaque)
         full = true;
     }
 
+    /*
+     * The hardware cursor is composited directly into the display surface, so
+     * the framebuffer under its previous position must be repainted or the
+     * cursor leaves a trail.  Force a full framebuffer redraw whenever the
+     * cursor is enabled so the overlay always starts from clean pixels.
+     */
+    if (s->hw_cursor.enabled) {
+        full = true;
+    }
     int first = 0, last = 0;
     framebuffer_update_display(surface, &s->fbsection, width, height,
                                s->svga_pitch, surface_stride(surface), 4,
