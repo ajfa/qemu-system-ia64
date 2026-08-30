@@ -442,6 +442,10 @@ struct NV15State {
     PCIDevice parent_obj;
     VGACommonState vga;
 
+    /* Diagnostic MMIO/FIFO tracing (enabled via the GEFORCE_LOG env var). */
+    bool log_traffic;
+    uint64_t log_budget;
+
     /* extended CRTC file (0x3b4/0x3d4), indices up to GEFORCE_CRTC_MAX */
     struct {
         uint8_t index;

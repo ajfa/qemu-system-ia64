@@ -39,6 +39,15 @@
 /* Refresh / vblank cadence. */
 #define NV_VBLANK_HZ 60
 
+/* Diagnostic trace to the -D logfile, gated by GEFORCE_LOG and budget-capped. */
+#define NV_TRACE(s, ...)                                                       \
+    do {                                                                       \
+        if ((s)->log_traffic && (s)->log_budget) {                            \
+            (s)->log_budget--;                                                 \
+            qemu_log(__VA_ARGS__);                                             \
+        }                                                                      \
+    } while (0)
+
 static const VMStateDescription vmstate_nv15 = {
     .name = "nv15gl-vga",
     .version_id = 1,
@@ -866,6 +875,8 @@ static uint32_t nv_register_read32(NV15State *s, uint32_t address)
         }
     } else {
         value = s->unk_regs[(address / 4) & (GEFORCE_PNPMMIO_SIZE / 4 - 1)];
+        NV_TRACE(s, "nv15 R  UNMODELED reg 0x%06x = 0x%08x (scratch)\n",
+                 address, value);
     }
     return value;
 }
@@ -1095,6 +1106,8 @@ static void nv_register_write32(NV15State *s, uint32_t address, uint32_t value)
         }
     } else {
         s->unk_regs[(address / 4) & (GEFORCE_PNPMMIO_SIZE / 4 - 1)] = value;
+        NV_TRACE(s, "nv15 W  UNMODELED reg 0x%06x = 0x%08x (scratch)\n",
+                 address, value);
     }
 }
 
@@ -1205,6 +1218,8 @@ static int nv_execute_command(NV15State *s, uint32_t chid, uint32_t subc,
             uint32_t cls = nv_ramin_read32(s, ch->schs[subc].object) &
                            s->class_mask;
             uint8_t cls8 = cls;
+            NV_TRACE(s, "nv15 M  ch%u sub%u cls 0x%02x mthd 0x%03x p 0x%08x\n",
+                     chid, subc, cls8, method, param);
             switch (cls8) {
             case 0x19:
                 nv2d_execute_clip(s, ch, method, param);
@@ -1268,6 +1283,11 @@ static int nv_execute_command(NV15State *s, uint32_t chid, uint32_t subc,
                 if (s->fifo_wait_flip) {
                     result = 1;
                 }
+                break;
+            default:
+                NV_TRACE(s,
+                    "nv15 M  UNHANDLED cls 0x%02x mthd 0x%03x p 0x%08x\n",
+                    cls8, method, param);
                 break;
             }
             if (ch->notify_pending) {
@@ -1667,12 +1687,20 @@ static uint64_t nv_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
     NV15State *s = opaque;
     uint32_t offset = addr & (GEFORCE_PNPMMIO_SIZE - 1);
+    uint64_t value;
     if (size == 1) {
-        return nv_register_read8(s, offset);
+        value = nv_register_read8(s, offset);
     } else if (size == 2) {
-        return (uint16_t)nv_register_read32(s, offset);
+        value = (uint16_t)nv_register_read32(s, offset);
+    } else if (size == 8) {
+        value = (uint64_t)nv_register_read32(s, offset) |
+                ((uint64_t)nv_register_read32(s, offset + 4) << 32);
+    } else {
+        value = nv_register_read32(s, offset);
     }
-    return nv_register_read32(s, offset);
+    NV_TRACE(s, "nv15 R  mmio+0x%06x /%u = 0x%0*" PRIx64 "\n",
+             offset, size * 8, size * 2, value);
+    return value;
 }
 
 static void nv_mmio_write(void *opaque, hwaddr addr, uint64_t data,
@@ -1680,6 +1708,8 @@ static void nv_mmio_write(void *opaque, hwaddr addr, uint64_t data,
 {
     NV15State *s = opaque;
     uint32_t offset = addr & (GEFORCE_PNPMMIO_SIZE - 1);
+    NV_TRACE(s, "nv15 W  mmio+0x%06x /%u = 0x%0*" PRIx64 "\n",
+             offset, size * 8, size * 2, data);
     if (size == 1) {
         nv_register_write8(s, offset, data);
     } else if (size == 8) {
@@ -2164,6 +2194,12 @@ static void nv_realize(PCIDevice *dev, Error **errp)
 {
     NV15State *s = NV15_VGA(dev);
     VGACommonState *vga = &s->vga;
+
+    /* Opt-in diagnostic tracing of guest<->GPU traffic (GEFORCE_LOG=1),
+     * emitted to the -D logfile.  Budget-capped so a stuck guest cannot
+     * fill the disk. */
+    s->log_traffic = getenv("GEFORCE_LOG") != NULL;
+    s->log_budget = 50u * 1000u * 1000u;
 
     pci_set_word(dev->config + PCI_DEVICE_ID, s->dev_id);
 
