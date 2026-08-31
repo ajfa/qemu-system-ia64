@@ -667,9 +667,9 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
                     IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF);
     g_assert_cmphex(le64_to_cpu(handoff.BootTimeout), ==,
                     IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER);
-    /* Default machine is chipset=460gx, which writes DERIVE (CPU-keyed). */
+    /* Default machine is chipset=460gx, which selects the 460GX personality. */
     g_assert_cmphex(le64_to_cpu(handoff.ChipsetProfile), ==,
-                    IA64_FW_CHIPSET_DERIVE);
+                    IA64_FW_CHIPSET_460GX);
 }
 
 static void test_firmware_handoff_defaults(void)
@@ -690,7 +690,7 @@ static void test_firmware_handoff_defaults(void)
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x5e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* ChipsetProfile=DERIVE */
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* ChipsetProfile=460GX */
     };
     uint8_t actual[sizeof(IA64VpcHandoff)];
     QTestState *qts = ia64_vpc_start(NULL);

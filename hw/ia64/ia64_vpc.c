@@ -2772,13 +2772,17 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     handoff.MapQuirkDisable = cpu_to_le64(s->fw_map_quirk_disable);
     handoff.BootTimeout = cpu_to_le64(s->firmware_boot_timeout);
     /*
-     * Only chipset=zx1 overrides the firmware's CPU-derived personality; the
-     * default (460gx) writes DERIVE so today's behaviour -- 460GX on Merced,
-     * E8870 on Itanium 2 -- is preserved bit-for-bit for existing guests.
+     * The chipset= option authoritatively sets the firmware personality,
+     * independent of the CPU model: chipset=460gx selects the Intel 460GX and
+     * chipset=zx1 the HP zx1.  This retires the old CPU-keyed default (which
+     * gave the default Itanium 2 machine a half-modelled E8870 personality);
+     * users pair chipset and CPU at their own risk (460GX suits Merced, zx1
+     * suits Itanium 2).  DERIVE remains only as the firmware's fallback for a
+     * pre-version-14 handoff.
      */
     handoff.ChipsetProfile = cpu_to_le64(ia64_vpc_chipset_is_zx1(s) ?
                                          IA64_FW_CHIPSET_ZX1 :
-                                         IA64_FW_CHIPSET_DERIVE);
+                                         IA64_FW_CHIPSET_460GX);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, &handoff,
                               sizeof(handoff));
 }
