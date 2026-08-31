@@ -25,3 +25,5 @@ boot_shell.c
 firmware.lds
 dsdt-pci-root.asl
 ssdt-platform-devices.asl
+dsdt-pci-root-zx1.asl
+ssdt-platform-devices-zx1.asl

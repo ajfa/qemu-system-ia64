@@ -229,14 +229,23 @@ typedef struct {
     UINT8  Reserved1[24];
 } __attribute__((packed)) ACPI_FACS;
 
+/*
+ * The DSDT/SSDT AML buffers are sized to the larger of the two chipset-profile
+ * variants (the nested zx1 DSDT is bigger than the flat 460gx one).  The flat
+ * AML is the static initializer, so the 460gx/default table is byte-identical
+ * to before; the zx1 profile copies its AML in at runtime and sets the header
+ * Length/checksum from the active AML size, so the unused tail is never
+ * guest-visible.  Keep these in lockstep with the FW_*_AML_SIZE asserts in
+ * firmware.c.
+ */
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[649];
+    UINT8 Aml[712];
 } __attribute__((packed)) ACPI_DSDT;
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[496];
+    UINT8 Aml[506];
 } __attribute__((packed)) ACPI_SSDT;
 
 typedef struct {
@@ -658,8 +667,8 @@ FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 100, acpi_xsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 68, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
-FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 685, acpi_dsdt_size);
-FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 532, acpi_ssdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 748, acpi_dsdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 542, acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG) == 60, acpi_mcfg_size);

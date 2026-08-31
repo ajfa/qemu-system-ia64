@@ -1965,8 +1965,10 @@ static BOOLEAN aml_named_byte(const UINT8 *Aml, UINTN AmlLength,
 static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
 {
     static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
+    static const UINT8 pci0_name[4] = { 'P', 'C', 'I', '0' };
     const UINT8 *aml;
     UINTN aml_length;
+    const UINT8 *pci0;
     const UINT8 *resources;
     UINTN resource_length;
     UINTN offset = 0;
@@ -1983,7 +1985,15 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
     aml = (const UINT8 *)Context->Dsdt + sizeof(TEST_SDT_HEADER);
     aml_length = get_u32((const UINT8 *)Context->Dsdt + 4) -
                  sizeof(TEST_SDT_HEADER);
-    if (!aml_named_buffer(aml, aml_length, crs_name, 0,
+    /*
+     * Anchor on the PCI0 root's _CRS.  In the zx1 profile PCI0 is nested inside
+     * the SBA0 (HWP0001) IOC device, whose own _CRS (the CSR block) precedes it,
+     * so the first _CRS in the table is no longer PCI0's.  Finding PCI0 first
+     * then its _CRS works for both the flat and nested layouts.
+     */
+    pci0 = find_bytes(aml, aml_length, pci0_name, sizeof(pci0_name), 0);
+    if (pci0 == NULL ||
+        !aml_named_buffer(aml, aml_length, crs_name, (UINTN)(pci0 - aml),
                           &resources, &resource_length)) {
         return 0;
     }
@@ -2073,6 +2083,7 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
 {
     static const UINT8 sb_name[4] = { '_', 'S', 'B', '_' };
     static const UINT8 pci0_name[4] = { 'P', 'C', 'I', '0' };
+    static const UINT8 sba0_name[4] = { 'S', 'B', 'A', '0' };
     static const UINT8 uart_name[4] = { 'U', 'A', 'R', '0' };
     static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
     const UINT8 *aml;
@@ -2108,6 +2119,7 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
                          &scope_content, &scope_end)) {
             continue;
         }
+        /* Flat profile: Scope (\_SB.PCI0) -- RootChar, DualNamePrefix (0x2e). */
         if (scope_content + 10U <= scope_end &&
             scope_content[0] == 0x5cU &&
             scope_content[1] == 0x2eU &&
@@ -2117,6 +2129,26 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
                              pci0_name, sizeof(pci0_name)) &&
             find_bytes(scope_content + 10U,
                        (UINTN)(scope_end - scope_content - 10U),
+                       uart_name, sizeof(uart_name), 0) != NULL) {
+            under_pci0 = 1;
+            break;
+        }
+        /*
+         * zx1 profile: Scope (\_SB.SBA0.PCI0) -- RootChar, MultiNamePrefix
+         * (0x2f), SegCount 3, then _SB_ SBA0 PCI0.
+         */
+        if (scope_content + 15U <= scope_end &&
+            scope_content[0] == 0x5cU &&
+            scope_content[1] == 0x2fU &&
+            scope_content[2] == 0x03U &&
+            ia64_bytes_equal(scope_content + 3U,
+                             sb_name, sizeof(sb_name)) &&
+            ia64_bytes_equal(scope_content + 7U,
+                             sba0_name, sizeof(sba0_name)) &&
+            ia64_bytes_equal(scope_content + 11U,
+                             pci0_name, sizeof(pci0_name)) &&
+            find_bytes(scope_content + 15U,
+                       (UINTN)(scope_end - scope_content - 15U),
                        uart_name, sizeof(uart_name), 0) != NULL) {
             under_pci0 = 1;
             break;

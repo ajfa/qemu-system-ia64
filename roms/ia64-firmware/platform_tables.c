@@ -60,6 +60,30 @@ static ACPI_SSDT               mSsdt = {
     },
 };
 /*
+ * The zx1-profile AML: PCI0 nested inside the HP zx1 SBA IOC (HWP0001) so
+ * Linux sba_iommu binds, and the SSDT re-scoped to \_SB.SBA0.PCI0.  Copied
+ * over mDsdt.Aml / mSsdt.Aml at table build when fw_platform_is_zx1(); the flat
+ * 460gx AML above stays the static default.
+ */
+static const UINT8 mDsdtZx1Aml[] = {
+#include "ia64-fw-dsdt-pci-root-zx1.inc"
+};
+static const UINT8 mSsdtZx1Aml[] = {
+#include "ia64-fw-ssdt-platform-devices-zx1.inc"
+};
+FW_STATIC_ASSERT(sizeof(mDsdtZx1Aml) <= sizeof(((ACPI_DSDT *)0)->Aml),
+                 dsdt_zx1_fits);
+FW_STATIC_ASSERT(sizeof(mSsdtZx1Aml) <= sizeof(((ACPI_SSDT *)0)->Aml),
+                 ssdt_zx1_fits);
+/*
+ * The guest-visible AML length of the published DSDT/SSDT (header + active AML
+ * body), set from the chipset profile at table build.  The header Length,
+ * checksum and integrity selftest all use these rather than sizeof(ACPI_DSDT),
+ * since the struct is sized to the larger variant.
+ */
+static UINT32 mAcpiDsdtLength;
+static UINT32 mAcpiSsdtLength;
+/*
  * The patchable SSDT bytes are byte-encoded Name objects (NameOp, 4-char
  * name, BytePrefix, value).  Locate them by name instead of by raw offset
  * so an AML edit cannot silently shift the patch targets.
@@ -554,10 +578,22 @@ static void efi_init_acpi_tables(void)
         mFacs.Reserved1[i] = 0;
     }
 
+    /*
+     * Select the DSDT AML for the chipset profile.  The flat 460gx AML is the
+     * static initializer; the zx1 profile copies in its nested HWP0001 DSDT.
+     * The header Length and checksum cover only the active AML body, so the
+     * unused tail of the (max-sized) buffer is never guest-visible.
+     */
+    if (fw_platform_is_zx1()) {
+        fw_copy_mem(mDsdt.Aml, mDsdtZx1Aml, sizeof(mDsdtZx1Aml));
+        mAcpiDsdtLength = sizeof(ACPI_SDT_HEADER) + FW_DSDT_PCI_ROOT_ZX1_AML_SIZE;
+    } else {
+        mAcpiDsdtLength = sizeof(ACPI_SDT_HEADER) + FW_DSDT_PCI_ROOT_AML_SIZE;
+    }
     init_sdt_header(&mDsdt.Hdr, EFI_SIGNATURE_32('D', 'S', 'D', 'T'),
-                    sizeof(mDsdt));
+                    mAcpiDsdtLength);
     mDsdt.Hdr.Revision = 2;
-    mDsdt.Hdr.Checksum = table_checksum8(&mDsdt, sizeof(mDsdt));
+    mDsdt.Hdr.Checksum = table_checksum8(&mDsdt, mAcpiDsdtLength);
 
     init_sdt_header(&mFadt.Hdr, EFI_SIGNATURE_32('F', 'A', 'C', 'P'),
                     sizeof(mFadt));
@@ -629,6 +665,20 @@ static void efi_init_acpi_tables(void)
     mFadt.XGpe1Block = acpi_system_memory_gas(0, 0);
     mFadt.Hdr.Checksum = table_checksum8(&mFadt, sizeof(mFadt));
 
+    /*
+     * Select the SSDT AML for the chipset profile before patching enable bytes
+     * (the zx1 SSDT re-scopes its devices under \_SB.SBA0.PCI0).  The CxEN/P2EN
+     * NameOp bytes exist in both variants, so the by-name patch below is
+     * profile-agnostic.
+     */
+    if (fw_platform_is_zx1()) {
+        fw_copy_mem(mSsdt.Aml, mSsdtZx1Aml, sizeof(mSsdtZx1Aml));
+        mAcpiSsdtLength = sizeof(ACPI_SDT_HEADER) +
+                          FW_SSDT_PLATFORM_DEVICES_ZX1_AML_SIZE;
+    } else {
+        mAcpiSsdtLength = sizeof(ACPI_SDT_HEADER) +
+                          FW_SSDT_PLATFORM_DEVICES_AML_SIZE;
+    }
     {
         UINTN cpu;
 
@@ -640,9 +690,9 @@ static void efi_init_acpi_tables(void)
     acpi_ssdt_set_named_byte(&mSsdt, mSsdtPs2EnabledName,
                              fw_handoff_i8042_enabled() ? 0x0fU : 0);
     init_sdt_header(&mSsdt.Hdr, EFI_SIGNATURE_32('S', 'S', 'D', 'T'),
-                    sizeof(mSsdt));
+                    mAcpiSsdtLength);
     mSsdt.Hdr.Revision = 2;
-    mSsdt.Hdr.Checksum = table_checksum8(&mSsdt, sizeof(mSsdt));
+    mSsdt.Hdr.Checksum = table_checksum8(&mSsdt, mAcpiSsdtLength);
 
     init_sdt_header(&mXsdt.Hdr, EFI_SIGNATURE_32('X', 'S', 'D', 'T'),
                     xsdt_length);
@@ -982,6 +1032,8 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
     static const UINT8 sta_name[] = { '_', 'S', 'T', 'A' };
     static const UINT8 crs_name[] = { '_', 'C', 'R', 'S' };
     static const UINT8 prt_name[] = { '_', 'P', 'R', 'T' };
+    /* The zx1 profile nests PCI0 inside the SBA0 (HWP0001) IOC device. */
+    static const UINT8 sba0_name[] = { 'S', 'B', 'A', '0' };
     static const UINT8 legacy_vga_memory[] = {
         0x87, 0x17, 0x00, 0x00, 0x0c, 0x03,
         0x00, 0x00, 0x00, 0x00,
@@ -1069,7 +1121,7 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
 
     if (!acpi_sdt_integrity_valid(&mAcpiDsdt->Hdr,
                                   EFI_SIGNATURE_32('D', 'S', 'D', 'T'),
-                                  sizeof(*mAcpiDsdt)) ||
+                                  mAcpiDsdtLength) ||
         !acpi_sdt_integrity_valid(&mAcpiFadt->Hdr,
                                   EFI_SIGNATURE_32('F', 'A', 'C', 'P'),
                                   sizeof(*mAcpiFadt)) ||
@@ -1081,7 +1133,7 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
                                   rsdt_length) ||
         !acpi_sdt_integrity_valid(&mAcpiSsdt->Hdr,
                                   EFI_SIGNATURE_32('S', 'S', 'D', 'T'),
-                                  sizeof(*mAcpiSsdt)) ||
+                                  mAcpiSsdtLength) ||
         !acpi_sdt_integrity_valid(&mAcpiMadt->Hdr,
                                   EFI_SIGNATURE_32('A', 'P', 'I', 'C'),
                                   sizeof(*mAcpiMadt)) ||
@@ -1111,6 +1163,11 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         !acpi_dsdt_has_bytes(legacy_vga_memory,
                              sizeof(legacy_vga_memory)) ||
         !acpi_dsdt_has_bytes(prt_name, sizeof(prt_name))) {
+        return 0;
+    }
+    /* The zx1 DSDT must carry the SBA0 IOC that encloses PCI0 (HWP0001). */
+    if (fw_platform_is_zx1() &&
+        !acpi_dsdt_has_bytes(sba0_name, sizeof(sba0_name))) {
         return 0;
     }
 
