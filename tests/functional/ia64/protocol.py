@@ -169,6 +169,51 @@ def select_default_boot(console_socket, timeout: float = 60.0) -> None:
     console_socket.sendall(b"\x1b[A\x1b[A\x1b[A\r")   # Up x3 (VT100), Enter
 
 
+def open_menu_entry(console_socket, send_navigation, banner: str,
+                    timeout: float = 60.0, settle: float = 0.5,
+                    resend_interval: float = 3.0) -> None:
+    """Select a boot-manager entry and wait for its banner, tolerating a slow
+    host.
+
+    The menu waits forever on the default Timeout=0xFFFF and polls for input,
+    so a heavily loaded CI runner can drop the first keystrokes when they land
+    before the input loop starts reading; the menu then sits idle and a plain
+    wait would block until the test harness kills the process.  Wait for the
+    menu, settle briefly, then send the navigation and re-send it every
+    ``resend_interval`` seconds until ``banner`` appears -- raising with the
+    console tail on timeout rather than hanging.
+
+    ``send_navigation`` is a callable that emits the keystrokes; it must
+    re-anchor to the top entry before stepping down (the up-arrow clamps at the
+    first entry), so a re-send lands on the same entry no matter which
+    keystrokes a previous attempt consumed.
+    """
+    wait_for_menu(console_socket, timeout)
+    deadline = time.monotonic() + timeout
+    next_send = time.monotonic() + settle
+    buf = ""
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        if now >= next_send:
+            send_navigation()
+            next_send = now + resend_interval
+        window = min(next_send, deadline) - time.monotonic()
+        readable, _, _ = select.select(
+            [console_socket], [], [], max(0.0, min(0.5, window)))
+        if not readable:
+            continue
+        data = console_socket.recv(4096)
+        if not data:
+            raise ProtocolError(
+                "console closed before the boot-manager entry opened")
+        buf += data.decode("utf-8", errors="replace")
+        if banner in buf:
+            return
+    raise ProtocolError(
+        f"timed out opening a boot-manager entry (want {banner!r})\n"
+        f"{buf[-2000:]}")
+
+
 def wait_for_suite(console_socket, suite: str, required_cases: Iterable[str],
                    timeout: float,
                    on_case: Callable[[CaseResult], None] | None = None,

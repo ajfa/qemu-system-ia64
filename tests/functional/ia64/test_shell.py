@@ -10,7 +10,7 @@ from qemu_test import QemuSystemTest, wait_for_console_pattern
 from ia64.console import Ia64FirmwareTest
 from ia64.efi_build import app_path
 from ia64.media import make_fat_disk
-from ia64.protocol import wait_for_menu
+from ia64.protocol import open_menu_entry
 
 
 class Ia64BootShell(Ia64FirmwareTest):
@@ -20,10 +20,16 @@ class Ia64BootShell(Ia64FirmwareTest):
 
     def _open_shell(self, vm):
         """Open the built-in EFI shell from the boot menu over the serial
-        console: move the highlight down one entry and press Enter."""
-        wait_for_menu(vm.console_socket)
-        vm.console_socket.sendall(b"\x1b[B\r")   # Down (VT100), then Enter
-        wait_for_console_pattern(self, self.SHELL_BANNER, vm=vm)
+        console: re-anchor to the top entry (Up clamps), step down one entry to
+        'EFI Shell [Built-in]', and select it.  open_menu_entry() re-sends the
+        sequence until the shell banner appears, so a loaded host that drops the
+        first keystrokes -- leaving the wait-forever menu sitting idle -- does
+        not wedge the test for the full harness timeout."""
+        sock = vm.console_socket
+        open_menu_entry(
+            sock,
+            lambda: sock.sendall(b"\x1b[A\x1b[A\x1b[A\x1b[B\r"),
+            self.SHELL_BANNER)
 
     def _command(self, vm, command, expected):
         vm.console_socket.sendall((command + "\r").encode("ascii"))
@@ -90,11 +96,16 @@ class Ia64BootShell(Ia64FirmwareTest):
         vm = self.launch_ia64(
             name="device-boot", media=disk, boot_timeout=None,
             machine_options="i8042=off,firmware-console=serial,nvram=none")
-        wait_for_menu(vm.console_socket)
-        for qcode in ("down", "ret"):
-            vm.cmd("send-key", keys=[{"type": "qcode", "data": qcode}],
-                   hold_time=50)
-        wait_for_console_pattern(self, self.SHELL_BANNER, vm=vm)
+
+        def send_nav():
+            # Re-anchor to the top entry (Up clamps), then step down once to
+            # the shell.  Re-sent until the banner shows, so a dropped key on a
+            # loaded host is retried rather than wedging the test.
+            for qcode in ("up", "up", "up", "down", "ret"):
+                vm.cmd("send-key", keys=[{"type": "qcode", "data": qcode}],
+                       hold_time=50)
+
+        open_menu_entry(vm.console_socket, send_nav, self.SHELL_BANNER)
         self._command(vm, "boot fs0:",
                       "IA64TEST suite=smoke status=DONE")
 
