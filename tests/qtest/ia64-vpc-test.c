@@ -644,7 +644,7 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
 {
     IA64VpcHandoff handoff;
 
-    g_assert_cmpuint(sizeof(handoff), ==, 120);
+    g_assert_cmpuint(sizeof(handoff), ==, 128);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
     g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
     g_assert_cmphex(le64_to_cpu(handoff.Version), ==,
@@ -667,13 +667,16 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
                     IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF);
     g_assert_cmphex(le64_to_cpu(handoff.BootTimeout), ==,
                     IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER);
+    /* Default machine is chipset=460gx, which writes DERIVE (CPU-keyed). */
+    g_assert_cmphex(le64_to_cpu(handoff.ChipsetProfile), ==,
+                    IA64_FW_CHIPSET_DERIVE);
 }
 
 static void test_firmware_handoff_defaults(void)
 {
-    static const uint8_t expected_v13[sizeof(IA64VpcHandoff)] = {
+    static const uint8_t expected_v14[sizeof(IA64VpcHandoff)] = {
         0x51, 0x49, 0x41, 0x36, 0x34, 0x52, 0x41, 0x4d,
-        0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -687,6 +690,7 @@ static void test_firmware_handoff_defaults(void)
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x5e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* ChipsetProfile=DERIVE */
     };
     uint8_t actual[sizeof(IA64VpcHandoff)];
     QTestState *qts = ia64_vpc_start(NULL);
@@ -694,7 +698,23 @@ static void test_firmware_handoff_defaults(void)
     assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, actual, sizeof(actual));
     g_assert_cmpmem(actual, sizeof(actual),
-                    expected_v13, sizeof(expected_v13));
+                    expected_v14, sizeof(expected_v14));
+    qtest_quit(qts);
+}
+
+/* chipset=zx1 overrides the CPU-derived personality with the zx1 profile. */
+static void test_firmware_handoff_zx1(void)
+{
+    IA64VpcHandoff handoff;
+    QTestState *qts = qtest_initf("-machine ia64-vpc,chipset=zx1 -m 256M -S");
+
+    g_assert_cmpuint(sizeof(handoff), ==, 128);
+    qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
+    g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
+    g_assert_cmphex(le64_to_cpu(handoff.Version), ==,
+                    IA64_FW_HANDOFF_VERSION);
+    g_assert_cmphex(le64_to_cpu(handoff.ChipsetProfile), ==,
+                    IA64_FW_CHIPSET_ZX1);
     qtest_quit(qts);
 }
 
@@ -3326,6 +3346,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ram/high-remap-above-4g", test_ram_high_remap);
     qtest_add_func("/ia64-vpc/firmware-handoff/defaults",
                    test_firmware_handoff_defaults);
+    qtest_add_func("/ia64-vpc/firmware-handoff/zx1",
+                   test_firmware_handoff_zx1);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);
     qtest_add_func("/ia64-vpc/ahci/off-default", test_ahci_off_default);
     qtest_add_func("/ia64-vpc/ahci/on", test_ahci_on);

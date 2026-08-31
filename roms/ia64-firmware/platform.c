@@ -147,7 +147,7 @@ typedef struct {
     UINT64 DebugPortBase;
 } FW_HANDOFF_LEGACY;
 
-FW_STATIC_ASSERT(sizeof(IA64VpcHandoff) == 120, fw_handoff_size);
+FW_STATIC_ASSERT(sizeof(IA64VpcHandoff) == 128, fw_handoff_size);
 FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, ProcessorCount) == 64,
                  fw_handoff_processor_count_offset);
 FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, NvramPersistent) == 72,
@@ -558,16 +558,49 @@ UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
  * post-dates the advertised revision must not be offered.
  */
 /*
- * Platform personality (rework phase 3): Merced machines model the 460GX
- * (i2000/SDV) and everything else the E8870 (SR870BH2).  Currently keyed
- * off the CPU family alone; a machine option can override later if a
- * profile ever needs to diverge from the CPU model.
+ * The core-chipset personality the machine selected via -machine chipset=,
+ * or IA64_FW_CHIPSET_DERIVE for an old handoff (or the default) that leaves
+ * the choice to the CPU family.
  */
+static UINT64 fw_platform_chipset_profile(void)
+{
+    const FW_HANDOFF_HEADER *header =
+        (const FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    const IA64VpcHandoff *handoff =
+        (const IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+
+    if (!fw_handoff_valid(header) ||
+        header->Version < IA64_FW_HANDOFF_CHIPSET_VERSION) {
+        return IA64_FW_CHIPSET_DERIVE;
+    }
+    return handoff->ChipsetProfile;
+}
+
+/*
+ * Platform personality (rework phase 3): Merced machines model the 460GX
+ * (i2000/SDV) and everything else the E8870 (SR870BH2).  The -machine
+ * chipset= option (handoff version 14+) overrides this CPU-family default;
+ * chipset=zx1 selects the HP zx1 (rx2600/zx2000/zx6000) profile.
+ */
+BOOLEAN fw_platform_is_zx1(void)
+{
+    return fw_platform_chipset_profile() == IA64_FW_CHIPSET_ZX1;
+}
+
 BOOLEAN fw_platform_is_460gx(void)
 {
-    UINT64 family = (fw_read_cpuid3() >> IA64_CPUID3_FAMILY_SHIFT) &
-                    IA64_CPUID3_FAMILY_MASK;
+    UINT64 profile = fw_platform_chipset_profile();
+    UINT64 family;
 
+    if (profile == IA64_FW_CHIPSET_460GX) {
+        return 1;
+    }
+    if (profile == IA64_FW_CHIPSET_ZX1) {
+        return 0;
+    }
+
+    family = (fw_read_cpuid3() >> IA64_CPUID3_FAMILY_SHIFT) &
+             IA64_CPUID3_FAMILY_MASK;
     return family == IA64_CPUID3_FAMILY_MERCED;
 }
 

@@ -729,6 +729,7 @@ extern const UINT8 mDebugImageInfoTableGuid[16];
 
 UINT16 fw_sal_revision(void);
 BOOLEAN fw_platform_is_460gx(void);
+BOOLEAN fw_platform_is_zx1(void);
 UINT64 fw_current_gp(void);
 UINT64 fw_function_entry(UINTN FunctionPointer);
 UINT64 fw_sal_proc_function_entry(void);

@@ -33,9 +33,19 @@
  */
 #define IA64_FW_HANDOFF_ADDR          IA64_U64(0x00000000ff0ff000)
 #define IA64_FW_HANDOFF_MAGIC         IA64_U64(0x4d41523436414951) /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION       13ULL
+#define IA64_FW_HANDOFF_VERSION       14ULL
 /* Handoff version that first carries IA64VpcHandoff.BootTimeout. */
 #define IA64_FW_HANDOFF_BOOT_TIMEOUT_VERSION 13ULL
+/* Handoff version that first carries IA64VpcHandoff.ChipsetProfile. */
+#define IA64_FW_HANDOFF_CHIPSET_VERSION 14ULL
+/*
+ * Core-chipset personality (IA64VpcHandoff.ChipsetProfile, version 14+).  The
+ * machine's -machine chipset= option overrides the CPU-family default the
+ * firmware would otherwise derive (Merced => 460GX, else E8870).
+ */
+#define IA64_FW_CHIPSET_DERIVE        0ULL  /* derive from CPU family (legacy) */
+#define IA64_FW_CHIPSET_460GX         1ULL
+#define IA64_FW_CHIPSET_ZX1           2ULL
 /* Default boot-manager Timeout: wait for the user forever (EFI sample). */
 #define IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER 0xffffU
 /* Offset of IA64VpcHandoff.RamSize, re-derived by entry.S. */
@@ -282,6 +292,8 @@ typedef struct __attribute__((packed)) IA64VpcHandoff {
                                            * (the default) waits for the user
                                            * like the EFI sample; 0 boots the
                                            * BootOrder immediately. */
+    unsigned long long ChipsetProfile;    /* version 14+; IA64_FW_CHIPSET_*.
+                                           * 0 = derive from CPU family. */
 } IA64VpcHandoff;
 
 _Static_assert(__builtin_offsetof(IA64VpcHandoff, RamSize) ==

@@ -2740,7 +2740,7 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     IA64VpcHandoff handoff = { 0 };
     bool debug_port_present = debug_port_get_chardev() != NULL;
 
-    _Static_assert(sizeof(IA64VpcHandoff) == 120,
+    _Static_assert(sizeof(IA64VpcHandoff) == 128,
                    "IA-64 firmware handoff ABI size changed");
     _Static_assert(offsetof(IA64VpcHandoff, ProcessorCount) == 64,
                    "IA-64 firmware handoff CPU count offset changed");
@@ -2771,6 +2771,14 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     handoff.ThreadsPerCore = cpu_to_le64(machine->smp.threads);
     handoff.MapQuirkDisable = cpu_to_le64(s->fw_map_quirk_disable);
     handoff.BootTimeout = cpu_to_le64(s->firmware_boot_timeout);
+    /*
+     * Only chipset=zx1 overrides the firmware's CPU-derived personality; the
+     * default (460gx) writes DERIVE so today's behaviour -- 460GX on Merced,
+     * E8870 on Itanium 2 -- is preserved bit-for-bit for existing guests.
+     */
+    handoff.ChipsetProfile = cpu_to_le64(ia64_vpc_chipset_is_zx1(s) ?
+                                         IA64_FW_CHIPSET_ZX1 :
+                                         IA64_FW_CHIPSET_DERIVE);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, &handoff,
                               sizeof(handoff));
 }
