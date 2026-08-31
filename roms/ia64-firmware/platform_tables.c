@@ -173,8 +173,23 @@ static void init_sdt_header(ACPI_SDT_HEADER *hdr, UINT32 sig, UINT32 len)
     hdr->Length = len;
     hdr->Revision = 1;
     hdr->Checksum = 0;
-    for (i = 0; i < 6; i++) {
-        hdr->OemId[i] = "QEMU  "[i];
+    /*
+     * IA-64 Linux acpi_get_sysname() selects the platform machvec from the
+     * XSDT OEM ID: it wants the hpzx1 machvec (which registers sba_iommu and
+     * routes DMA through the IOC) versus the generic "dig" machvec (swiotlb
+     * only, no IOMMU).  It compares the 6-byte OEM ID for an *exact* "HP"
+     * (strcmp), so the field must be NUL-padded "HP\0\0\0\0" -- a space-padded
+     * "HP    " does NOT match and the guest falls back to "dig".  The 460gx
+     * profile keeps QEMU.
+     */
+    {
+        static const UINT8 oem_hp[6] = { 'H', 'P', 0, 0, 0, 0 };
+        static const UINT8 oem_qemu[6] = { 'Q', 'E', 'M', 'U', ' ', ' ' };
+        const UINT8 *oem = fw_platform_is_zx1() ? oem_hp : oem_qemu;
+
+        for (i = 0; i < 6; i++) {
+            hdr->OemId[i] = oem[i];
+        }
     }
     for (i = 0; i < 8; i++) {
         hdr->OemTableId[i] = "IA64VMSR"[i];
@@ -905,8 +920,15 @@ static void efi_init_acpi_tables(void)
     for (i = 0; i < 8; i++) {
         mRsdp.Signature[i] = "RSD PTR "[i];
     }
-    for (i = 0; i < 6; i++) {
-        mRsdp.OemId[i] = "QEMU  "[i];
+    {
+        /* NUL-padded "HP" selects the hpzx1 machvec (see init_sdt_header). */
+        static const UINT8 oem_hp[6] = { 'H', 'P', 0, 0, 0, 0 };
+        static const UINT8 oem_qemu[6] = { 'Q', 'E', 'M', 'U', ' ', ' ' };
+        const UINT8 *oem = fw_platform_is_zx1() ? oem_hp : oem_qemu;
+
+        for (i = 0; i < 6; i++) {
+            mRsdp.OemId[i] = oem[i];
+        }
     }
     mRsdp.Checksum = 0;
     mRsdp.Revision = 2;
