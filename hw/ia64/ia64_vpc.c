@@ -54,6 +54,7 @@
 #include "hw/ia64/ia64_pci.h"
 #include "hw/ia64/ia64_iosapic.h"
 #include "hw/ia64/ia64_agp.h"
+#include "hw/ia64/ia64_sba.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "system/rtc.h"
@@ -492,9 +493,11 @@ struct IA64VpcMachineState {
     uint8_t *realfw_chipset_cfg;
     PCIBus *realfw_pci_bus;
     char *vga_model;
+    char *chipset;
     bool alat_full;
 
     PCIDevice *agp_dev;
+    PCIDevice *sba_dev;
     PCIDevice *ahci_dev;
     PCIDevice *ide_dev;
     PCIDevice *ohci_dev;
@@ -2329,6 +2332,32 @@ static void ia64_vpc_set_vga(Object *obj, const char *value, Error **errp)
     }
     g_free(s->vga_model);
     s->vga_model = g_strdup(value);
+}
+
+static bool ia64_vpc_chipset_is_zx1(const IA64VpcMachineState *s)
+{
+    return g_strcmp0(s->chipset, "zx1") == 0;
+}
+
+static char *ia64_vpc_get_chipset(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return g_strdup(s->chipset ? s->chipset : "460gx");
+}
+
+static void ia64_vpc_set_chipset(Object *obj, const char *value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    if (g_strcmp0(value, "460gx") != 0 && g_strcmp0(value, "zx1") != 0) {
+        error_setg(errp, "chipset must be '460gx' or 'zx1'");
+        return;
+    }
+    g_free(s->chipset);
+    s->chipset = g_strdup(value);
 }
 
 static char *ia64_vpc_get_alat(Object *obj, Error **errp)
@@ -4589,22 +4618,37 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     pci_bus = PCI_BUS(qdev_get_child_bus(pci_host, "pci"));
 
     /*
-     * The 460GX GXB AGP host bridge + GART.  Created before any other PCI
-     * device so its pci_setup_iommu() installs the per-devfn DMA routing before
-     * any master's bus-master address space is resolved.  The GART translates
-     * only the AGP graphics master (the Rage 128, deterministically at the fixed
-     * graphics slot below); every other master identity-passes to memory, as on
-     * the real 460GX where only the GXB AGP port carries a GART.  Parked at a
-     * fixed high slot so it neither shifts the historical BDFs of the built-in
-     * devices nor is mistaken for a NIC by the slot-6+ scan.
+     * The core chipset's DMA-translation device, created before any other PCI
+     * device so its pci_setup_iommu() installs the bus-master DMA routing before
+     * any master's address space is resolved.  Exactly one owner per bus.
+     *
+     * chipset=zx1: the HP zx1 SBA IOC IOMMU -- one shared translated address
+     * space for every master, walking the guest-programmed in-DRAM IOPDIR, so a
+     * 32-bit master (the Rage 128) reaches RAM above 4 GiB by address
+     * translation.  No 460GX GXB is created; the Rage 128 falls back to its own
+     * PCI-GART, now translated >4 GiB by the SBA.  (The hp-agp AGP-DRI LBA is a
+     * later milestone.)  Parked at a fixed high slot like the GXB.
+     *
+     * chipset=460gx (default): the 460GX GXB AGP host bridge + GART, which
+     * translates only the AGP graphics master (the Rage 128 at the fixed
+     * graphics slot below); every other master identity-passes to memory.
      */
-    s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
-    object_property_set_int(OBJECT(s->agp_dev), "agp-master-devfn",
-                            PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), &error_abort);
-    object_property_set_bool(OBJECT(s->agp_dev), "gart-enabled",
-                            s->agp_enabled, &error_abort);
-    if (!pci_realize_and_unref(s->agp_dev, pci_bus, errp)) {
-        return false;
+    if (ia64_vpc_chipset_is_zx1(s)) {
+        s->sba_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_SBA);
+        object_property_set_uint(OBJECT(s->sba_dev), "csr-base",
+                                 IA64_SBA_CSR_BASE, &error_abort);
+        if (!pci_realize_and_unref(s->sba_dev, pci_bus, errp)) {
+            return false;
+        }
+    } else {
+        s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
+        object_property_set_int(OBJECT(s->agp_dev), "agp-master-devfn",
+                                PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), &error_abort);
+        object_property_set_bool(OBJECT(s->agp_dev), "gart-enabled",
+                                s->agp_enabled, &error_abort);
+        if (!pci_realize_and_unref(s->agp_dev, pci_bus, errp)) {
+            return false;
+        }
     }
 
     /*
@@ -4907,6 +4951,8 @@ static void ia64_vpc_machine_instance_init(Object *obj)
     s->agp_enabled = true;
     /* Default display adapter: the Rage 128 (honouring -vga); mach64 opt-in. */
     s->vga_model = g_strdup("rage128");
+    /* Default core chipset: the Intel 460GX GXB AGP GART, as today. */
+    s->chipset = g_strdup("460gx");
 }
 
 static void ia64_vpc_machine_instance_finalize(Object *obj)
@@ -4919,6 +4965,7 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
     g_free(s->nvram_path);
     g_free(s->nvram_resolved_path);
     g_free(s->vga_model);
+    g_free(s->chipset);
     g_free(s->realfw_path);
 }
 
@@ -5007,6 +5054,13 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Display adapter: 'rage128' (default, ATI Rage 128, honours -vga), "
         "'mach64' (ATI Mach64 3D Rage, a PCI 2D adapter with no AGP), or "
         "'std'");
+    object_class_property_add_str(oc, "chipset",
+                                  ia64_vpc_get_chipset,
+                                  ia64_vpc_set_chipset);
+    object_class_property_set_description(oc, "chipset",
+        "Core chipset: '460gx' (default, Intel 460GX GXB AGP GART) or 'zx1' "
+        "(HP zx1 SBA IOMMU -- translates all DMA >4 GiB with no bounce; a "
+        "Linux and Windows-3790/2003 platform, not for XP 2002/build 2600)");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,
                                    ia64_vpc_set_firmware_ide_dma);

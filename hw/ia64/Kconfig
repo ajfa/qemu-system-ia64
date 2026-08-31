@@ -4,6 +4,7 @@ config IA64_VPC
     select GENERIC_LOADER
     select SERIAL_MM
     select PCI
+    select HP_SBA_IOMMU
     select ISA_BUS
     select PFLASH_CFI01
     select MC146818RTC

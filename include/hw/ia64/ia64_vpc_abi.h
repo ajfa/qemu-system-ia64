@@ -217,6 +217,18 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_IOSAPIC_MMIO_SIZE        IA64_U64(0x0000000000002000)
 #define IA64_LOCAL_SAPIC_BASE         IA64_U64(0x00000000fee00000)
 #define IA64_LOCAL_SAPIC_SIZE         IA64_U64(0x0000000000200000)
+/*
+ * HP zx1 SBA (System Bus Adapter) IOC CSR block -- only mapped by the zx1
+ * chipset profile.  Placed in the free chipset MMIO gap between the IOSAPIC
+ * (0xFEC00000) and the local SAPIC (0xFEE00000); this is the real zx1 mio
+ * config base (mio ERS 3.1.1) and matches the upstream model.  Linux
+ * sba_iommu reads the IOC registers at base + ZX1_IOC_OFFSET(0x1000) +
+ * IBASE(0x300); the model maps the IOMMU register window there (CSR offset
+ * 0x1300).  The window is described to guests only through the ACPI HWP0001
+ * _CRS, never the EFI memory map (see roms/ia64-firmware/efi_memmap.c).
+ */
+#define IA64_SBA_CSR_BASE             IA64_U64(0x00000000fed00000)
+#define IA64_SBA_CSR_SIZE             IA64_U64(0x0000000000010000)
 /* 16 MiB PAL/SAL firmware address space below 4 GiB. */
 #define IA64_FW_ADDRESS_SPACE_BASE    IA64_U64(0x00000000ff000000)
 #define IA64_FW_ADDRESS_SPACE_SIZE    IA64_U64(0x0000000001000000)

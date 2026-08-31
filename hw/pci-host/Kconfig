@@ -112,3 +112,6 @@ config GT64120
     select PCI
     select EMPTY_SLOT
     select I8259
+
+config HP_SBA_IOMMU
+    bool

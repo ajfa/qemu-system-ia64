@@ -36,6 +36,10 @@ pci_ss.add(when: 'CONFIG_VERSATILE_PCI', if_true: files('versatile.c'))
 specific_ss.add(when: 'CONFIG_ASTRO', if_true: files('astro.c'))
 pci_ss.add(when: 'CONFIG_DINO', if_true: files('dino.c'))
 
+# HP zx1 SBA IOMMU cores (used by the ia64-vpc chipset=zx1 profile).
+pci_ss.add(when: 'CONFIG_HP_SBA_IOMMU',
+           if_true: files('hp-sba-iommu.c', 'hp-zx1-iommu.c'))
+
 system_ss.add_all(when: 'CONFIG_PCI', if_true: pci_ss)
 
 specific_ss.add(when: 'CONFIG_PCI_POWERNV', if_true: files(
