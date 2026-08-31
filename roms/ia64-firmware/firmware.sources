@@ -1,5 +1,18 @@
 entry.S
 firmware.c
+unicode_collation.c
+smbios.c
+storage.c
+efi_memmap.c
+ide.c
+console.c
+pe_loader.c
+udf.c
+filesystem.c
+boot.c
+platform_tables.c
+platform.c
+ohci.c
 decompress.c
 debug_protocols.c
 pointer_protocol.c
@@ -10,3 +23,5 @@ ebc.c
 legacy_io.c
 boot_shell.c
 firmware.lds
+dsdt-pci-root.asl
+ssdt-platform-devices.asl

@@ -57,7 +57,7 @@ jobs:
           libzstd-devel lzo-devel snappy-devel bzip2-devel
           libcurl-devel capstone-devel libiscsi-devel
           libusb1-devel usbredir-devel
-          gcc-ia64-linux-gnu binutils-ia64-linux-gnu
+          gcc-ia64-linux-gnu binutils-ia64-linux-gnu acpica-tools
 
       - uses: actions/checkout@v4
 
@@ -97,8 +97,9 @@ jobs:
 
       - name: Build QEMU + firmware
         run: |
+          set -o pipefail
           export PATH=/usr/lib64/ccache:$PATH
-          ninja -C build
+          ninja -C build 2>&1 | tee build/ninja-build.log
           ccache -s
 
       - name: Run ia64 regression gate
@@ -149,7 +150,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux-test-logs
-          path: build/meson-logs/
+          path: |
+            build/meson-logs/
+            build/ninja-build.log
           if-no-files-found: ignore
 
   windows-cross:
@@ -169,7 +172,7 @@ jobs:
           mingw64-pkg-config mingw64-SDL2 mingw64-gtk3
           mingw64-libpng mingw64-libjpeg-turbo mingw64-curl
           mingw64-gnutls mingw64-bzip2 mingw-w64-tools
-          gcc-ia64-linux-gnu binutils-ia64-linux-gnu
+          gcc-ia64-linux-gnu binutils-ia64-linux-gnu acpica-tools
 
       - uses: actions/checkout@v4
 
@@ -212,7 +215,9 @@ jobs:
           esac
 
       - name: Build QEMU + firmware
-        run: ninja -C build
+        run: |
+          set -o pipefail
+          ninja -C build 2>&1 | tee build/ninja-build.log
 
       - name: Assemble Windows package
         # Windows installs use a flat layout: .exe files at the prefix root,
@@ -279,5 +284,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-build-logs
-          path: build/meson-logs/
+          path: |
+            build/meson-logs/
+            build/ninja-build.log
           if-no-files-found: ignore

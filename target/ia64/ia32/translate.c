@@ -30,9 +30,25 @@
                  IA32_TB_FLAG_PSR_IS))
 /* Ordinary IA-32 #AC checks run after translation in the segment hook. */
 #define X86_MEMOP_ALIGNMENT(s, memop) MO_UNALN
-#define X86_GEN_INSN_START(pc) \
-    tcg_gen_st_i64(tcg_constant_i64((uint32_t)(pc)), tcg_env, \
-                   offsetof(CPUIA64State, ip))
+/*
+ * Store the current x86 linear IP into CPUIA64State.ip at each instruction, and
+ * -- when IA32_IPTRACE is set -- plant a per-instruction trace helper (see
+ * helper_ia32_ip_trace).  The getenv check runs once at translation time and is
+ * cached, so an unset IA32_IPTRACE plants nothing and costs nothing at runtime.
+ */
+static int ia64_ia32_iptrace_enabled = -1;
+#define X86_GEN_INSN_START(pc) do {                                       \
+    tcg_gen_st_i64(tcg_constant_i64((uint32_t)(pc)), tcg_env,             \
+                   offsetof(CPUIA64State, ip));                           \
+    if (ia64_ia32_iptrace_enabled < 0) {                                  \
+        ia64_ia32_iptrace_enabled = getenv("IA32_IPTRACE") != NULL ||     \
+                                    getenv("IA32_IPTRACE_BELOW") != NULL || \
+                                    getenv("IA32_IPTRACE_SAMPLE") != NULL;  \
+    }                                                                     \
+    if (ia64_ia32_iptrace_enabled) {                                      \
+        gen_helper_ia32_ip_trace(tcg_env);                               \
+    }                                                                     \
+} while (0)
 #define X86_INT3_VECTOR(vector) ((vector) | 0x100)
 #define X86_IA32_SYSTEM_ENV 1
 #define X86_GEN_CODE_FETCH_CHECK(s) \

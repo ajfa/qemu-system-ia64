@@ -53,6 +53,27 @@ static hwaddr ia64_pci_dense_io_addr(hwaddr port)
     return IA64_PCI_IO_BASE + port;
 }
 
+/*
+ * Whether any device answers this legacy I/O port.  An ISA/LPC read that no
+ * device claims floats the bus high, so real hardware returns all-ones; only a
+ * present device pulls a bit low.  The container returns 0x00 for an unbacked
+ * port, so the sparse reader probes here first and substitutes an open-bus
+ * 0xff..ff when nothing is mapped.  Real Itanium firmware relies on this: the
+ * SDV BIOS reads a Super I/O device-ID register at port 0x2f and treats 0xff
+ * as "no Super I/O fitted" (it accepts 0x51, 0x5f or 0xff), fatally spinning
+ * on the 0x00 an unbacked port would otherwise return.
+ */
+static bool ia64_pci_io_port_backed(IA64PCIState *s, hwaddr port, unsigned size)
+{
+    MemoryRegionSection sec = memory_region_find(&s->pci_io, port, size);
+    bool backed = sec.mr != NULL;
+
+    if (sec.mr) {
+        memory_region_unref(sec.mr);
+    }
+    return backed;
+}
+
 static uint64_t ia64_pci_sparse_io_read(void *opaque, hwaddr addr,
                                         unsigned size)
 {
@@ -62,6 +83,17 @@ static uint64_t ia64_pci_sparse_io_read(void *opaque, hwaddr addr,
 
     if (port >= IA64_PCI_IO_SIZE || port + size > IA64_PCI_IO_SIZE) {
         return ~0ULL;
+    }
+
+    /*
+     * An I/O read that no device claims must float the bus high (return
+     * all-ones), not the 0x00 the container answers for an unbacked port.
+     * Real Itanium firmware depends on this -- the SDV BIOS reads a Super I/O
+     * device-ID register at port 0x2f and hangs unless an absent chip reads
+     * back as 0xff.
+     */
+    if (!ia64_pci_io_port_backed(s, port, size)) {
+        return MAKE_64BIT_MASK(0, size * 8);
     }
 
     switch (size) {

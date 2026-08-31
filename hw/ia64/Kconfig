@@ -5,6 +5,10 @@ config IA64_VPC
     select SERIAL_MM
     select PCI
     select ISA_BUS
+    select PFLASH_CFI01
+    select MC146818RTC
+    select I8259
+    select I8254
     select ACPI
     imply IA64_VPC_GRAPHICS
     imply IA64_VPC_NETWORK
@@ -17,6 +21,7 @@ config IA64_VPC_GRAPHICS
     depends on IA64_VPC
     select ATI_VGA
     select MACH64_VGA
+    select NV15_VGA
     select VGA_PCI
 
 config IA64_VPC_NETWORK

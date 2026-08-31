@@ -70,6 +70,7 @@ static void rtc_update_time(MC146818RtcState *s);
 static void rtc_set_cmos(MC146818RtcState *s, const struct tm *tm);
 static inline int rtc_from_bcd(MC146818RtcState *s, int a);
 static uint64_t get_next_alarm(MC146818RtcState *s);
+static void rtc_reencode_data_mode(MC146818RtcState *s, bool to_binary);
 
 static inline bool rtc_running(MC146818RtcState *s)
 {
@@ -429,6 +430,7 @@ static void cmos_ioport_write(void *opaque, hwaddr addr,
     MC146818RtcState *s = opaque;
     uint32_t old_period;
     bool update_periodic_timer;
+    bool dm_changed = false;
 
     if ((addr & 1) == 0) {
         s->cmos_index = data & 0x7f;
@@ -445,6 +447,20 @@ static void cmos_ioport_write(void *opaque, hwaddr addr,
             s->cmos_index = RTC_CENTURY;
             /* fall through */
         case RTC_CENTURY:
+            if (s->century_read_only) {
+                /*
+                 * Read-only hardware century byte: drop the write.  Real
+                 * hardware's century register is not writable, and the i2000
+                 * SDV firmware's end-of-POST RTC probe writes 0 to it and then
+                 * requires it to still read back the century (else it reports
+                 * EFI_DEVICE_ERROR, whose zero result count trips a break 1).
+                 * With a writable byte and the RTC halted for the probe, the
+                 * read-back would be the written 0 and the probe fails; keeping
+                 * the stored century makes the probe read back the real value.
+                 */
+                break;
+            }
+            /* fall through */
         case RTC_SECONDS:
         case RTC_MINUTES:
         case RTC_HOURS:
@@ -496,6 +512,7 @@ static void cmos_ioport_write(void *opaque, hwaddr addr,
         case RTC_REG_B:
             update_periodic_timer = (s->cmos_data[RTC_REG_B] ^ data)
                                        & REG_B_PIE;
+            dm_changed = (s->cmos_data[RTC_REG_B] ^ data) & REG_B_DM;
             old_period = rtc_periodic_clock_ticks(s);
 
             if (data & REG_B_SET) {
@@ -524,6 +541,16 @@ static void cmos_ioport_write(void *opaque, hwaddr addr,
                 qemu_irq_lower(s->irq);
             }
             s->cmos_data[RTC_REG_B] = data;
+
+            /*
+             * On a data-mode (BCD<->binary) switch, convert the frozen
+             * time/calendar/alarm bytes so their wall-clock value survives the
+             * change (see rtc_reencode_data_mode).  Done after storing REG_B so
+             * the helper sees the new 24/12-hour selection.
+             */
+            if (dm_changed) {
+                rtc_reencode_data_mode(s, data & REG_B_DM);
+            }
 
             if (update_periodic_timer) {
                 periodic_timer_update(s, qemu_clock_get_ns(rtc_clock),
@@ -561,6 +588,48 @@ static inline int rtc_from_bcd(MC146818RtcState *s, int a)
         return a;
     } else {
         return ((a >> 4) * 10) + (a & 0x0f);
+    }
+}
+
+/*
+ * Convert the ten time/calendar/alarm bytes between BCD and binary when the
+ * REG_B DM (data mode) bit is toggled.  The MC146818 datasheet (Motorola,
+ * "TIME, CALENDAR, AND ALARM LOCATIONS") holds these bytes in the DM-selected
+ * format and notes the mode "cannot be changed without reinitializing the 10
+ * data bytes" -- real hardware leaves the raw bytes untouched on a DM change,
+ * so software is expected to rewrite them.  We instead convert in place so the
+ * wall-clock value is preserved across the switch: firmware that flips DM and
+ * then reads the bytes without rewriting them -- the HP i2000 SDV, which
+ * selects binary mode and reads a freshly (BCD-)initialised RTC -- would
+ * otherwise misread every field (e.g. BCD 0x11 read as binary 17).  PC guests
+ * use BCD exclusively and never toggle DM, so this path never runs for them.
+ */
+static void rtc_reencode_data_mode(MC146818RtcState *s, bool to_binary)
+{
+    static const int idx[] = {
+        RTC_SECONDS, RTC_SECONDS_ALARM, RTC_MINUTES, RTC_MINUTES_ALARM,
+        RTC_HOURS, RTC_HOURS_ALARM, RTC_DAY_OF_WEEK, RTC_DAY_OF_MONTH,
+        RTC_MONTH, RTC_YEAR,
+    };
+    bool ampm = !(s->cmos_data[RTC_REG_B] & REG_B_24H);
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(idx); i++) {
+        int a = idx[i];
+        uint8_t v = s->cmos_data[a];
+        uint8_t pm = 0;
+
+        /* Leave "don't care" alarm codes (two most-significant bits set). */
+        if ((a == RTC_SECONDS_ALARM || a == RTC_MINUTES_ALARM ||
+             a == RTC_HOURS_ALARM) && (v & 0xc0) == 0xc0) {
+            continue;
+        }
+        /* Preserve the PM flag (bit 7) of an hours byte in 12-hour mode. */
+        if ((a == RTC_HOURS || a == RTC_HOURS_ALARM) && ampm) {
+            pm = v & 0x80;
+            v &= 0x7f;
+        }
+        s->cmos_data[a] = (to_binary ? from_bcd(v) : to_bcd(v)) | pm;
     }
 }
 
@@ -674,6 +743,26 @@ static uint64_t cmos_ioport_read(void *opaque, hwaddr addr,
             s->cmos_index = RTC_CENTURY;
             /* fall through */
         case RTC_CENTURY:
+            if (s->century_read_only) {
+                /*
+                 * Read-only hardware century byte: always report the real
+                 * century as a two-digit BCD value (e.g. 0x20 for the 2000s),
+                 * independent of the RTC's SET/halt state, of any write (which
+                 * we drop), and crucially of REG_B_DM: unlike the time fields,
+                 * the century register is BCD even when the RTC is in binary
+                 * mode, which the i2000 SDV firmware relies on (its end-of-POST
+                 * RTC self-test both write-probes this byte and builds a year
+                 * from it that it range-checks to [1998, 2099]).
+                 */
+                time_t guest_sec = get_guest_rtc_ns(s) / NANOSECONDS_PER_SECOND;
+                struct tm tm;
+                int century;
+                gmtime_r(&guest_sec, &tm);
+                century = (tm.tm_year + 1900) / 100;
+                ret = ((century / 10) << 4) | (century % 10);
+                break;
+            }
+            /* fall through */
         case RTC_SECONDS:
         case RTC_MINUTES:
         case RTC_HOURS:

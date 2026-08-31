@@ -328,7 +328,7 @@ typedef struct {
     EFI_USB_ENDPOINT_DESCRIPTOR endpoint[FW_USB_ENDPOINT_MAX];
     UINT16 languages[FW_USB_LANGUAGE_MAX];
     UINT16 language_size;
-    FW_USB_DEVICE_PATH device_path;
+    FW_USB_DEVICE_PATH device_path FW_DEVICE_PATH_GUEST_ALIGN;
 } FW_USB_IO_DEVICE;
 
 static const UINT8 mUsbHcProtocolGuid[16] = {

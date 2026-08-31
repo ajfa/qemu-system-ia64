@@ -224,6 +224,7 @@ fmerge_forms_decode
 fmerge_natval_propagates
 fminmax_scalar_decode
 fminmax_scalar_tie_uses_f3
+fmov_preserves_integer_register_format
 fmpy_s0_decode
 fmpy_s_s1_decode
 fms_s3_decode
@@ -328,6 +329,7 @@ fsetc_pc1_reserved_field_fault
 fsetc_sf0_td_reserved_field_fault
 fsub_d_s0_decode
 future_itm_rearm_preserves_pended_timer_irr
+future_itm_rearm_uses_latest_deadline
 fwb_decode
 gcc_alloc_and_ar_lc
 getf_exact_register_format_translation
@@ -671,6 +673,7 @@ pal_copy_pal_bad_alignment
 pal_copy_pal_bad_alloc
 pal_copy_pal_bad_processor
 pal_copy_pal_entry_callable
+pal_copy_pal_relocated_entry_plain_branch
 pal_debug_info
 pal_debug_info_reserved_arg
 pal_fixed_addr
@@ -707,6 +710,7 @@ pal_mc_error_info_map_empty
 pal_mc_error_info_structure_empty
 pal_mc_expected
 pal_mc_register_mem
+pal_mc_register_mem_uncacheable
 pal_mc_resume_bad_args
 pal_mc_resume_bad_save_ptr
 pal_mc_resume_new_context_no_context
@@ -779,6 +783,7 @@ pal_vm_tr_read_merced_itr_bound
 pal_vm_tr_read_misaligned_buffer
 pal_vm_tr_read_rejects_first_non_tr
 past_itm_does_not_fire
+past_itm_reprogram_cancels_future_deadline
 past_rearmed_itm_does_not_interrupt
 pavg_decode
 pcmp1_eq_decode
@@ -1113,6 +1118,7 @@ translation_hash_nat_source_rules
 translation_hash_ops_clear_dest_nat
 umodsi3_hash_remainder
 unaligned_store_reports_unaligned_when_mapped
+unaligned_uc_reference_exempt_from_ac_fault
 unimplemented_physical_instruction_traps
 unimplemented_physical_load_faults
 unimplemented_physical_precludes_unaligned

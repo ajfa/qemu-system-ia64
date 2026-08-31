@@ -9,14 +9,8 @@
 
 #define TYPE_IA64_PCI_HOST_BRIDGE "ia64-pcihost"
 
-#define IA64_PCI_IO_BASE          0x000000800010000000ULL
-#define IA64_PCI_IO_SIZE          0x0000000001000000ULL
-#define IA64_PCI_IO_SPARSE_SKIP   0x1000ULL
-/* Sparse IA-64 port encoding expands the legacy 16-bit I/O port space. */
-#define IA64_PCI_IO_SPARSE_SIZE   0x0000000004000000ULL
-#define IA64_PCI_CONFIG_BASE      0x0000007ff0000000ULL
-#define IA64_PCI_CONFIG_SIZE      0x0000000010000000ULL
-
+/* IA64_PCI_IO_* and IA64_PCI_CONFIG_* live in ia64_vpc_abi.h (shared with
+ * the firmware). */
 #if (IA64_PCI_IO_BASE & (IA64_PCI_IO_SPARSE_SIZE - 1)) != 0
 #error "IA64_PCI_IO_BASE must be aligned for sparse I/O port addresses"
 #endif

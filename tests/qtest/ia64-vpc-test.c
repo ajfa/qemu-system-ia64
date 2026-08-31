@@ -8,6 +8,7 @@
 #include <glib/gstdio.h>
 #include "qemu/bitops.h"
 #include "qemu/bswap.h"
+#include "qemu/cutils.h"
 #include "qemu/sockets.h"
 #include "qemu/timer.h"
 #include "qemu/units.h"
@@ -23,21 +24,11 @@
 #include "hw/ia64/ia64_vpc_abi.h"
 #include "hw/net/e1000_regs.h"
 
-#define IA64_LEGACY_IO_BASE          0x000000800010000000ULL
-#define IA64_PCI_CONFIG_BASE         0x0000007ff0000000ULL
-#define IA64_ACPI_PM_IO_BASE         0x00002000ULL
+/* Platform addresses come from hw/ia64/ia64_vpc_abi.h; test-only register
+ * offsets stay local. */
+#define IA64_LEGACY_IO_BASE          IA64_PCI_IO_BASE
 #define IA64_ACPI_PM1_EVT_EN_OFFSET  0x02ULL
 #define IA64_ACPI_PM1_CNT_OFFSET     0x04ULL
-#define IA64_ACPI_PM_RESET_OFFSET    0x0cULL
-#define IA64_ACPI_PM_RESET_VALUE     0x01U
-#define IA64_RTC_BASE                0x00000000ffef0000ULL
-#define IA64_WATCHDOG_BASE           0x00000000ffee0000ULL
-#define IA64_WATCHDOG_CODE_OFFSET    0x08ULL
-#define IA64_NVRAM_BASE              0x00000000fff00000ULL
-#define IA64_NVRAM_SIZE              (64 * KiB)
-#define IA64_NVRAM_COMMIT_OFFSET     (IA64_NVRAM_SIZE - 8)
-#define IA64_NVRAM_COMMIT_MAGIC      0x54494d4d4f43564eULL
-#define IA64_IOSAPIC_BASE            0x00000000fec00000ULL
 #define IA64_IOSAPIC_IOREGSEL        0x00ULL
 #define IA64_IOSAPIC_IOWIN           0x10ULL
 #define IA64_IOSAPIC_EOI             0x40ULL
@@ -653,7 +644,7 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
 {
     IA64VpcHandoff handoff;
 
-    g_assert_cmpuint(sizeof(handoff), ==, 104);
+    g_assert_cmpuint(sizeof(handoff), ==, 120);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
     g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
     g_assert_cmphex(le64_to_cpu(handoff.Version), ==,
@@ -670,13 +661,19 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
     g_assert_cmphex(le64_to_cpu(handoff.SocketCount), ==, sockets);
     g_assert_cmphex(le64_to_cpu(handoff.CoresPerSocket), ==, cores);
     g_assert_cmphex(le64_to_cpu(handoff.ThreadsPerCore), ==, threads);
+    g_assert_cmphex(le64_to_cpu(handoff.MapQuirkDisable), ==,
+                    IA64_FW_QUIRK_ACPI_LOW_ISLAND | IA64_FW_QUIRK_SCRATCH_2G |
+                    IA64_FW_QUIRK_LOW_BOUNDARIES | IA64_FW_QUIRK_LOW_ANCHOR |
+                    IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF);
+    g_assert_cmphex(le64_to_cpu(handoff.BootTimeout), ==,
+                    IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER);
 }
 
 static void test_firmware_handoff_defaults(void)
 {
-    static const uint8_t expected_v10[sizeof(IA64VpcHandoff)] = {
+    static const uint8_t expected_v13[sizeof(IA64VpcHandoff)] = {
         0x51, 0x49, 0x41, 0x36, 0x34, 0x52, 0x41, 0x4d,
-        0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -688,6 +685,8 @@ static void test_firmware_handoff_defaults(void)
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x5e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
     uint8_t actual[sizeof(IA64VpcHandoff)];
     QTestState *qts = ia64_vpc_start(NULL);
@@ -695,7 +694,7 @@ static void test_firmware_handoff_defaults(void)
     assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, actual, sizeof(actual));
     g_assert_cmpmem(actual, sizeof(actual),
-                    expected_v10, sizeof(expected_v10));
+                    expected_v13, sizeof(expected_v13));
     qtest_quit(qts);
 }
 
@@ -799,6 +798,21 @@ static void test_firmware_handoff_i8042_off(void)
     qtest_quit(qts);
 }
 
+static void test_firmware_handoff_boot_timeout(void)
+{
+    IA64VpcHandoff handoff;
+    /* A finite firmware-boot-timeout overrides the wait-forever default and
+     * reaches the OS handoff verbatim, driving the boot manager's countdown. */
+    QTestState *qts = qtest_init("-machine ia64-vpc,firmware-boot-timeout=5 "
+                                 "-m 256M -S");
+
+    qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
+    g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
+    g_assert_cmphex(le64_to_cpu(handoff.Version), ==, IA64_FW_HANDOFF_VERSION);
+    g_assert_cmphex(le64_to_cpu(handoff.BootTimeout), ==, 5);
+    qtest_quit(qts);
+}
+
 static void test_smp_topology(gconstpointer opaque)
 {
     uint64_t count = GPOINTER_TO_UINT(opaque);
@@ -887,24 +901,56 @@ static bool rtc_value_is_current(uint64_t value)
     return value >= now - 5 && value <= now + 5;
 }
 
+/* MC146818 CMOS RTC at legacy ports 0x70/0x71 in the I/O port space. */
+static uint8_t rtc_cmos_read(QTestState *qts, uint8_t reg)
+{
+    qtest_writeb(qts, IA64_PCI_IO_BASE + 0x70, reg);
+    return qtest_readb(qts, IA64_PCI_IO_BASE + 0x71);
+}
+
+static uint64_t rtc_cmos_field(uint8_t value, bool binary)
+{
+    return binary ? value : (uint64_t)(value >> 4) * 10 + (value & 0x0f);
+}
+
 static void test_rtc_aligned_read(void)
 {
     QTestState *qts = ia64_vpc_start(NULL);
-    uint64_t before_write;
-    uint64_t after_write;
-    uint64_t after_reset;
+    uint8_t reg_b;
+    bool binary;
+    struct tm tm = { 0 };
+    time_t guest;
+    unsigned attempt;
 
-    before_write = qtest_readq(qts, IA64_RTC_BASE);
-    g_assert_true(rtc_value_is_current(before_write));
+    for (attempt = 0; attempt < 4; attempt++) {
+        unsigned spin;
+        uint64_t sec;
 
-    /* The RTC window is deliberately read-only. */
-    qtest_writeq(qts, IA64_RTC_BASE, UINT64_MAX);
-    after_write = qtest_readq(qts, IA64_RTC_BASE);
-    g_assert_true(rtc_value_is_current(after_write));
+        for (spin = 0; spin < 1000; spin++) {
+            if (!(rtc_cmos_read(qts, 0x0a) & 0x80)) {
+                break;
+            }
+        }
+        reg_b = rtc_cmos_read(qts, 0x0b);
+        binary = (reg_b & 0x04) != 0;
+        g_assert_true((reg_b & 0x02) != 0);   /* 24-hour mode */
 
-    qtest_system_reset(qts);
-    after_reset = qtest_readq(qts, IA64_RTC_BASE);
-    g_assert_true(rtc_value_is_current(after_reset));
+        sec = rtc_cmos_field(rtc_cmos_read(qts, 0x00), binary);
+        tm.tm_sec = sec;
+        tm.tm_min = rtc_cmos_field(rtc_cmos_read(qts, 0x02), binary);
+        tm.tm_hour = rtc_cmos_field(rtc_cmos_read(qts, 0x04), binary);
+        tm.tm_mday = rtc_cmos_field(rtc_cmos_read(qts, 0x07), binary);
+        tm.tm_mon = rtc_cmos_field(rtc_cmos_read(qts, 0x08), binary) - 1;
+        tm.tm_year = rtc_cmos_field(rtc_cmos_read(qts, 0x09), binary);
+        if (rtc_cmos_field(rtc_cmos_read(qts, 0x00), binary) != sec) {
+            continue;                          /* ticked mid-read */
+        }
+        break;
+    }
+    tm.tm_year += tm.tm_year < 80 ? 100 : 0;   /* two-digit year pivot */
+
+    guest = mktimegm(&tm);
+    g_assert_true(rtc_value_is_current(guest));
     qtest_quit(qts);
 }
 
@@ -940,6 +986,114 @@ static void test_nvram_commit_and_restart(void)
     qts = qtest_initf("-machine ia64-vpc,nvram=%s -m 256M -S",
                       quoted_path);
     g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, test_value);
+    qtest_quit(qts);
+
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+/*
+ * realfw mode (phase 5): a synthetic 128 KiB flash image with the
+ * architected reset pointer block must be mapped ending at 4 GiB, and the
+ * machine-planted PAL stub must appear at its fixed home.  The image places
+ * a _FIT_ header and points SALE_ENTRY at an arbitrary bundle inside the
+ * image; qtest never runs the CPU, so mapping and content are the contract
+ * under test.
+ */
+static void test_realfw_flash_window(void)
+{
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *path = NULL;
+    g_autofree char *quoted_path = NULL;
+    g_autofree uint8_t *image = NULL;
+    const uint64_t image_size = 0x20000;
+    const uint64_t base = 0x100000000ULL - image_size;
+    const uint64_t fit_addr = base + 0x10000;
+    const uint64_t sale_addr = base + 0x8000;
+    g_autoptr(GError) error = NULL;
+    QTestState *qts;
+
+    tmpdir = g_dir_make_tmp("ia64-vpc-realfw-XXXXXX", &error);
+    g_assert_no_error(error);
+    path = g_build_filename(tmpdir, "flash.bin", NULL);
+    quoted_path = g_shell_quote(path);
+
+    image = g_malloc0(image_size);
+    memset(image, 0xff, image_size);
+    memcpy(image + (fit_addr - base), "_FIT_   ", 8);
+    stq_le_p(image + (fit_addr - base) + 8, 0x0100000000000010ULL);
+    stq_le_p(image + image_size - 32, (1ULL << 63) | fit_addr);
+    stq_le_p(image + image_size - 24, (1ULL << 63) | sale_addr);
+    stq_le_p(image + (sale_addr - base), 0x0123456789abcdefULL);
+    g_assert_true(g_file_set_contents(path, (char *)image, image_size,
+                                      &error));
+
+    qts = qtest_initf("-machine ia64-vpc,realfw=%s -m 256M -S", quoted_path);
+    /* Flash content is visible at its physical home. */
+    g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
+    g_assert_cmphex(qtest_readq(qts, fit_addr) & 0xffffffffffffULL, ==,
+                    0x5f5449465fULL | ((uint64_t)' ' << 40));
+    /* Reset pointer block at 4 GiB-32/-24. */
+    g_assert_cmphex(qtest_readq(qts, 0x100000000ULL - 24), ==,
+                    (1ULL << 63) | sale_addr);
+    /* The PAL stub's break bundle sits at its fixed home. */
+    g_assert_cmphex(qtest_readq(qts, 0xff100000ULL), !=, 0);
+
+    /*
+     * The flash is a writable Intel-CFI part.  Read Device ID (0x90) exposes
+     * the JEDEC identity the SDV firmware checks: manufacturer 0x89 at byte
+     * offset 0, device 0xac (82802AB Firmware Hub) at byte offset 1.
+     */
+    qtest_writeb(qts, base, 0x90);
+    g_assert_cmphex(qtest_readb(qts, base + 0), ==, 0x89);
+    g_assert_cmphex(qtest_readb(qts, base + 1), ==, 0xac);
+
+    /*
+     * Clear Status (0x50) followed by Read Status (0x70) must leave the
+     * WSM-ready bit (0x80) set on an idle part; the firmware treats a part
+     * that reads back "not ready" here as dead.
+     */
+    qtest_writeb(qts, base, 0x50);
+    qtest_writeb(qts, base, 0x70);
+    g_assert_cmphex(qtest_readb(qts, base) & 0x80, ==, 0x80);
+
+    /* Back to Read Array (0xff): the stored content is intact. */
+    qtest_writeb(qts, base, 0xff);
+    g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
+
+    /*
+     * realfw mode aliases the CMD646 register blocks onto the legacy IDE
+     * ports the SDV firmware polls.  With no media the empty primary channel
+     * reports status 0x00 (BSY clear, no drive) at port 0x1f7 -- not the
+     * open-bus 0xff that would hang the firmware's drive detection.
+     */
+    g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE +
+                                ia64_sparse_io_offset(0x1f7)), ==, 0x00);
+
+    /*
+     * realfw mode wires an 8259 PIC for the legacy timer tick, reachable
+     * through the ExtINT interrupt-acknowledge byte in the Processor
+     * Interrupt Block (lsapic base + 0x1e0000).  Initialize the PIC with
+     * vector base 8, as the firmware does; with no IRQ pending the INTA cycle
+     * returns the master's spurious vector (base | 7 = 0x0f), confirming the
+     * ack byte drives the 8259.  The live IRQ-0 -> vector-8 -> ExtINT path is
+     * exercised by booting the real firmware.
+     */
+    {
+        const uint64_t pic_cmd =
+            IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x20);
+        const uint64_t pic_data =
+            IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x21);
+        const uint64_t inta = 0xfefe0000ULL;
+
+        qtest_writeb(qts, pic_cmd, 0x11);   /* ICW1: cascade, ICW4 to follow */
+        qtest_writeb(qts, pic_data, 0x08);  /* ICW2: interrupt vector base 8 */
+        qtest_writeb(qts, pic_data, 0x04);  /* ICW3: slave cascaded on IR2 */
+        qtest_writeb(qts, pic_data, 0x01);  /* ICW4: 8086 mode */
+
+        g_assert_cmphex(qtest_readb(qts, inta), ==, 0x0f);
+    }
+
     qtest_quit(qts);
 
     g_assert_cmpint(g_unlink(path), ==, 0);
@@ -1725,7 +1879,7 @@ static void test_sparse_io_pm_register(void)
                             ia64_sparse_io_offset(port);
     QTestState *qts = ia64_vpc_start(NULL);
 
-    g_assert_cmphex(sparse, ==, 0x000000800010801004ULL);
+    g_assert_cmphex(sparse, ==, 0x00000ffffc801004ULL);
 
     qtest_writew(qts, dense, 0);
     g_assert_cmphex(qtest_readw(qts, sparse) & 1, ==, 0);
@@ -1736,6 +1890,32 @@ static void test_sparse_io_pm_register(void)
 
     qtest_writew(qts, sparse, 0);
     g_assert_cmphex(qtest_readw(qts, dense) & 1, ==, 0);
+    qtest_quit(qts);
+}
+
+static void test_openbus_io_port(void)
+{
+    /*
+     * A legacy I/O port that no device claims floats the bus high: a byte
+     * read returns 0xff, not 0x00.  Real SDV firmware byte-reads a Super I/O
+     * device-ID register at port 0x2f (and the 0x2e index alongside it) and
+     * requires 0xff for an absent chip.  A port a device does answer keeps
+     * returning its own value.  (Sparse I/O maps consecutive ports to
+     * non-consecutive addresses, so only single-port byte reads are probed.)
+     */
+    const uint64_t sio2f = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2f);
+    const uint64_t sio2e = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2e);
+    const uint32_t pm_port = IA64_ACPI_PM_IO_BASE + IA64_ACPI_PM1_CNT_OFFSET;
+    const uint64_t pm = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(pm_port);
+    QTestState *qts = ia64_vpc_start(NULL);
+
+    g_assert_cmphex(qtest_readb(qts, sio2f), ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts, sio2e), ==, 0xff);
+
+    /* A claimed port answers its own value, never the open-bus 0xff. */
+    qtest_writew(qts, pm, 0);
+    g_assert_cmphex(qtest_readb(qts, pm), !=, 0xff);
+
     qtest_quit(qts);
 }
 
@@ -3153,6 +3333,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/cpu/itanium-alias", test_cpu_itanium_alias);
     qtest_add_func("/ia64-vpc/firmware-handoff/i8042-off",
                    test_firmware_handoff_i8042_off);
+    qtest_add_func("/ia64-vpc/firmware-handoff/boot-timeout",
+                   test_firmware_handoff_boot_timeout);
     for (cpus = 1; cpus <= 8; cpus++) {
         g_autofree char *path =
             g_strdup_printf("/ia64-vpc/smp/topology/%u", cpus);
@@ -3203,11 +3385,13 @@ int main(int argc, char **argv)
                    test_iosapic_lowest_priority);
     qtest_add_func("/ia64-vpc/iosapic/edge-rte-write-not-a-request",
                    test_iosapic_edge_rte_write_is_not_a_request);
+    qtest_add_func("/ia64-vpc/sparse-io/openbus", test_openbus_io_port);
     qtest_add_func("/ia64-vpc/sparse-io/pm-register",
                    test_sparse_io_pm_register);
     qtest_add_func("/ia64-vpc/savevm/platform-state",
                    test_savevm_restores_platform_state);
     qtest_add_func("/ia64-vpc/agp/gxb", test_agp_gxb);
+    qtest_add_func("/ia64-vpc/realfw/flash-window", test_realfw_flash_window);
     qtest_add_func("/ia64-vpc/agp/off", test_agp_off);
     qtest_add_func("/ia64-vpc/ati/config-ids", test_ati_config_ids);
     qtest_add_func("/ia64-vpc/ati/pll-regfile", test_ati_pll_regfile);

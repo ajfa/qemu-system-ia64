@@ -73,7 +73,7 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 // the HAL port-range handles ((RangeId << 16) | port) from
                 // exactly these fields; Linux fills io_space[] from them.
                 QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                    EntireRange, 0, 0, 0x0000FFFF, 0x800010000000,
+                    EntireRange, 0, 0, 0x0000FFFF, 0xFFFFC000000,
                     0x00010000, , , , TypeTranslation, SparseTranslation)
                 // The legacy VGA aperture is decoded to the PCI bus and must
                 // be declared, or the root bridge claims no producer window

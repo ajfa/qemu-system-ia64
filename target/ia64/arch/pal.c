@@ -478,11 +478,22 @@ static void pal_copy_info(CPUIA64State *env)
 
 static void pal_copy_pal(CPUIA64State *env)
 {
+    /*
+     * The relocated PAL procedure entry: break.m 0x100000 ;; br.many b0.
+     * This must match roms/ia64-firmware/entry.S pal_proc_entry byte for
+     * byte.  The return branch is br.many (a plain branch, no register-stack
+     * pop), NOT br.ret: the PAL static-procedure convention runs in the
+     * caller's frame without an alloc, so the caller reaches PAL_PROC by a
+     * plain branch with the return address in b0.  A br.ret here would pop a
+     * frame that was never pushed and corrupt the caller's stacked
+     * registers (observed with real SDV firmware, which branches to the
+     * relocated entry via br.few; see plans/phase5-real-firmware-boot.md).
+     */
     static const uint64_t pal_proc_words[] = {
         0x000002000000000aULL,
         0x0004000000000200ULL,
-        0x0000000100000010ULL,
-        0x0084000080000200ULL,
+        0x0000000100000011ULL,
+        0x0080000800000200ULL,
     };
     uint64_t target_addr = pal_stacked_arg(env, 0);
     uint64_t alloc_size = pal_stacked_arg(env, 1);
@@ -848,13 +859,22 @@ static void pal_mc_resume(CPUIA64State *env)
 static void pal_mc_register_mem(CPUIA64State *env)
 {
     uint64_t address = env->gr[IA64_PAL_GR_ARG1];
+    /*
+     * The min-state save area must be uncacheable (SDM Vol.2 sec 11.3.2.3,
+     * PAL_MC_REGISTER_MEM), so firmware passes its physical address with
+     * bit 63 - the uncacheable memory-attribute bit - set, exactly as it
+     * does for PAL_COPY_PAL.  Mask that attribute off before checking the
+     * 512-byte alignment; rejecting a bit-63-set address is wrong and
+     * real SDV firmware fatal-spins on the INVALID_ARGUMENT status.
+     */
+    uint64_t pa = address & ~PAL_COPY_TARGET_CACHE_ATTR;
 
-    if ((address >> 63) != 0 || (address & 0x1ff) != 0 ||
+    if ((pa & 0x1ff) != 0 ||
         env->gr[IA64_PAL_GR_ARG2] != 0 || env->gr[IA64_PAL_GR_ARG3] != 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->pal.pal_mc_save_addr = address;
+        env->pal.pal_mc_save_addr = pa;
     }
     env->gr[IA64_PAL_GR_RESULT1] = 0;
     env->gr[IA64_PAL_GR_RESULT2] = 0;
@@ -1247,8 +1267,8 @@ static void pal_perf_mon_info(CPUIA64State *env, uintptr_t ra)
 
 static bool pal_addr_overlaps_fw_update(uint64_t address, uint64_t alignment)
 {
-    uint64_t fw_base = 0xff000000ULL;
-    uint64_t fw_limit = 0x100000000ULL;
+    uint64_t fw_base = IA64_FW_ADDRESS_SPACE_BASE;
+    uint64_t fw_limit = IA64_FW_ADDRESS_SPACE_END;
     uint64_t block_end;
 
     if (address >= fw_limit) {

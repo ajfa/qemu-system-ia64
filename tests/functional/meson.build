@@ -136,6 +136,11 @@ foreach speed : ['quick', 'thorough']
            protocol: 'tap',
            timeout: time_out,
            priority: time_out,
+           # The IA-64 functional tests each boot the full firmware under
+           # single-threaded TCG and interact over the serial console; running
+           # several concurrently overloads the host, which drops serial bytes
+           # and makes the timed boots race.  Run them one at a time.
+           is_parallel: target_base != 'ia64',
            suite: suites)
     endforeach
   endforeach

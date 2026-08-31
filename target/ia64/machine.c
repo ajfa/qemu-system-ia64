@@ -165,6 +165,11 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
         return -EINVAL;
     }
 
+    if (env->fw_image_base == 0) {
+        /* Pre-v2 snapshot: the image always ran at the 1 MB link home. */
+        env->fw_image_base = IA64_FW_IDENTITY_BASE;
+    }
+
     memset(env->mmu.tlb_data_micro, 0,
            sizeof(env->mmu.tlb_data_micro));
     memset(env->mmu.tlb_inst_micro, 0,
@@ -199,7 +204,7 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_ia64_cpu = {
     .name = "cpu",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .pre_save = ia64_cpu_pre_save,
     .post_load = ia64_cpu_post_load,
@@ -260,6 +265,7 @@ const VMStateDescription vmstate_ia64_cpu = {
         VMSTATE_UINT16(env.mmu.pending_purge_data_count, IA64CPU),
         VMSTATE_UINT16(env.mmu.pending_purge_inst_count, IA64CPU),
         VMSTATE_UINT64(env.mmu.region7_directmap_limit, IA64CPU),
+        VMSTATE_UINT64_V(env.fw_image_base, IA64CPU, 2),
 
         /* Local SAPIC and interval timer. */
         VMSTATE_UINT8(env.interrupt.pending_extint, IA64CPU),

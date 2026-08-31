@@ -162,10 +162,15 @@
  * from the EfiRuntimeServicesCode descriptor containing the SST SalProc
  * address, so the stubs live in runtime-services code, not the PAL page.
  */
+#define IA64_FW_SAL_RUNTIME_ENTRY_OFF  0x2000
+#define IA64_FW_SAL_RUNTIME_RETURN_OFF 0x2020
+#define IA64_FW_SAL_DISPATCH_BLOCK_OFF 0x2040
+#define IA64_FW_PAL_PROC_ENTRY_OFF     0x60
 #define IA64_FW_SAL_RUNTIME_ENTRY_PA  (IA64_FW_IDENTITY_BASE + 0x2000)
 #define IA64_FW_SAL_RUNTIME_RETURN_PA (IA64_FW_IDENTITY_BASE + 0x2020)
 #define IA64_FW_SAL_DISPATCH_BLOCK_PA (IA64_FW_IDENTITY_BASE + 0x2040)
-#define IA64_FIRMWARE_IVT_BASE 0x10000ULL
+/* The firmware IVT sits inside the image at IA64_FW_IVT_OFFSET. */
+#define IA64_FIRMWARE_IVT_BASE (IA64_FW_IDENTITY_BASE + IA64_FW_IVT_OFFSET)
 #define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
 /*
  * IA-64 OS loaders alias physical memory through region 7 with a fixed
@@ -193,9 +198,11 @@
  * boot-identity fallback below, not this persistent alias.
  */
 #define IA64_FW_REGION7_DIRECTMAP_SIZE 0x0000000020000000ULL
-#define IA64_LOCAL_SAPIC_PA   0x00000000fee00000ULL
-#define IA64_LOCAL_SAPIC_SIZE 0x00200000ULL
-#define IA64_PAL_IO_BLOCK_PA  0x000080000c000000ULL
+#define IA64_LOCAL_SAPIC_PA   IA64_LOCAL_SAPIC_BASE
+/* The architected I/O block: top 64 MB of the 44-bit PA space.  Matches the
+ * machine's IA64_PCI_IO_BASE so PAL_PLATFORM_ADDR agrees with the EFI
+ * EfiMemoryMappedIOPortSpace descriptor (rework D6/D10). */
+#define IA64_PAL_IO_BLOCK_PA  0x00000ffffc000000ULL
 
 #define IA64_SAPIC_LID_ID_SHIFT   24
 #define IA64_SAPIC_LID_EID_SHIFT  16
@@ -217,24 +224,22 @@ static inline uint32_t ia64_rr_rid(uint64_t rr)
     return (rr & IA64_RR_RID_MASK) >> IA64_RR_RID_SHIFT;
 }
 
-static inline bool ia64_firmware_owns_iva(uint64_t iva)
+static inline bool ia64_firmware_owns_iva(uint64_t fw_base, uint64_t iva)
 {
-    return iva == 0 || iva == IA64_FIRMWARE_IVT_BASE;
+    return iva == 0 || iva == fw_base + IA64_FW_IVT_OFFSET;
 }
 
-static inline bool ia64_firmware_identity_pa(uint64_t iva, uint64_t ip,
-                                             uint64_t psr, uint64_t va,
-                                             uint64_t *pa)
+static inline bool ia64_firmware_identity_pa(uint64_t fw_base, uint64_t iva,
+                                             uint64_t ip, uint64_t psr,
+                                             uint64_t va, uint64_t *pa)
 {
     bool firmware_context =
         (psr & IA64_PSR_CPL_MASK) == 0 &&
-        (ia64_firmware_owns_iva(iva) ||
-         (ip >= IA64_FW_IDENTITY_BASE &&
-          ip < IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE));
+        (ia64_firmware_owns_iva(fw_base, iva) ||
+         (ip >= fw_base && ip < fw_base + IA64_FW_IDENTITY_SIZE));
 
     if (firmware_context &&
-        va >= IA64_FW_IDENTITY_BASE &&
-        va < IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE) {
+        va >= fw_base && va < fw_base + IA64_FW_IDENTITY_SIZE) {
         *pa = va;
         return true;
     }
@@ -536,6 +541,18 @@ typedef enum IA64PalGeneralRegisterIndex {
     IA64_PAL_GR_ARG2 = 30,
     IA64_PAL_GR_ARG3 = 31,
 } IA64PalGeneralRegisterIndex;
+
+/*
+ * PALE_RESET exit state registers seen by SALE_ENTRY (SDM Vol.2 rev 1.1
+ * sec 11.2.2): the first stacked registers carry the hand-off values.
+ */
+typedef enum IA64SaleEntryRegisterIndex {
+    IA64_SALE_GR_FROM_PAL = 32,   /* 0 = entered from PALE_RESET */
+    IA64_SALE_GR_PROC_ID = 33,    /* geographically significant id */
+    IA64_SALE_GR_PAL_PROC = 34,   /* PAL procedure call address */
+    IA64_SALE_GR_SELF_TEST = 35,  /* self-test state parameter */
+    IA64_SALE_GR_PAL_RETURN = 36, /* PAL return / auth proc address */
+} IA64SaleEntryRegisterIndex;
 
 typedef enum IA64FirmwareDebugRegisterIndex {
     IA64_FW_DEBUG_GR_HANDLER = 16,
@@ -1019,6 +1036,17 @@ typedef struct CPUArchState {
     uint8_t impl_rid_bits;
     uint8_t impl_key_bits;
 
+    /*
+     * Physical base the firmware image executes from, seeded at reset from
+     * the machine (default IA64_FW_IDENTITY_BASE = the historical 1 MB link
+     * address).  The identity window, the SAL runtime stub trio and the PAL
+     * entry are all fixed link-layout offsets from it; phase 2.2 of the
+     * firmware rework relocates the image to the top of low RAM, where this
+     * becomes a function of RAM size.  Constant for the life of a boot, so
+     * translate-time use is safe.
+     */
+    uint64_t fw_image_base;
+
 } CPUIA64State;
 
 static inline bool ia64_pa_is_implemented(const CPUIA64State *env,
@@ -1340,7 +1368,7 @@ static inline uint64_t ia64_region_itir(const CPUIA64State *env, uint64_t va)
 
 static inline bool ia64_sal_boot_environment_active(const CPUIA64State *env)
 {
-    return env->cr_iva == IA64_FIRMWARE_IVT_BASE &&
+    return env->cr_iva == env->fw_image_base + IA64_FW_IVT_OFFSET &&
            (env->psr & IA64_PSR_IC) != 0;
 }
 
@@ -1562,6 +1590,7 @@ void ia64_rse_delivery_check(CPUIA64State *env, int excp);
 
 CPUState *ia64_cpu_by_sapic_id(uint8_t id, uint8_t eid);
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector);
+void ia64_sapic_set_extint(CPUState *cs, int level);
 void ia64_sapic_update_interrupt(CPUIA64State *env);
 bool ia64_sapic_has_pending(CPUIA64State *env);
 int  ia64_sapic_accept(CPUIA64State *env);
@@ -1615,6 +1644,20 @@ typedef struct IA64BootInfo {
      */
     uint64_t fw_cpu_assist_base;
     bool powered_off;
+    /*
+     * Real-firmware entry (machine realfw mode): instead of the project
+     * firmware's synthetic entry state, enter at firmware_entry with the
+     * architected PALE_RESET exit state for a healthy normal cold boot
+     * (SDM Vol.2 rev 1.1 sec 11.2.2): GR20 = SALE_ENTRY state parameter
+     * (function RESET = 0), GR32 = 0 (entered from PALE_RESET),
+     * GR33 = geographic processor id, GR34 = PAL_PROC call address,
+     * GR35 = self-test state (0 = healthy), GR36 = PAL auth proc address,
+     * CFM.sof = 96, AR.RSC = 0, PSR = {bn=1}, DCR = 0.
+     */
+    bool raw_entry;
+    uint64_t raw_proc_id;   /* GR33 */
+    uint64_t raw_pal_proc;  /* GR34 */
+    uint64_t raw_pal_auth;  /* GR36 */
 } IA64BootInfo;
 
 struct ArchCPU {
@@ -1626,6 +1669,8 @@ struct ArchCPU {
     bool boot_info_valid;
     bool boot_info_pending;
     bool alat_full;
+    /* Machine-set firmware execution base; 0 = IA64_FW_IDENTITY_BASE. */
+    uint64_t fw_image_base;
     uint32_t socket_id;
     uint32_t core_id;
     uint32_t thread_id;

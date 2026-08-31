@@ -157,7 +157,8 @@ void ia64_trace_interruption(CPUIA64State *env, uint32_t excp,
          * paging.  is=1 marks an IA-32-mode access.
          */
         static uint64_t seen[2048];
-        uint64_t page = env->cr_ifa & ~0xfffULL;
+        unsigned ps = (env->cr_itir >> IA64_ITIR_PS_SHIFT) & 0x3f;
+        uint64_t page = env->cr_ifa & ~((1ULL << (ps < 12 ? 12 : ps)) - 1);
         uint64_t key = env->cr_iip ^ (page << 1);
         unsigned h = (key >> 4) & (ARRAY_SIZE(seen) - 1);
 
@@ -175,18 +176,23 @@ void ia64_trace_interruption(CPUIA64State *env, uint32_t excp,
 
     if ((ia64_trace_fault_classes >> excp) & 1) {
         /*
-         * Collapse an unbroken run of the identical fault.  A guest (or the
-         * firmware) that wedges re-taking one fault would otherwise emit
-         * millions of identical lines and fill the host disk - the firmware's
-         * own break.m 0x12345 debug-support probe does exactly that on an
-         * idle EFI-shell boot.  Only *consecutive* repeats are folded, so
-         * every distinct fault site is still reported, and the run length is
-         * printed when the run ends so a re-fault storm stays measurable.
+         * Bound the log for a fault that repeats, with two complementary
+         * folds.  First, an unbroken run of the identical fault is collapsed
+         * to one line plus a "repeated N times" count when the run ends, so a
+         * wedged guest or the firmware's break.m 0x12345 debug probe stays
+         * measurable rather than emitting millions of lines that fill the host
+         * disk.  Second, a per-(iip,iim,excp) seen[] table then folds a fault
+         * site that recurs *interleaved* with others - e.g. Linux's per-syscall
+         * break 0x100000, which is never consecutive and so slips past the run
+         * fold on its own.  Every distinct fault site is still reported on its
+         * first occurrence.
          */
         static uint64_t last_key;
         static uint64_t run_length;
+        static uint64_t seen[2048];
         uint64_t key = env->cr_iip ^ (env->cr_iim << 1) ^
                        ((uint64_t)excp << 56);
+        unsigned h = (key >> 4) & (ARRAY_SIZE(seen) - 1);
 
         if (key == last_key) {
             run_length++;
@@ -198,6 +204,10 @@ void ia64_trace_interruption(CPUIA64State *env, uint32_t excp,
             run_length = 0;
         }
         last_key = key;
+        if (seen[h] == key) {
+            return;
+        }
+        seen[h] = key;
 
         qemu_log("IA64-FAULT excp=%u vector=0x%04" PRIx64
                  " cpl=%u iip=0x%016" PRIx64 " iipa=0x%016" PRIx64

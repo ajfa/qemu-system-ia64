@@ -18,7 +18,9 @@
 #include "qemu/cutils.h"
 #include "qemu/datadir.h"
 #include "qemu/error-report.h"
+#include "qemu/log.h"
 #include "qemu/timer.h"
+#include "qapi/visitor.h"
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
 #include "hw/core/qdev-properties.h"
@@ -28,6 +30,10 @@
 #include "hw/display/vga_regs.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
+#include "hw/block/flash.h"
+#include "system/block-backend.h"
+#include "block/block.h"
+#include "qobject/qdict.h"
 #include "hw/ide/ahci-pci.h"
 #include "hw/ide/ide-dev.h"
 #include "hw/ide/pci.h"
@@ -35,8 +41,13 @@
 #include "hw/acpi/acpi.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_bus.h"
+#include "hw/pci/pci_device.h"
+#include "hw/pci/pci_host.h"
 #include "net/net.h"
 #include "hw/isa/isa.h"
+#include "hw/rtc/mc146818rtc.h"
+#include "hw/intc/i8259.h"
+#include "hw/timer/i8254.h"
 #include "hw/usb/hcd-uhci.h"
 #include "hw/usb/usb.h"
 #include "hw/ia64/ia64_loader.h"
@@ -53,6 +64,8 @@
 #include "target/ia64/cpu-qom.h"
 #include "target/ia64/cpu.h"
 
+/* The firmware's 1 MB link base; it executes from the RAM-top shadow. */
+#define IA64_FW_LINK_BASE 0x0000000000100000ULL
 #define IA64_FW_BASE    0x0000000000100000ULL
 /*
  * Firmware image loaded when no -bios is given.  It is installed beside the
@@ -66,27 +79,72 @@
  * is no DRAM island between the aperture and the chipset/SAPIC region.
  */
 #define IA64_LOW_RAM_LIMIT IA64_PCI_MMIO_BASE
-#define IA64_FIRMWARE_ADDRESS_SPACE_BASE 0x00000000ff000000ULL
-#define IA64_FIRMWARE_ADDRESS_SPACE_SIZE (16 * MiB)
-#define IA64_RTC_BASE 0x00000000ffef0000ULL
-#define IA64_RTC_SIZE (8 * KiB)
-#define IA64_WATCHDOG_BASE 0x00000000ffee0000ULL
-#define IA64_WATCHDOG_SIZE (4 * KiB)
-#define IA64_WATCHDOG_TIMEOUT 0x00
-#define IA64_WATCHDOG_CODE    0x08
-#define IA64_NVRAM_BASE 0x00000000fff00000ULL
-#define IA64_NVRAM_SIZE (64 * KiB)
-#define IA64_NVRAM_COMMIT_OFFSET (IA64_NVRAM_SIZE - 8)
-#define IA64_NVRAM_COMMIT_MAGIC 0x54494d4d4f43564eULL /* "NVCOMMIT" */
-#define IA64_HIGH_RAM_AFTER_FIRMWARE_BASE \
-    (IA64_FIRMWARE_ADDRESS_SPACE_BASE + IA64_FIRMWARE_ADDRESS_SPACE_SIZE)
-#define IA64_IVT_BASE   0x10000ULL
-#define IA64_IVT_SIZE   0x8000ULL
+/*
+ * The firmware address space, RTC/watchdog/NVRAM devices, IVT, IOSAPIC,
+ * local SAPIC and ACPI PM block addresses are shared with the firmware via
+ * hw/ia64/ia64_vpc_abi.h.
+ */
+#define IA64_FIRMWARE_ADDRESS_SPACE_BASE IA64_FW_ADDRESS_SPACE_BASE
+#define IA64_FIRMWARE_ADDRESS_SPACE_SIZE IA64_FW_ADDRESS_SPACE_SIZE
+
+/*
+ * Real-firmware (realfw) mode: a vendor flash image mapped so that it ends
+ * exactly at 4 GiB, with the architected reset pointer block in its last
+ * 48 bytes (SAL sec 2.5): 4 GiB-48 = PAL_A FIT entry, -32 = FIT pointer,
+ * -24 = SALE_ENTRY pointer.  See plans/phase5-real-firmware-boot.md.
+ */
+#define IA64_REALFW_WINDOW_END    IA64_U64(0x0000000100000000)
+#define IA64_REALFW_MAX_SIZE      IA64_U64(0x0000000000400000)
+/*
+ * PAL procedure entry handed to real SAL in GR34/GR36 (and recognized via
+ * env->pal.pal_proc_copy_addr): a stub in the firmware address-space RAM,
+ * below the flash window and clear of the watchdog/handoff pages.
+ */
+#define IA64_REALFW_PAL_STUB_BASE IA64_U64(0x00000000ff100000)
+/*
+ * Capture IVT (realfw mode): a 32 KiB-aligned interruption vector table
+ * whose every bundle is a branch-to-self, planted in firmware scratch RAM
+ * and pointed to by cr.iva in the synthesized SALE_ENTRY entry state.  Real
+ * PAL provides an IVT before entering SAL (SDM 11.2.2); we skip PAL, so
+ * without this any firmware fault would vector to physical 0 (no handler)
+ * and, under the bare-loader ic=0/iva=0 rule, storm.  With it, a fatal fault
+ * instead freezes at IVT_BASE + vector with all GRs, the RSE frame, ISR and
+ * IIPA preserved - the fault class is the offset from IVT_BASE, and the
+ * interrupted state is inspectable via the monitor.  See
+ * plans/phase5-real-firmware-boot.md.
+ */
+#define IA64_REALFW_IVT_BASE      IA64_U64(0x00000000ff300000)
+#define IA64_REALFW_IVT_SIZE      0x8000
+/*
+ * 460GX chipset CSR scratch below the IOAPIC window.  SAL_B's first act
+ * after PAL_PROC_GET_FEATURES is a BSP-arbitration handshake here: clear
+ * bit 7 at +0xCB0, poll +0xCC0 until bit 7 sets, then compare the low
+ * 7 bits with LID.id (bios130.BIN @ 0xffe76700..0xffe76790).  Model the
+ * grant register as always-granted-to-id-0; everything else in the page
+ * is write-store/read-back scratch, logged for the stage-1 inventory.
+ */
+#define IA64_REALFW_SAC_BASE      IA64_U64(0x00000000feb00000)
+#define IA64_REALFW_SAC_SIZE      0x10000
+#define IA64_REALFW_SAC_BOOT_SEM  0xcc0
+#define IA64_REALFW_PTR_FIT       (IA64_REALFW_WINDOW_END - 32)
+#define IA64_REALFW_PTR_SALE      (IA64_REALFW_WINDOW_END - 24)
+/* Bit 63 in firmware pointers is the uncacheable-attribute flag, not
+ * part of the physical address (SAL sec 2.5). */
+#define IA64_REALFW_PTR_ADDR_MASK (~(IA64_U64(1) << 63))
+#define IA64_HIGH_RAM_AFTER_FIRMWARE_BASE IA64_FW_ADDRESS_SPACE_END
 #define IA64_AHCI_IDP_IO_BASE   0x0000c100U
 #define IA64_UHCI_IO_BASE       0x0000c120U
 /* LSI BAR0 is 0x100 bytes and therefore requires 0x100-byte alignment. */
 #define IA64_LSI_IO_BASE        0x0000c200U
 #define IA64_VGA_IO_BASE        0x0000c300U
+/*
+ * The vendor ATI Rage 128 vgabios hardcodes its register I/O base at 0xD800 and
+ * only falls back to a port-space scan if a signature probe there fails, so in
+ * realfw mode the card's I/O BAR must live at 0xD800 for the BIOS's register
+ * accesses (MM_INDEX/DATA, the PLL file) to reach the device.  Guests read the
+ * BAR from config space, so they use the layout-fixed IA64_VGA_IO_BASE.
+ */
+#define IA64_VGA_IO_BASE_REALFW 0x0000d800U
 #define IA64_E1000_IO_BASE      0x0000c400U
 #define IA64_OHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define IA64_AHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00020000ULL)
@@ -107,6 +165,19 @@
 #define IA64_VGA_FB_PCI_BASE    (IA64_PCI_MMIO_BASE + 0x02000000ULL)
 #define IA64_VGA_MMIO_PCI_BASE  (IA64_PCI_MMIO_BASE + 0x07000000ULL)
 #define IA64_VGA_ROM_PCI_BASE   (IA64_PCI_MMIO_BASE + 0x08000000ULL)
+/*
+ * The NVIDIA NV15GL (vga=nv15gl) uses a different, larger BAR layout than the
+ * ATI adapters: BAR0 is a 16 MiB MMIO register aperture and BAR1 is a 128 MiB
+ * prefetchable framebuffer aperture.  Its 128 MiB FB does not fit the ATI
+ * fixed-window spacing, so it gets its own naturally aligned bases inside the
+ * PCI0 MMIO window [0xEE000000, 0xFE000000): FB at 0xF0000000 (128 MiB,
+ * shared with the firmware's fixed FB address), MMIO at 0xF8000000 (16 MiB),
+ * expansion ROM at 0xF9000000.
+ */
+#define IA64_NV_FB_PCI_BASE     (IA64_PCI_MMIO_BASE + 0x02000000ULL)
+#define IA64_NV_MMIO_PCI_BASE   (IA64_PCI_MMIO_BASE + 0x0A000000ULL)
+#define IA64_NV_ROM_PCI_BASE    (IA64_PCI_MMIO_BASE + 0x0B000000ULL)
+#define IA64_NV_VENDOR_ID       0x10deU
 #define IA64_VGA_LEGACY_BASE   0x000a0000U
 #define IA64_VGA_LEGACY_SIZE   0x00020000U
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -162,21 +233,8 @@
 #define IA64_ATI_PLL_MIN_FREQ     12500U
 #define IA64_ATI_PLL_MAX_FREQ     40000U
 #endif
-/*
- * IOSAPIC at the 460GX/i2000 SDV address (SAPIC/IOAPIC message block just
- * below the local SAPIC at 0xFEE00000), inside the fixed chipset region above
- * the PCI aperture.  Keeping it here -- rather than the old 2 GiB parking spot
- * -- leaves low DRAM contiguous all the way to the aperture.
- */
-#define IA64_IOSAPIC_BASE       0x00000000fec00000ULL
-#define IA64_IOSAPIC_SIZE       0x0000000000002000ULL
-#define IA64_ACPI_PM_IO_BASE    0x00002000U
-#define IA64_ACPI_PM_IO_SIZE    0x00000010U
 #define IA64_LEGACY_COM1_IO_BASE 0x000003f8U
 #define IA64_LEGACY_COM1_IO_SIZE 0x00000008U
-#define IA64_ACPI_PM_RESET_OFFSET 0x0000000cU
-#define IA64_ACPI_PM_RESET_VALUE  0x01U
-#define IA64_ACPI_SCI_IRQ       9
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
@@ -398,11 +456,41 @@ struct IA64VpcMachineState {
 
     bool i8042_enabled;
     bool ahci_enabled;
+    bool fw_relocate;
+    uint64_t fw_map_quirk_disable;
     bool ide_enabled;
     bool firmware_ide_dma;
     bool agp_enabled;
     uint64_t firmware_console;
+    uint16_t firmware_boot_timeout;
     char *nvram_path;
+    char *realfw_path;
+    char *realfw_vga_rom_path;
+    char *realfw_nvram_path;
+    uint64_t realfw_entry;
+    uint64_t realfw_base;
+    PFlashCFI01 *realfw_flash;
+    MemoryRegion realfw_post_io;
+    MemoryRegion realfw_sac_mmio;
+    MemoryRegion realfw_cfg_io;
+    MemoryRegion realfw_ide_data[2];
+    MemoryRegion realfw_ide_cmd[2];
+    MemoryRegion realfw_rtc_ext_alias;
+    MemoryRegion realfw_smbus_io;
+    MemoryRegion realfw_port61_io;
+    qemu_irq realfw_extint;
+    uint8_t *realfw_sac_data;
+    uint16_t realfw_post_last;
+    uint32_t realfw_config_address;
+    /*
+     * Persistent CPU-frequency mailbox (south bridge 00:03.0 reg 0xd0), NOT
+     * cleared by ia64_vpc_reset so the firmware's one-time "New CPU frequency
+     * is set" write survives its CF9 reboot.  See ia64_realfw_cfg_read.
+     */
+    uint32_t realfw_freq_mailbox;
+    /* 460GX chipset config space: bus CBN devices, 8 fns x 256 bytes. */
+    uint8_t *realfw_chipset_cfg;
+    PCIBus *realfw_pci_bus;
     char *vga_model;
     bool alat_full;
 
@@ -423,7 +511,6 @@ struct IA64VpcMachineState {
     MemoryRegion *vga_legacy_alias;
     MemoryRegion *lsapic_mmio;
     MemoryRegion firmware_space;
-    MemoryRegion rtc_mmio;
     MemoryRegion watchdog_mmio;
     MemoryRegion nvram_mmio;
     MemoryRegion acpi_pm;
@@ -459,6 +546,13 @@ struct IA64VpcMachineState {
     Notifier done_notifier;
     bool vmstate_registered;
 };
+
+static uint64_t ia64_vpc_fw_base(IA64VpcMachineState *s, uint64_t ram_size)
+{
+    return s->fw_relocate ? IA64_FW_IMAGE_BASE_FOR(ram_size)
+                          : IA64_FW_LINK_BASE;
+}
+
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
 static const IA64VbeMode *ia64_vbe_find_mode(uint16_t number)
@@ -1429,6 +1523,115 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
                               sizeof(vector));
 }
 
+/*
+ * Real-firmware video-ROM shadow.  The synthetic INT10 ROM above is a passive
+ * 2 KiB image for Windows guests, which read the video BIOS through the PCI ROM
+ * BAR (VideoPortGetRomImage).  The vendor SDV firmware instead POSTs the video
+ * card's option ROM the legacy PC-AT way: shadow it to 0xC0000 and call
+ * C000:0003.  Its shadow copy reads through the ROM BAR, and our ROM-BAR model
+ * is not faithful enough for that read to capture the whole image -- only the
+ * header lands, so the option ROM's entry jump (e.g. std vgabios `jmp 0x55C3`)
+ * runs the CPU into empty shadow and hangs POST at ~0xc6.
+ *
+ * Place a complete option ROM at the 0xC0000 shadow directly so the firmware
+ * finds a whole, valid option ROM to POST in place.  This is the realfw analogue
+ * of install_int10 (the synthetic stub is skipped in realfw).  The ROM is the
+ * emulated card's own expansion ROM by default, or -- when realfw-vga-rom= names
+ * a file -- an authentic vendor card BIOS (e.g. the ATI Rage 128 Pro the SDV
+ * shipped with), so the firmware POSTs the real BIOS for accurate emulation.
+ */
+static void ia64_vpc_install_realfw_video_rom(IA64VpcMachineState *s)
+{
+    PCIDevice *pci_dev = s->vga_dev;
+    g_autofree uint8_t *file_rom = NULL;
+    const uint8_t *rom = NULL;
+    uint64_t rom_size = 0;
+    uint32_t declared;
+
+    if (s->realfw_vga_rom_path != NULL) {
+        GError *gerr = NULL;
+        gsize len = 0;
+
+        if (!g_file_get_contents(s->realfw_vga_rom_path, (gchar **)&file_rom,
+                                 &len, &gerr)) {
+            warn_report("realfw-vga-rom '%s': %s (falling back to card ROM)",
+                        s->realfw_vga_rom_path, gerr->message);
+            g_error_free(gerr);
+        } else {
+            rom = file_rom;
+            rom_size = len;
+        }
+    }
+    if (file_rom == NULL) {
+        if (pci_dev == NULL ||
+            pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
+            return;
+        }
+        rom = memory_region_get_ram_ptr(&pci_dev->rom);
+        rom_size = memory_region_size(&pci_dev->rom);
+    }
+    if (rom == NULL || rom_size < 0x400 || rom[0] != 0x55 || rom[1] != 0xaa) {
+        return;
+    }
+    declared = (uint32_t)rom[2] * 512U;
+    if (declared == 0 || declared > rom_size) {
+        declared = rom_size;
+    }
+    /* The legacy video-ROM window is C0000h-CFFFFh (64 KiB). */
+    if (declared > 0x10000) {
+        declared = 0x10000;
+    }
+    cpu_physical_memory_write(IA64_INT10_ROM_BASE, rom, declared);
+}
+
+/*
+ * When realfw-vga-rom= supplies an authentic card BIOS, load it into the video
+ * device's own expansion ROM as well as the 0xC0000 shadow.  The vendor firmware
+ * re-shadows the option ROM's header from the PCI ROM BAR during POST; if the BAR
+ * still held the emulated card's stock vgabios, that header's entry jump (a
+ * different offset) would be laid over the real BIOS body already shadowed at
+ * 0xC0000, and the CPU would jump into the wrong image and run away.  Keeping the
+ * BAR and the shadow the same image keeps the re-shadow consistent.  Called
+ * before configure_vga() so the ATI table / checksum fixups act on this image.
+ */
+static void ia64_vpc_load_realfw_device_rom(IA64VpcMachineState *s)
+{
+    PCIDevice *pci_dev = s->vga_dev;
+    g_autofree uint8_t *file_rom = NULL;
+    GError *gerr = NULL;
+    gsize len = 0;
+    uint8_t *rom;
+    uint64_t rom_size;
+
+    if (s->realfw_path == NULL || s->realfw_vga_rom_path == NULL ||
+        pci_dev == NULL ||
+        pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
+        return;
+    }
+    if (!g_file_get_contents(s->realfw_vga_rom_path, (gchar **)&file_rom,
+                             &len, &gerr)) {
+        warn_report("realfw-vga-rom '%s': %s", s->realfw_vga_rom_path,
+                    gerr->message);
+        g_error_free(gerr);
+        return;
+    }
+    if (len < 0x400 || file_rom[0] != 0x55 || file_rom[1] != 0xaa) {
+        warn_report("realfw-vga-rom '%s': not a 55AA option ROM",
+                    s->realfw_vga_rom_path);
+        return;
+    }
+    rom = memory_region_get_ram_ptr(&pci_dev->rom);
+    rom_size = memory_region_size(&pci_dev->rom);
+    if (rom == NULL || rom_size == 0) {
+        return;
+    }
+    if (len > rom_size) {
+        len = rom_size;
+    }
+    memset(rom, 0, rom_size);
+    memcpy(rom, file_rom, len);
+}
+
 static void ia64_vpc_reset_int10(IA64VpcMachineState *s)
 {
     memset(&s->int10_request, 0, sizeof(s->int10_request));
@@ -1454,58 +1657,6 @@ static void ia64_vpc_init_int10(IA64VpcMachineState *s,
 }
 #endif
 
-static uint64_t ia64_vpc_rtc_read(void *opaque, hwaddr addr, unsigned size)
-{
-    struct tm tm;
-
-    (void)opaque;
-    if (addr != 0 || size != sizeof(uint64_t)) {
-        return 0;
-    }
-
-    /*
-     * Expose the QEMU-configured RTC as seconds since the Unix epoch.  A
-     * single aligned 64-bit read is intrinsically coherent, unlike a bank of
-     * calendar registers whose fields could straddle a second boundary.
-     */
-    qemu_get_timedate(&tm, 0);
-    return mktimegm(&tm);
-}
-
-static void ia64_vpc_rtc_write(void *opaque, hwaddr addr, uint64_t value,
-                               unsigned size)
-{
-    /* The platform RTC is a read-only seconds-since-epoch register. */
-    (void)opaque;
-    (void)addr;
-    (void)value;
-    (void)size;
-}
-
-static const MemoryRegionOps ia64_vpc_rtc_ops = {
-    .read = ia64_vpc_rtc_read,
-    .write = ia64_vpc_rtc_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = {
-        .min_access_size = 8,
-        .max_access_size = 8,
-        .unaligned = false,
-    },
-    .impl = {
-        .min_access_size = 8,
-        .max_access_size = 8,
-        .unaligned = false,
-    },
-};
-
-static void ia64_vpc_init_rtc(IA64VpcMachineState *s)
-{
-    memory_region_init_io(&s->rtc_mmio, OBJECT(s),
-                          &ia64_vpc_rtc_ops, s, "ia64-vpc.rtc",
-                          IA64_RTC_SIZE);
-    memory_region_add_subregion_overlap(get_system_memory(), IA64_RTC_BASE,
-                                        &s->rtc_mmio, 2);
-}
 
 static void ia64_vpc_watchdog_expired(void *opaque)
 {
@@ -1525,9 +1676,9 @@ static uint64_t ia64_vpc_watchdog_read(void *opaque, hwaddr addr,
     (void)size;
 
     switch (addr) {
-    case IA64_WATCHDOG_TIMEOUT:
+    case IA64_WATCHDOG_TIMEOUT_OFFSET:
         return s->watchdog_timeout;
-    case IA64_WATCHDOG_CODE:
+    case IA64_WATCHDOG_CODE_OFFSET:
         return s->watchdog_code;
     default:
         return 0;
@@ -1546,10 +1697,10 @@ static void ia64_vpc_watchdog_write(void *opaque, hwaddr addr,
     }
 
     switch (addr) {
-    case IA64_WATCHDOG_CODE:
+    case IA64_WATCHDOG_CODE_OFFSET:
         s->watchdog_code = value;
         break;
-    case IA64_WATCHDOG_TIMEOUT:
+    case IA64_WATCHDOG_TIMEOUT_OFFSET:
         s->watchdog_timeout = value;
         timer_del(s->watchdog_timer);
         if (value == 0) {
@@ -1605,6 +1756,65 @@ static void ia64_vpc_init_watchdog(IA64VpcMachineState *s)
                                         IA64_WATCHDOG_BASE,
                                         &s->watchdog_mmio, 2);
     qemu_register_reset(ia64_vpc_watchdog_reset, s);
+}
+
+static char *ia64_vpc_get_realfw(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return g_strdup(s->realfw_path ?: "");
+}
+
+static void ia64_vpc_set_realfw(Object *obj, const char *value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    g_free(s->realfw_path);
+    s->realfw_path = value[0] != '\0' ? g_strdup(value) : NULL;
+}
+
+static char *ia64_vpc_get_realfw_vga_rom(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return g_strdup(s->realfw_vga_rom_path ?: "");
+}
+
+static void ia64_vpc_set_realfw_vga_rom(Object *obj, const char *value,
+                                        Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    g_free(s->realfw_vga_rom_path);
+    s->realfw_vga_rom_path = value[0] != '\0' ? g_strdup(value) : NULL;
+}
+
+static char *ia64_vpc_get_realfw_nvram(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return g_strdup(s->realfw_nvram_path ?: "");
+}
+
+static void ia64_vpc_set_realfw_nvram(Object *obj, const char *value,
+                                      Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    g_free(s->realfw_nvram_path);
+    s->realfw_nvram_path = value[0] != '\0' ? g_strdup(value) : NULL;
 }
 
 static char *ia64_vpc_get_nvram(Object *obj, Error **errp)
@@ -1699,6 +1909,15 @@ static void ia64_vpc_init_nvram(IA64VpcMachineState *s)
     g_autoptr(GError) err = NULL;
     gsize length = 0;
 
+    /*
+     * In realfw mode the FIT-0x1E NVRAM sector is part of the vendor flash
+     * image, which is modelled by the pflash device (writable, in the flash
+     * itself); the synthetic NVRAM MMIO would shadow it, so skip it here.
+     */
+    if (s->realfw_path != NULL) {
+        return;
+    }
+
     memset(s->nvram_data, 0, sizeof(s->nvram_data));
     g_clear_pointer(&s->nvram_resolved_path, g_free);
     s->nvram_write_warning = false;
@@ -1785,6 +2004,24 @@ static void ia64_vpc_add_compat_defaults(MachineClass *mc)
         property->value = value->value;
         g_ptr_array_add(mc->compat_props, property);
     }
+}
+
+static bool ia64_vpc_get_fw_relocate(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->fw_relocate;
+}
+
+static void ia64_vpc_set_fw_relocate(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    s->fw_relocate = value;
 }
 
 static bool ia64_vpc_get_i8042(Object *obj, Error **errp)
@@ -1907,6 +2144,116 @@ static void ia64_vpc_set_firmware_ide_dma(Object *obj, bool value,
     s->firmware_ide_dma = value;
 }
 
+static const struct {
+    const char *name;
+    uint64_t bit;
+} ia64_vpc_fw_quirks[] = {
+    { "split-page",          IA64_FW_QUIRK_LOADER_SPLIT_PAGE },
+    { "low-boundaries",      IA64_FW_QUIRK_LOW_BOUNDARIES },
+    { "low-anchor",          IA64_FW_QUIRK_LOW_ANCHOR },
+    { "anchor-version-sniff", IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF },
+    { "2g-scratch",          IA64_FW_QUIRK_SCRATCH_2G },
+    { "pal-8k-page",         IA64_FW_QUIRK_PAL_8K_PAGE },
+    { "acpi-low-island",     IA64_FW_QUIRK_ACPI_LOW_ISLAND },
+};
+
+/*
+ * Quirks disabled by default (plans/firmware-rework-plan.md; re-enable any
+ * of them with fw-quirks=+name):
+ *  - acpi-low-island: retired in phase 2.2 - ACPI staging now sits in the
+ *    RAM-top firmware block, validated on 2462/XP2600/XP2002-installer/
+ *    checked-3790.
+ *  - 2g-scratch: retired in phase 2.3 - experiment E2 showed the XP 2600
+ *    SMP deadlock it once papered over no longer reproduces (3/3 SMP boots
+ *    to desktop with the page removed, control green).
+ *  - low-boundaries: retired in phase 2.3 on the relocated map - the
+ *    32/48/64/80 MB no-coalesce boundaries' motivating lanes (XP 2600
+ *    ntoskrnl-missing class; 2003 SP1 installer error 16) pass without
+ *    them.
+ *  - low-anchor + anchor-version-sniff: retired in phase 2.4 - on the
+ *    relocated map the XP-era MiInitMachineDependent reset class no
+ *    longer fires (XP 2600 UP+SMP desktops, 2462 logon, XP 2002 and
+ *    2003 SP1 installers to text setup, XP SP1 desktop, all A/B'd with
+ *    the anchor off).  With the sniff gone the map is no longer
+ *    guest-build-specific.
+ *
+ *  NOT retired: split-page - the XP 2002 installer wedges in kernel-init
+ *  memmove without it (see the expected-state ledger); pal-8k-page.
+ */
+#define IA64_VPC_FW_QUIRK_DEFAULT_DISABLE \
+    (IA64_FW_QUIRK_ACPI_LOW_ISLAND | IA64_FW_QUIRK_SCRATCH_2G | \
+     IA64_FW_QUIRK_LOW_BOUNDARIES | IA64_FW_QUIRK_LOW_ANCHOR | \
+     IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF)
+
+static char *ia64_vpc_get_fw_quirks(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+    GString *out = g_string_new(NULL);
+    size_t i;
+
+    (void)errp;
+    for (i = 0; i < ARRAY_SIZE(ia64_vpc_fw_quirks); i++) {
+        if (s->fw_map_quirk_disable & ia64_vpc_fw_quirks[i].bit) {
+            if (out->len != 0) {
+                g_string_append_c(out, ',');
+            }
+            g_string_append_c(out, '-');
+            g_string_append(out, ia64_vpc_fw_quirks[i].name);
+        }
+    }
+    if (out->len == 0) {
+        g_string_append(out, "default");
+    }
+    return g_string_free(out, false);
+}
+
+static void ia64_vpc_set_fw_quirks(Object *obj, const char *value,
+                                   Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+    uint64_t disable = s->fw_map_quirk_disable;
+    /*
+     * -machine option parsing consumes commas, so a single fw-quirks value
+     * uses ':' between names; alternatively repeat fw-quirks= per name
+     * (the setter accumulates).
+     */
+    g_auto(GStrv) tokens = g_strsplit_set(value, ",:", 0);
+    size_t i;
+    char **tok;
+
+    for (tok = tokens; *tok != NULL; tok++) {
+        const char *name = *tok;
+        bool off;
+
+        if (name[0] == '\0') {
+            continue;
+        }
+        if (g_strcmp0(name, "default") == 0) {
+            disable = IA64_VPC_FW_QUIRK_DEFAULT_DISABLE;
+            continue;
+        }
+        off = name[0] == '-';
+        if (name[0] == '-' || name[0] == '+') {
+            name++;
+        }
+        for (i = 0; i < ARRAY_SIZE(ia64_vpc_fw_quirks); i++) {
+            if (g_strcmp0(name, ia64_vpc_fw_quirks[i].name) == 0) {
+                if (off) {
+                    disable |= ia64_vpc_fw_quirks[i].bit;
+                } else {
+                    disable &= ~ia64_vpc_fw_quirks[i].bit;
+                }
+                break;
+            }
+        }
+        if (i == ARRAY_SIZE(ia64_vpc_fw_quirks)) {
+            error_setg(errp, "unknown firmware map quirk '%s'", name);
+            return;
+        }
+    }
+    s->fw_map_quirk_disable = disable;
+}
+
 static char *ia64_vpc_get_firmware_console(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -1938,6 +2285,27 @@ static void ia64_vpc_set_firmware_console(Object *obj, const char *value,
     error_setg(errp, "firmware-console must be 'serial' or 'vga'");
 }
 
+static void ia64_vpc_get_boot_timeout(Object *obj, Visitor *v, const char *name,
+                                      void *opaque, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+    uint16_t value = s->firmware_boot_timeout;
+
+    visit_type_uint16(v, name, &value, errp);
+}
+
+static void ia64_vpc_set_boot_timeout(Object *obj, Visitor *v, const char *name,
+                                      void *opaque, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+    uint16_t value;
+
+    if (!visit_type_uint16(v, name, &value, errp)) {
+        return;
+    }
+    s->firmware_boot_timeout = value;
+}
+
 static char *ia64_vpc_get_vga(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -1953,8 +2321,10 @@ static void ia64_vpc_set_vga(Object *obj, const char *value, Error **errp)
 
     if (g_strcmp0(value, "rage128") != 0 &&
         g_strcmp0(value, "mach64") != 0 &&
+        g_strcmp0(value, "nv15gl") != 0 &&
         g_strcmp0(value, "std") != 0) {
-        error_setg(errp, "vga must be 'rage128', 'mach64' or 'std'");
+        error_setg(errp,
+                   "vga must be 'rage128', 'mach64', 'nv15gl' or 'std'");
         return;
     }
     g_free(s->vga_model);
@@ -2156,6 +2526,15 @@ static uint64_t ia64_vpc_lsapic_read(void *opaque, hwaddr addr,
     (void)opaque;
 
     if (addr == IA64_PIB_INTA_OFFSET && size == 1) {
+        /*
+         * Interrupt-acknowledge byte.  When an ExtINT is delivered (IVR reads
+         * 0) firmware reads this location to run the INTA cycle against the
+         * external 8259 PIC and obtain the real 8-bit vector.  The PIC exists
+         * only in realfw mode; without it the cycle reads back 0.
+         */
+        if (isa_pic != NULL) {
+            return pic_read_irq(isa_pic);
+        }
         return 0;
     }
     return 0;
@@ -2332,7 +2711,7 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     IA64VpcHandoff handoff = { 0 };
     bool debug_port_present = debug_port_get_chardev() != NULL;
 
-    _Static_assert(sizeof(IA64VpcHandoff) == 104,
+    _Static_assert(sizeof(IA64VpcHandoff) == 120,
                    "IA-64 firmware handoff ABI size changed");
     _Static_assert(offsetof(IA64VpcHandoff, ProcessorCount) == 64,
                    "IA-64 firmware handoff CPU count offset changed");
@@ -2361,6 +2740,8 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     handoff.SocketCount = cpu_to_le64(machine->smp.sockets);
     handoff.CoresPerSocket = cpu_to_le64(machine->smp.cores);
     handoff.ThreadsPerCore = cpu_to_le64(machine->smp.threads);
+    handoff.MapQuirkDisable = cpu_to_le64(s->fw_map_quirk_disable);
+    handoff.BootTimeout = cpu_to_le64(s->firmware_boot_timeout);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, &handoff,
                               sizeof(handoff));
 }
@@ -2597,9 +2978,29 @@ static void ia64_vpc_match_rom_pcir(PCIDevice *pci_dev)
     rom[declared - 1] = (uint8_t)(-checksum);
 }
 
-static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
+static void ia64_vpc_configure_vga(PCIDevice *pci_dev, uint32_t io_base)
 {
     if (pci_dev == NULL) {
+        return;
+    }
+
+    /*
+     * The NVIDIA NV15GL keeps its own subsystem id (10de:006d, programmed by
+     * the device) and a distinct BAR layout: BAR0 is the 16 MiB MMIO register
+     * aperture and BAR1 is the 128 MiB prefetchable framebuffer.  It carries no
+     * ATI BIOS tables, so bypass the Rage-specific ROM patching entirely.
+     */
+    if (pci_get_word(pci_dev->config + PCI_VENDOR_ID) == IA64_NV_VENDOR_ID) {
+        pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
+                                 IA64_NV_MMIO_PCI_BASE, 4);
+        pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
+                                 IA64_NV_FB_PCI_BASE, 4);
+        if (pci_dev->io_regions[PCI_ROM_SLOT].size != 0) {
+            pci_default_write_config(pci_dev, PCI_ROM_ADDRESS,
+                                     IA64_NV_ROM_PCI_BASE, 4);
+        }
+        pci_default_write_config(pci_dev, PCI_COMMAND,
+                                 PCI_COMMAND_IO | PCI_COMMAND_MEMORY, 2);
         return;
     }
 
@@ -2619,7 +3020,7 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev)
                              IA64_VGA_FB_PCI_BASE, 4);
     if (pci_dev->io_regions[1].memory != NULL) {
         pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0 + 4,
-                                 IA64_VGA_IO_BASE, 4);
+                                 io_base, 4);
     }
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0 + 8,
                              IA64_VGA_MMIO_PCI_BASE, 4);
@@ -2754,7 +3155,9 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_ohci(s->ohci_dev);
     ia64_vpc_configure_uhci(s->uhci_dev);
     ia64_vpc_configure_lsi(s->lsi_dev);
-    ia64_vpc_configure_vga(s->vga_dev);
+    ia64_vpc_configure_vga(s->vga_dev,
+                           s->realfw_path != NULL ? IA64_VGA_IO_BASE_REALFW
+                                                  : IA64_VGA_IO_BASE);
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_nic(s->nic_devs[i], i);
     }
@@ -2871,8 +3274,17 @@ static void ia64_vpc_map_vga_fixed_windows(IA64VpcMachineState *s,
         return;
     }
 
-    fb = &pci_dev->io_regions[0];
-    mmio = &pci_dev->io_regions[2];
+    bool is_nvidia =
+        pci_get_word(pci_dev->config + PCI_VENDOR_ID) == IA64_NV_VENDOR_ID;
+
+    /*
+     * NVIDIA uses BAR0=MMIO / BAR1=FB; ATI uses BAR0=FB / BAR2=MMIO.  The NV
+     * BARs are already assigned at the firmware's fixed addresses by
+     * ia64_vpc_configure_vga(), and its 128 MiB FB would overlap the ATI fixed
+     * MMIO window, so NV only needs the legacy 0xA0000 alias set up below.
+     */
+    fb = &pci_dev->io_regions[is_nvidia ? 1 : 0];
+    mmio = &pci_dev->io_regions[is_nvidia ? 0 : 2];
     if (fb->memory == NULL || mmio->memory == NULL ||
         fb->address_space == NULL || mmio->address_space == NULL) {
         return;
@@ -2882,7 +3294,7 @@ static void ia64_vpc_map_vga_fixed_windows(IA64VpcMachineState *s,
         return;
     }
 
-    if (s->vga_fb_alias == NULL) {
+    if (!is_nvidia && s->vga_fb_alias == NULL) {
         s->vga_fb_alias = g_new(MemoryRegion, 1);
         memory_region_init_alias(s->vga_fb_alias, OBJECT(s),
                                  "ia64-vga-fb-fixed", fb->memory, 0, fb->size);
@@ -2891,7 +3303,7 @@ static void ia64_vpc_map_vga_fixed_windows(IA64VpcMachineState *s,
                                             s->vga_fb_alias, 1);
     }
 
-    if (s->vga_mmio_alias == NULL) {
+    if (!is_nvidia && s->vga_mmio_alias == NULL) {
         s->vga_mmio_alias = g_new(MemoryRegion, 1);
         memory_region_init_alias(s->vga_mmio_alias, OBJECT(s),
                                  "ia64-vga-mmio-fixed", mmio->memory, 0,
@@ -2956,6 +3368,7 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
 #endif
 
 static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
+                                       uint64_t firmware_base,
                                        unsigned int cpu_index,
                                        uint64_t entry,
                                        uint64_t global_pointer)
@@ -2968,10 +3381,10 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
      */
     uint64_t assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(machine->ram_size);
     IA64BootInfo info = {
-        .firmware_base = IA64_FW_BASE,
+        .firmware_base = firmware_base,
         .firmware_entry = entry,
         .global_pointer = global_pointer,
-        .iva = IA64_IVT_BASE,
+        .iva = firmware_base + IA64_FW_IVT_OFFSET,
         .bsp = assist_base + IA64_FW_EARLY_RSE_OFFSET +
             cpu_index * IA64_FW_EARLY_RSE_SIZE,
         .stack_pointer = assist_base + IA64_FW_CPU_ASSIST_SIZE - 16 -
@@ -2992,14 +3405,40 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
  * after this handler, so we must NOT read ROM content here.  PE32+
  * plabel parsing is deferred to the machine_done notifier.
  */
+static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s);
+
 static void ia64_vpc_reset(void *opaque)
 {
     IA64VpcMachineState *s = opaque;
     CPUState *cs;
 
+    /*
+     * The handoff block lives in ordinary guest RAM; rom_reset() restores
+     * the firmware image but nothing restores the block, and entry.S reads
+     * it on every entry, so re-emit it or a guest that scribbled over it
+     * would warm-reset with a corrupt handoff.
+     */
+    ia64_vpc_write_firmware_handoff(s);
+
     CPU_FOREACH(cs) {
         /* The CPUs are not children of the platform system bus. */
         ia64_cpu_reset_to_boot_info(IA64_CPU(cs));
+    }
+
+    /*
+     * The 460GX configuration store (CBN, the chipset functions' BARs and
+     * command registers, and the CF8 config-address latch) models chipset
+     * state that a real SYS_RST/RST_CPU (port 0xCF9) clears.  It is only
+     * seeded at machine-init, so without this a warm reset would leave it
+     * holding the previous boot's programming (e.g. a non-zero CBN and
+     * assigned BARs); the firmware's re-enumeration then takes a different
+     * path and the second boot's video-ROM POST diverges (it hangs in a
+     * vgabios timed-delay whose INT8 tick never advances).  Re-seed it to its
+     * power-on identity on every reset (harmless on the initial cold reset,
+     * which merely repeats the init-time seed).
+     */
+    if (s->realfw_path != NULL) {
+        ia64_vpc_init_realfw_chipset_cfg(s);
     }
 
     acpi_pm1_evt_reset(&s->acpi_regs);
@@ -3007,8 +3446,20 @@ static void ia64_vpc_reset(void *opaque)
     acpi_pm_tmr_reset(&s->acpi_regs);
     acpi_gpe_reset(&s->acpi_regs);
 #ifdef CONFIG_IA64_VPC_GRAPHICS
+    /*
+     * The synthetic INT10 ROM is a passive 2 KiB image for Windows guests that
+     * read the video BIOS through the PCI ROM BAR.  In realfw mode the vendor
+     * SDV firmware instead POSTs the video device's own expansion ROM the
+     * legacy way (shadow to 0xC0000, call C000:0003); a 2 KiB stub whose entry
+     * jumps into its (absent) body then runs the CPU away into empty shadow, so
+     * shadow the device's complete option ROM there instead.
+     */
     if (s->vga_dev != NULL) {
-        ia64_vpc_reset_int10(s);
+        if (s->realfw_path != NULL) {
+            ia64_vpc_install_realfw_video_rom(s);
+        } else {
+            ia64_vpc_reset_int10(s);
+        }
     }
 #endif
 }
@@ -3029,6 +3480,32 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
     (void)data;
     ia64_vpc_configure_platform_pci(s);
 
+    if (s->realfw_entry != 0) {
+        CPU_FOREACH(cs) {
+            IA64BootInfo info = {
+                .firmware_base = s->realfw_base,
+                .firmware_entry = s->realfw_entry,
+                .iva = IA64_REALFW_IVT_BASE,
+                .raw_entry = true,
+                .raw_proc_id = cs->cpu_index,
+                /*
+                 * SAL calls PAL procedures through the machine-planted stub
+                 * (GR34; GR36's authentication procedure lands on the same
+                 * dispatcher and returns not-implemented for unknown
+                 * indices).  SAL_B stashes this in bank-0 GR18 and uses it
+                 * for every static PAL call.
+                 */
+                .raw_pal_proc = IA64_REALFW_PAL_STUB_BASE,
+                .raw_pal_auth = IA64_REALFW_PAL_STUB_BASE,
+                .powered_off = cs->cpu_index != 0,
+            };
+
+            ia64_cpu_set_boot_info(IA64_CPU(cs), &info);
+            ia64_cpu_reset_to_boot_info(IA64_CPU(cs));
+        }
+        return;
+    }
+
     if (s->firmware_size == 0) {
         return;
     }
@@ -3039,14 +3516,18 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
      * for PE metadata and clobber startup registers (including gp).
      */
     image = g_malloc(s->firmware_size);
-    cpu_physical_memory_read(IA64_FW_BASE, image, s->firmware_size);
+    cpu_physical_memory_read(ia64_vpc_fw_base(s, current_machine->ram_size),
+                             image, s->firmware_size);
     if (!ia64_loader_parse_pe_plabel(image, s->firmware_size,
                                      &entrypoint)) {
         return;
     }
 
     CPU_FOREACH(cs) {
-        IA64BootInfo info = ia64_vpc_boot_info(MACHINE(s), cs->cpu_index,
+        IA64BootInfo info = ia64_vpc_boot_info(MACHINE(s),
+                                               ia64_vpc_fw_base(s,
+                                                   current_machine->ram_size),
+                                               cs->cpu_index,
                                                entrypoint.entry,
                                                entrypoint.global_pointer);
 
@@ -3069,6 +3550,885 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
         error_setg(errp, "full ALAT emulation is not SMP-safe");
         return false;
     }
+    if (s->realfw_path != NULL && machine->firmware != NULL) {
+        error_setg(errp, "realfw= and -bios are mutually exclusive");
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Firmware self-relocation (rework phase 2.2).  The image links at 1 MB but
+ * executes from the RAM-top shadow (IA64_FW_IMAGE_BASE_FOR); the build embeds
+ * a machine-checked fixup table (fw-fixups.py) and a trailing footer
+ * { "IA64FXUP", table file offset }.  QEMU plays SAL_A here: it applies the
+ * fixups while placing the shadow, exactly as real firmware fixes up SAL_B
+ * when shadowing it near the top of memory.
+ */
+#define IA64_FW_FIXUP_FOOTER_MAGIC 0x5055584634364149ULL /* "IA64FXUP" */
+#define IA64_FW_FIXUP_MAGIC        0x50555846u           /* "FXUP" */
+
+static uint64_t ia64_fw_bundle_imm64_get(const uint8_t *bundle)
+{
+    uint64_t lo = ldq_le_p(bundle);
+    uint64_t hi = ldq_le_p(bundle + 8);
+    uint64_t slot1 = ((lo >> 46) | (hi << 18)) & ((1ULL << 41) - 1);
+    uint64_t slot2 = (hi >> 23) & ((1ULL << 41) - 1);
+    uint64_t imm7b = (slot2 >> 6) & 0x7f;
+    uint64_t imm9d = (slot2 >> 27) & 0x1ff;
+    uint64_t imm5c = (slot2 >> 22) & 0x1f;
+    uint64_t ic = (slot2 >> 21) & 0x1;
+    uint64_t i = (slot2 >> 36) & 0x1;
+
+    return (i << 63) | (slot1 << 22) | (ic << 21) | (imm5c << 16) |
+           (imm9d << 7) | imm7b;
+}
+
+static void ia64_fw_bundle_imm64_set(uint8_t *bundle, uint64_t imm64)
+{
+    uint64_t lo = ldq_le_p(bundle);
+    uint64_t hi = ldq_le_p(bundle + 8);
+    uint64_t slot2 = (hi >> 23) & ((1ULL << 41) - 1);
+    uint64_t slot1 = (imm64 >> 22) & ((1ULL << 41) - 1);
+
+    slot2 &= ~((1ULL << 36) | (0x1ffULL << 27) | (0x1fULL << 22) |
+               (1ULL << 21) | (0x7fULL << 6));
+    slot2 |= (((imm64 >> 63) & 1) << 36) | (((imm64 >> 7) & 0x1ff) << 27) |
+             (((imm64 >> 16) & 0x1f) << 22) | (((imm64 >> 21) & 1) << 21) |
+             ((imm64 & 0x7f) << 6);
+    lo = (lo & ((1ULL << 46) - 1)) | (slot1 << 46);
+    hi = (slot1 >> 18) | (slot2 << 23);
+    stq_le_p(bundle, lo);
+    stq_le_p(bundle + 8, hi);
+}
+
+static bool ia64_vpc_relocate_firmware(uint8_t *image, int64_t size,
+                                       uint64_t delta, Error **errp)
+{
+    uint64_t fixups_off;
+    uint32_t n64, n32, nimm, i;
+    const uint8_t *table;
+    uint64_t entries;
+
+    if (size < 16 ||
+        ldq_le_p(image + size - 16) != IA64_FW_FIXUP_FOOTER_MAGIC) {
+        error_setg(errp, "firmware image carries no relocation footer "
+                   "(rebuilt with fw-fixups.py?)");
+        return false;
+    }
+    fixups_off = ldq_le_p(image + size - 8);
+    if (fixups_off > (uint64_t)size - 32) {
+        error_setg(errp, "firmware relocation table offset out of range");
+        return false;
+    }
+    table = image + fixups_off;
+    if (ldl_le_p(table) != IA64_FW_FIXUP_MAGIC || ldl_le_p(table + 4) != 1) {
+        error_setg(errp, "firmware relocation table has a bad header");
+        return false;
+    }
+    n64 = ldl_le_p(table + 8);
+    n32 = ldl_le_p(table + 12);
+    nimm = ldl_le_p(table + 16);
+    entries = (uint64_t)n64 + n32 + nimm;
+    if (fixups_off + 32 + entries * 8 > (uint64_t)size) {
+        error_setg(errp, "firmware relocation table truncated");
+        return false;
+    }
+    table += 32;
+    for (i = 0; i < n64; i++, table += 8) {
+        uint64_t off = ldq_le_p(table);
+
+        if (off > (uint64_t)size - 8) {
+            error_setg(errp, "firmware DIR64 fixup out of range");
+            return false;
+        }
+        stq_le_p(image + off, ldq_le_p(image + off) + delta);
+    }
+    for (i = 0; i < n32; i++, table += 8) {
+        uint64_t off = ldq_le_p(table);
+
+        if (off > (uint64_t)size - 4) {
+            error_setg(errp, "firmware DIR32 fixup out of range");
+            return false;
+        }
+        stl_le_p(image + off, ldl_le_p(image + off) + (uint32_t)delta);
+    }
+    for (i = 0; i < nimm; i++, table += 8) {
+        uint64_t off = ldq_le_p(table);
+
+        if (off > (uint64_t)size - 16) {
+            error_setg(errp, "firmware IMM64 fixup out of range");
+            return false;
+        }
+        ia64_fw_bundle_imm64_set(image + off,
+                                 ia64_fw_bundle_imm64_get(image + off) +
+                                 delta);
+    }
+    return true;
+}
+
+/*
+ * Load a real vendor flash image (machine option realfw=) so that its end
+ * lands exactly at 4 GiB, and derive the boot entry from the architected
+ * SALE_ENTRY pointer at 4 GiB-24.  The flash window lies inside the
+ * ia64-firmware-address-space RAM region, so rom_add_blob_fixed() both
+ * installs the content and restores it on reset.  The blob is split around
+ * the NVRAM MMIO window (which deliberately overlays the image's FIT-0x1E
+ * scratch sector at priority 2): a rom_reset() write through the NVRAM ops
+ * would wipe the guest's stored variables with erased-flash bytes.
+ */
+/*
+ * The same two-bundle PAL procedure entry stub the project firmware carries
+ * at IA64_FW_PAL_PROC_ENTRY_OFF (roms/ia64-firmware/entry.S pal_proc_entry):
+ *   break.m 0x100000 ;;  br.many b0 ;;
+ * The translator services the break through ia64_pal_dispatch() when the
+ * bundle sits at a recognized PAL entry address (env->pal.pal_proc_copy_addr,
+ * seeded from IA64BootInfo.raw_pal_proc in realfw mode).
+ */
+/*
+ * POST-code port 0x80/0x81 (SAL narrates boot progress there; the codes are
+ * tabulated in plans/sdv-i2000-firmware-reference.md sec 6.5).  Logged on
+ * change only, so a code re-written in a wait loop cannot flood the log.
+ */
+static uint64_t ia64_realfw_post_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+
+    return s->realfw_post_last >> (addr * 8);
+}
+
+static void ia64_realfw_post_write(void *opaque, hwaddr addr, uint64_t val,
+                                   unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+    uint16_t code = s->realfw_post_last;
+
+    if (size == 2 && addr == 0) {
+        code = val;
+    } else {
+        code &= ~(0xff << (addr * 8));
+        code |= (val & 0xff) << (addr * 8);
+    }
+    if (code != s->realfw_post_last) {
+        s->realfw_post_last = code;
+        qemu_log("ia64-realfw: POST %02x%02x\n", code >> 8, code & 0xff);
+    }
+}
+
+static const MemoryRegionOps ia64_realfw_post_ops = {
+    .read = ia64_realfw_post_read,
+    .write = ia64_realfw_post_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 2,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+/*
+ * IFB fn3 SMBus host controller (PIIX4-style register file at I/O 0xFFF0).
+ *
+ * During QuickBoot the SDV firmware programs the IFB Function 3 SMBus I/O BAR
+ * to 0xFFF0 and runs SMBus byte-data transactions to initialise the board's
+ * hardware-monitor sensor chips (observed device addresses 0x2C and 0x4E): it
+ * writes SMBHSTCMD/ADD/DAT0, kicks SMBHSTCNT with START (bit 6), then spins on
+ * SMBHSTSTS bit 1 (INTR = transaction complete) with HOST_BUSY (bit 0) clear
+ * -- i.e. `(status & 3) == 2`.  With no I/O region here the poll floats high
+ * (0xff -> status bits 11b) and the firmware hangs at POST 0xc6.
+ *
+ * We have no physical devices behind the bus.  The firmware only needs the
+ * transaction to *complete*: it polls SMBHSTSTS for `(status & 3) == 2` (INTR
+ * set, HOST_BUSY clear), so report the controller permanently idle-with-INTR
+ * (0x02).  Every other register reads back 0 -- the value the firmware got for
+ * these ports before this region existed (the sparse-I/O container answers 0
+ * for an in-range but unclaimed port), which its controller-enable poll at
+ * offset 0xe depends on: floating those bytes high (0xff) instead makes that
+ * poll spin forever.  Register offsets follow the Intel PIIX4 SMBus layout
+ * (SMBHSTSTS 0, SMBHSTCNT 2, SMBHSTCMD 3, SMBHSTADD 4, SMBHSTDAT0 5).
+ */
+#define IA64_REALFW_SMB_STS   0x00   /* bit0 HOST_BUSY, bit1 INTR, bit2 DEV_ERR */
+#define IA64_REALFW_SMB_BASE  0xfff0
+#define IA64_REALFW_SMB_SIZE  0x10
+
+static uint64_t ia64_realfw_smbus_read(void *opaque, hwaddr addr, unsigned size)
+{
+    return (addr == IA64_REALFW_SMB_STS) ? 0x02 : 0;
+}
+
+static void ia64_realfw_smbus_write(void *opaque, hwaddr addr, uint64_t val,
+                                    unsigned size)
+{
+    /* No physical device: every transaction "completes" with nothing to do. */
+}
+
+static const MemoryRegionOps ia64_realfw_smbus_ops = {
+    .read = ia64_realfw_smbus_read,
+    .write = ia64_realfw_smbus_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+/*
+ * System Control Port B (I/O 0x61).  Near the end of POST the SDV firmware
+ * uses bit 4 -- the DRAM REFRESH toggle -- as a timing reference: it reads
+ * port 0x61 in a tight loop and waits for bit 4 to flip a full 0->1->0 refresh
+ * period to calibrate a delay.  Real hardware toggles that bit roughly every
+ * 15 us; unmodelled the port floats to a constant (open-bus 0xff, bit 4 stuck
+ * at 1) and the loop never sees the flip, hanging at POST ~0x05.
+ *
+ * Report the pre-existing open-bus value 0xff -- which is what the firmware saw
+ * for the other bits before this region existed and reached this far with, so
+ * nothing that reads the port earlier regresses -- but drive bit 4 from the
+ * virtual clock so the refresh toggle is observed.  Writes (the firmware pokes
+ * the timer-2/speaker gate bits) are dropped, exactly as the unbacked port did.
+ */
+#define IA64_REALFW_PORT61            0x61
+#define IA64_REALFW_PORT61_REFRESH_NS 15000
+
+static uint64_t ia64_realfw_port61_read(void *opaque, hwaddr addr, unsigned size)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint8_t refresh = (now / IA64_REALFW_PORT61_REFRESH_NS) & 1;
+
+    return (uint8_t)((0xff & ~0x10) | (refresh << 4));
+}
+
+static void ia64_realfw_port61_write(void *opaque, hwaddr addr, uint64_t val,
+                                     unsigned size)
+{
+    /* Open bus: writes are dropped, as for the previously unbacked port. */
+}
+
+static const MemoryRegionOps ia64_realfw_port61_ops = {
+    .read = ia64_realfw_port61_read,
+    .write = ia64_realfw_port61_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 1,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static uint64_t ia64_realfw_sac_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+    uint64_t val = 0;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        val |= (uint64_t)s->realfw_sac_data[addr + i] << (i * 8);
+    }
+    if (addr <= IA64_REALFW_SAC_BOOT_SEM &&
+        addr + size > IA64_REALFW_SAC_BOOT_SEM) {
+        /* Boot semaphore: granted, holder id 0 (the BSP's LID.id). */
+        val |= 0x80ULL << ((IA64_REALFW_SAC_BOOT_SEM - addr) * 8);
+    }
+    qemu_log_mask(LOG_UNIMP, "ia64-realfw: SAC read  +%04x/%u = 0x%" PRIx64
+                  "\n", (unsigned)addr, size, val);
+    return val;
+}
+
+static void ia64_realfw_sac_write(void *opaque, hwaddr addr, uint64_t val,
+                                  unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        s->realfw_sac_data[addr + i] = val >> (i * 8);
+    }
+    qemu_log_mask(LOG_UNIMP, "ia64-realfw: SAC write +%04x/%u = 0x%" PRIx64
+                  "\n", (unsigned)addr, size, val);
+}
+
+static const MemoryRegionOps ia64_realfw_sac_ops = {
+    .read = ia64_realfw_sac_read,
+    .write = ia64_realfw_sac_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 8,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+/*
+ * 460GX CF8/CFC configuration space (realfw mode).  Bus CBN (reset 0)
+ * carries the chipset's own devices (SSDM Table 2-1): dev 00h/01h SAC,
+ * 04h SDC, 05h/06h Memory Card A/B (MAC; SPD EEPROMs tunnel through its
+ * higher functions over I2C), dev 10h the CBN-programming device.  The
+ * public SSDM documents none of the platform-setup register offsets
+ * (plans/460gx-config-space-notes.md), so the model is a write-store/
+ * read-back scratch per function with the empirically required specials:
+ * Memory Card A claims presence with a MAC ID, dev 10h reg 40h is the CBN.
+ * Accesses to non-chipset device numbers forward to the QEMU PCI bus.
+ */
+#define IA64_REALFW_IFB_DEV       0x1e
+static const uint8_t ia64_realfw_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
+                                                    IA64_REALFW_IFB_DEV,
+                                                    0x10 };
+#define IA64_REALFW_CFG_FN_SIZE   256
+#define IA64_REALFW_CFG_DEV_SIZE  (8 * IA64_REALFW_CFG_FN_SIZE)
+#define IA64_REALFW_CFG_SIZE      \
+    (ARRAY_SIZE(ia64_realfw_chipset_devs) * IA64_REALFW_CFG_DEV_SIZE)
+#define IA64_REALFW_CBN_DEV       0x10
+#define IA64_REALFW_CBN_REG       0x40
+
+/*
+ * SPD EEPROM served through the MAC's I2C pass-through: firmware writes the
+ * DIMM's I2C address (0x54..0x57, bit 7 = read) into the SAC IIADR register
+ * (dev 00h fn 0 reg 0x68), then config reads of Memory Card fn 2/3 return
+ * the addressed EEPROM's bytes at the register offset (observed protocol,
+ * plans/phase5-real-firmware-boot.md sec 5.5; register naming per
+ * plans/460gx-config-space-notes.md).  One image serves all four DIMMs:
+ * 256 MB registered SDRAM (32Mx4 devices: 13 row / 10 column address bits,
+ * 4 banks, 1 module rank, x72 ECC) - 4 x 256 MB = 1 GiB on Memory Card A.
+ */
+#define IA64_REALFW_SAC_IIADR_REG 0x68
+static const uint8_t ia64_realfw_spd[64] = {
+    [0] = 128,    /* bytes written by manufacturer */
+    [1] = 8,      /* log2 of EEPROM size (256 bytes) */
+    [2] = 4,      /* memory type: SDRAM */
+    [3] = 13,     /* row address bits */
+    [4] = 10,     /* column address bits */
+    [5] = 1,      /* module rows (ranks) */
+    [6] = 72,     /* module data width low */
+    [8] = 1,      /* interface level: LVTTL */
+    [9] = 0xa0,   /* cycle time 10 ns (PC100) */
+    [11] = 2,     /* ECC */
+    [12] = 0x82,  /* refresh: self-refresh, 15.6 us */
+    [13] = 4,     /* primary SDRAM device width x4 */
+    [17] = 4,     /* banks per SDRAM device */
+    [18] = 4,     /* CAS latencies supported */
+    [31] = 0x40,  /* module rank density: 256 MB */
+};
+
+static uint8_t *ia64_realfw_chipset_cfg(IA64VpcMachineState *s,
+                                        uint8_t bus, uint8_t dev, uint8_t fn)
+{
+    uint8_t cbn = s->realfw_chipset_cfg[(ARRAY_SIZE(ia64_realfw_chipset_devs)
+                                         - 1) * IA64_REALFW_CFG_DEV_SIZE +
+                                        IA64_REALFW_CBN_REG];
+    unsigned i;
+
+    /* Dev 10h is always on bus 0; the rest live on bus CBN. */
+    if (bus == 0 && dev == IA64_REALFW_CBN_DEV) {
+        dev = IA64_REALFW_CBN_DEV;
+    } else if (bus != cbn) {
+        return NULL;
+    }
+    for (i = 0; i < ARRAY_SIZE(ia64_realfw_chipset_devs); i++) {
+        if (ia64_realfw_chipset_devs[i] == dev) {
+            return s->realfw_chipset_cfg + i * IA64_REALFW_CFG_DEV_SIZE +
+                   fn * IA64_REALFW_CFG_FN_SIZE;
+        }
+    }
+    return NULL;
+}
+
+static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+    uint32_t cf8 = s->realfw_config_address;
+    uint8_t bus = cf8 >> 16, dev = (cf8 >> 11) & 0x1f, fn = (cf8 >> 8) & 7;
+    unsigned reg = (cf8 & 0xfc) | (addr & 3);
+    uint8_t *cfg;
+    uint64_t val = 0;
+    unsigned i;
+
+    if (addr < 4) {
+        return s->realfw_config_address >> (addr * 8);
+    }
+    if (!(cf8 & 0x80000000)) {
+        return (1ULL << (size * 8)) - 1;
+    }
+    /*
+     * CPU-frequency mailbox (south bridge 00:03.0 reg 0xd0).  The SDV firmware
+     * stores the detected processor frequency here and reads it back on the
+     * next boot; a fresh (zero) mailbox makes its frequency detector fall back
+     * to a sentinel and take the one-time "New CPU frequency is set. System
+     * resets." reboot (port 0xCF9).  The register is battery-backed on real
+     * hardware, so the written value must survive that reset for the reboot to
+     * be one-shot rather than an infinite loop.  Model it as a persistent cell
+     * that ia64_vpc_reset does NOT clear.  See plans/phase5 SESSION 17.
+     */
+    if (s->realfw_path != NULL && bus == 0 && dev == 3 && fn == 0 &&
+        (reg & 0xfc) == 0xd0) {
+        {
+            /*
+             * Bit 15 is the hardware "done/valid" flag: the firmware writes a
+             * frequency command (bit 15 clear) and polls until the mailbox
+             * reads back with bit 15 set.  Real silicon sets it once it has
+             * latched the value; our model completes instantly, so present the
+             * stored command with bit 15 forced set.
+             */
+            uint32_t cell = s->realfw_freq_mailbox | 0x8000;
+            for (i = 0; i < size; i++) {
+                unsigned b = (reg & 3) + i;
+                if (b < 4) {
+                    val |= (uint64_t)((cell >> (b * 8)) & 0xff) << (i * 8);
+                }
+            }
+        }
+        return val;
+    }
+    cfg = ia64_realfw_chipset_cfg(s, bus, dev, fn);
+    if (cfg != NULL && dev == 0x05 && (fn == 2 || fn == 3)) {
+        /*
+         * MAC I2C pass-through: serve the addressed DIMM's SPD EEPROM.
+         * The card carries 4 rows x 4 DIMMs (row select = one-hot in
+         * fn 4..7 reg 0x48); only row 0 is populated - 4 x 256 MB = 1 GiB.
+         *
+         * The SAC (dev 0) and the MAC's fn 4..7 sit on the same bus as the
+         * addressed dev 5 - i.e. the CBN bus, which the guest's own address
+         * decoded here as 'bus'.  Once the firmware has programmed CBN to a
+         * non-zero value (which happens late in POST) a hard-coded bus 0 no
+         * longer resolves these functions and the lookup returns NULL, so use
+         * 'bus' and guard defensively.
+         */
+        uint8_t *sac = ia64_realfw_chipset_cfg(s, bus, 0, 0);
+        uint8_t *r4 = ia64_realfw_chipset_cfg(s, bus, 0x05, 4);
+        uint8_t *r5 = ia64_realfw_chipset_cfg(s, bus, 0x05, 5);
+        uint8_t *r6 = ia64_realfw_chipset_cfg(s, bus, 0x05, 6);
+        uint8_t *r7 = ia64_realfw_chipset_cfg(s, bus, 0x05, 7);
+
+        if (sac != NULL && r4 != NULL && r5 != NULL && r6 != NULL &&
+            r7 != NULL) {
+            uint8_t iiadr = sac[IA64_REALFW_SAC_IIADR_REG];
+            bool row0 = r4[0x48] == 1 && r5[0x48] == 0 &&
+                        r6[0x48] == 0 && r7[0x48] == 0;
+
+            if ((iiadr & 0xfc) == 0xd4 && row0) {
+                for (i = 0; i < size; i++) {
+                    unsigned off = (reg + i) & 0xff;
+
+                    val |= (uint64_t)(off < sizeof(ia64_realfw_spd)
+                                      ? ia64_realfw_spd[off] : 0) << (i * 8);
+                }
+            }
+        }
+    } else if (cfg != NULL && (reg & 0xfc) == 0x30) {
+        /*
+         * The 460GX chipset functions carry no expansion ROM, so their ROM BAR
+         * (0x30) must read back 0.  The config store is a plain write/read-back
+         * cell, so without this it returns whatever the firmware last wrote --
+         * during BAR sizing that is 0xFFFFFFFE, which the firmware decodes as a
+         * 2 KiB ROM.  A real add-in card at the same dev number (our ATI video
+         * shares dev 5 with the MAC while CBN still reads 0) then has its 64 KiB
+         * video ROM sized as 2 KiB, and the next option ROM is shadowed on top
+         * of the video ROM body -- corrupting the vgabios INT10 handler.
+         */
+        val = 0;
+    } else if (cfg != NULL) {
+        for (i = 0; i < size; i++) {
+            val |= (uint64_t)cfg[(reg + i) & 0xff] << (i * 8);
+        }
+    } else {
+        PCIDevice *pci_dev = pci_find_device(s->realfw_pci_bus, bus,
+                                             PCI_DEVFN(dev, fn));
+
+        val = pci_dev != NULL
+            ? pci_host_config_read_common(pci_dev, reg,
+                                          pci_config_size(pci_dev), size)
+            : (1ULL << (size * 8)) - 1;
+    }
+    qemu_log_mask(LOG_UNIMP, "ia64-realfw: cfg%c read  %02x:%02x.%x "
+                  "@0x%02x/%u = 0x%" PRIx64 "\n", cfg ? '*' : ' ',
+                  bus, dev, fn, reg, size, val);
+    return val;
+}
+
+static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
+                                  unsigned size)
+{
+    IA64VpcMachineState *s = opaque;
+    uint32_t cf8 = s->realfw_config_address;
+    uint8_t bus = cf8 >> 16, dev = (cf8 >> 11) & 0x1f, fn = (cf8 >> 8) & 7;
+    unsigned reg = (cf8 & 0xfc) | (addr & 3);
+    uint8_t *cfg;
+    unsigned i;
+
+    if (addr == 1 && size == 1) {
+        /*
+         * Port 0xCF9 (RST_CNT): an 8-bit access is the legacy PC reset-control
+         * register, aliased with byte 1 of the 0xCF8 config-address register.
+         * RST_CPU (bit 2) set triggers a system reset.  The SDV firmware writes
+         * 0xCF9=2 then 0xCF9=6 to reboot after its one-time "New CPU frequency
+         * is set" configuration step (the historical POST-0xc6 "wall").  The
+         * warm-boot path this reset lands in is still being brought up (the
+         * post-reset video-ROM POST diverges), so honouring the reset is gated
+         * behind STDBG_CF9RESET for now — see plans/phase5-real-firmware-boot.md.
+         */
+        if ((data & 0x04) && getenv("STDBG_CF9RESET")) {
+            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+            return;
+        }
+    }
+
+    if (addr < 4) {
+        for (i = 0; i < size && addr + i < 4; i++) {
+            s->realfw_config_address &= ~(0xffU << ((addr + i) * 8));
+            s->realfw_config_address |= ((data >> (i * 8)) & 0xff) <<
+                                        ((addr + i) * 8);
+        }
+        return;
+    }
+    if (!(cf8 & 0x80000000)) {
+        return;
+    }
+    /* CPU-frequency mailbox at 00:03.0 reg 0xd0 - see the read path. */
+    if (s->realfw_path != NULL && bus == 0 && dev == 3 && fn == 0 &&
+        (reg & 0xfc) == 0xd0) {
+        for (i = 0; i < size; i++) {
+            unsigned b = (reg & 3) + i;
+            if (b < 4) {
+                s->realfw_freq_mailbox &= ~(0xffU << (b * 8));
+                s->realfw_freq_mailbox |= ((data >> (i * 8)) & 0xff) << (b * 8);
+            }
+        }
+        return;
+    }
+    cfg = ia64_realfw_chipset_cfg(s, bus, dev, fn);
+    qemu_log_mask(LOG_UNIMP, "ia64-realfw: cfg%c write %02x:%02x.%x "
+                  "@0x%02x/%u = 0x%" PRIx64 "\n", cfg ? '*' : ' ',
+                  bus, dev, fn, reg, size, data);
+    if (cfg != NULL) {
+        for (i = 0; i < size; i++) {
+            cfg[(reg + i) & 0xff] = data >> (i * 8);
+        }
+        return;
+    }
+    {
+        PCIDevice *pci_dev = pci_find_device(s->realfw_pci_bus, bus,
+                                             PCI_DEVFN(dev, fn));
+
+        if (pci_dev != NULL) {
+            pci_host_config_write_common(pci_dev, reg,
+                                         pci_config_size(pci_dev),
+                                         data, size);
+        }
+    }
+}
+
+static const MemoryRegionOps ia64_realfw_cfg_ops = {
+    .read = ia64_realfw_cfg_read,
+    .write = ia64_realfw_cfg_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+    .impl.min_access_size = 1,
+    .impl.max_access_size = 4,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s)
+{
+    uint8_t *mac_a;
+
+    if (s->realfw_chipset_cfg == NULL) {
+        s->realfw_chipset_cfg = g_malloc0(IA64_REALFW_CFG_SIZE);
+    } else {
+        memset(s->realfw_chipset_cfg, 0, IA64_REALFW_CFG_SIZE);
+    }
+    s->realfw_config_address = 0;
+    /*
+     * Memory Card A (dev 05h fn 0) claims presence with the MAC identity
+     * (8086:84E3, rev B-1 = 03h; pci.ids, flagged unverified in
+     * plans/460gx-config-space-notes.md).  Memory Card B stays absent.
+     */
+    mac_a = ia64_realfw_chipset_cfg(s, 0, 0x05, 0);
+    stw_le_p(mac_a + PCI_VENDOR_ID, 0x8086);
+    stw_le_p(mac_a + PCI_DEVICE_ID, 0x84e3);
+    mac_a[PCI_REVISION_ID] = 0x03;
+
+    /*
+     * 460GX I/O & Firmware Bridge (IFB), the platform south bridge.  Real
+     * SDV firmware's QuickBoot scans bus 0 for it (8086:7600) and fatal-spins
+     * if absent (POST 0x98).  Model Function 0's identity per the 460GX SSDM
+     * §11: multi-function ISA/LPC bridge.  The other functions (fn1 IDE,
+     * fn2 USB, fn3 SMBus) and the config-register behaviours are added as the
+     * firmware exercises them; the rest of the config space is read/write
+     * scratch (see ia64_realfw_cfg_read/write).
+     */
+    {
+        uint8_t *ifb0 = ia64_realfw_chipset_cfg(s, 0, IA64_REALFW_IFB_DEV, 0);
+
+        stw_le_p(ifb0 + PCI_VENDOR_ID, 0x8086);          /* VID */
+        stw_le_p(ifb0 + PCI_DEVICE_ID, 0x7600);          /* DID = IFB */
+        ifb0[PCI_REVISION_ID] = 0x03;                    /* RID (stepping) */
+        ifb0[PCI_CLASS_PROG] = 0x00;                     /* CLASSC 060100h: */
+        stw_le_p(ifb0 + PCI_CLASS_DEVICE, 0x0601);       /*   ISA bridge */
+        ifb0[PCI_HEADER_TYPE] = 0x80;                    /* multi-function */
+    }
+}
+
+static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
+                                         MemoryRegion *pci_io)
+{
+    s->realfw_sac_data = g_malloc0(IA64_REALFW_SAC_SIZE);
+    memory_region_init_io(&s->realfw_sac_mmio, OBJECT(s),
+                          &ia64_realfw_sac_ops, s, "ia64-realfw.sac",
+                          IA64_REALFW_SAC_SIZE);
+    memory_region_add_subregion(get_system_memory(), IA64_REALFW_SAC_BASE,
+                                &s->realfw_sac_mmio);
+    memory_region_init_io(&s->realfw_post_io, OBJECT(s),
+                          &ia64_realfw_post_ops, s, "ia64-realfw.post", 2);
+    memory_region_add_subregion(pci_io, 0x80, &s->realfw_post_io);
+    memory_region_init_io(&s->realfw_smbus_io, OBJECT(s),
+                          &ia64_realfw_smbus_ops, s, "ia64-realfw.smbus",
+                          IA64_REALFW_SMB_SIZE);
+    memory_region_add_subregion(pci_io, IA64_REALFW_SMB_BASE,
+                                &s->realfw_smbus_io);
+    memory_region_init_io(&s->realfw_port61_io, OBJECT(s),
+                          &ia64_realfw_port61_ops, s, "ia64-realfw.port61", 1);
+    memory_region_add_subregion(pci_io, IA64_REALFW_PORT61,
+                                &s->realfw_port61_io);
+    ia64_vpc_init_realfw_chipset_cfg(s);
+    memory_region_init_io(&s->realfw_cfg_io, OBJECT(s),
+                          &ia64_realfw_cfg_ops, s, "ia64-realfw.cfg", 8);
+    memory_region_add_subregion(pci_io, 0xcf8, &s->realfw_cfg_io);
+}
+
+/*
+ * Real SDV firmware drives IDE through the fixed legacy I/O ports, not the
+ * controller's PCI BARs: it polls the primary status register at 0x1f7 during
+ * drive detection and spins forever if nothing answers.  The CMD646's ATA
+ * register blocks are otherwise only reachable at firmware-assigned BAR
+ * addresses, so alias them into the legacy ranges (command block 0x1f0-0x1f7
+ * and 0x170-0x177, control block at 0x3f4/0x374 whose offset-2 register is the
+ * 0x3f6/0x376 alt-status).  With no media attached the channels report an
+ * empty bus, which the firmware reads as "no drive" and moves on.  This runs
+ * only in realfw mode; our own firmware and guests use the PCI BARs.
+ */
+static void ia64_vpc_map_realfw_legacy_ide(IA64VpcMachineState *s,
+                                           MemoryRegion *pci_io)
+{
+    PCIIDEState *ide = PCI_IDE(s->ide_dev);
+    static const struct {
+        uint16_t data_base;
+        uint16_t cmd_base;
+    } channel[2] = {
+        { 0x1f0, 0x3f4 },
+        { 0x170, 0x374 },
+    };
+    int i;
+
+    for (i = 0; i < 2; i++) {
+        g_autofree char *data_name =
+            g_strdup_printf("ia64-realfw.ide-data%d", i);
+        g_autofree char *cmd_name =
+            g_strdup_printf("ia64-realfw.ide-cmd%d", i);
+
+        memory_region_init_alias(&s->realfw_ide_data[i], OBJECT(s), data_name,
+                                 &ide->data_bar[i], 0, 8);
+        memory_region_add_subregion(pci_io, channel[i].data_base,
+                                    &s->realfw_ide_data[i]);
+        memory_region_init_alias(&s->realfw_ide_cmd[i], OBJECT(s), cmd_name,
+                                 &ide->cmd_bar[i], 0, 4);
+        memory_region_add_subregion(pci_io, channel[i].cmd_base,
+                                    &s->realfw_ide_cmd[i]);
+    }
+}
+
+/*
+ * The master 8259's INTR line, delivered to the boot processor as an IA-64
+ * ExtINT (SAPIC vector 0): while the PIC asserts INTR the processor takes an
+ * external interrupt whose IVR reads 0, and firmware then fetches the real
+ * 8-bit vector from the PIC itself.  ExtINT is level-sensitive, so forward the
+ * line state directly -- de-asserting it (for example when firmware masks the
+ * PIC before draining IVR) withdraws the pending vector 0.
+ */
+static void ia64_vpc_realfw_extint(void *opaque, int n, int level)
+{
+    (void)opaque;
+    (void)n;
+    if (first_cpu != NULL) {
+        ia64_sapic_set_extint(first_cpu, level);
+    }
+}
+
+/*
+ * Real SDV firmware uses the legacy PC-AT timer tick during POST: it programs
+ * the 8254 PIT channel 0 for a periodic square wave and routes its IRQ 0
+ * through the 8259 PIC, whose INTR reaches the processor as an ExtINT (above).
+ * The machine is otherwise IOSAPIC-only, so instantiate the pair only in
+ * realfw mode and wire PIT OUT0 straight into 8259 IR0, independent of the
+ * IOSAPIC-backed ISA IRQ inputs the rest of the machine uses.
+ */
+static void ia64_vpc_init_realfw_pic(IA64VpcMachineState *s, ISABus *isa_bus)
+{
+    qemu_irq *pic_irqs;
+
+    s->realfw_extint = qemu_allocate_irq(ia64_vpc_realfw_extint, s, 0);
+    pic_irqs = i8259_init(isa_bus, s->realfw_extint);
+    /* PIT OUT0 -> 8259 IR0 (isa_irq = -1 selects the explicit alt_irq). */
+    i8254_pit_init(isa_bus, 0x40, -1, pic_irqs[0]);
+    g_free(pic_irqs);
+}
+
+static const uint8_t ia64_realfw_pal_stub[32] = {
+    0x0a, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+    0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x08, 0x00, 0x80, 0x00,
+};
+
+/*
+ * Open the realfw-nvram persistence file as a raw, writable block backend for
+ * the flash device.  On first use (or if the file is the wrong size, e.g. the
+ * realfw image changed) it is created from the vendor image; the pflash device
+ * requires the backing file to be exactly the flash size.  Once attached, the
+ * flash loads its contents from the file and writes back to it, so the
+ * firmware's one-time NVRAM reprogram survives across runs.
+ */
+static BlockBackend *ia64_realfw_open_nvram(const char *path,
+                                            const uint8_t *image,
+                                            uint64_t image_size, Error **errp)
+{
+    QDict *options;
+    BlockBackend *blk;
+    struct stat st;
+
+    if (stat(path, &st) != 0 || (uint64_t)st.st_size != image_size) {
+        GError *gerr = NULL;
+
+        if (!g_file_set_contents(path, (const gchar *)image, image_size,
+                                 &gerr)) {
+            error_setg(errp, "realfw-nvram '%s': cannot initialise: %s",
+                       path, gerr->message);
+            g_error_free(gerr);
+            return NULL;
+        }
+    }
+
+    options = qdict_new();
+    qdict_put_str(options, "driver", "raw");
+    blk = blk_new_open(path, NULL, options, BDRV_O_RDWR, errp);
+    if (blk == NULL) {
+        error_prepend(errp, "realfw-nvram '%s': ", path);
+    }
+    return blk;
+}
+
+static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
+{
+    g_autofree uint8_t *image = NULL;
+    gsize image_size = 0;
+    GError *gerr = NULL;
+    uint64_t base, fit_ptr, sale_ptr;
+    char fit_sig[8];
+
+    if (!g_file_get_contents(s->realfw_path, (gchar **)&image,
+                             &image_size, &gerr)) {
+        error_setg(errp, "failed to read realfw image '%s': %s",
+                   s->realfw_path, gerr->message);
+        g_error_free(gerr);
+        return false;
+    }
+    if (image_size == 0 || image_size > IA64_REALFW_MAX_SIZE ||
+        (image_size & 0xffff) != 0) {
+        error_setg(errp, "realfw image '%s' must be a whole number of "
+                   "64 KiB flash blocks, at most 4 MiB", s->realfw_path);
+        return false;
+    }
+    base = IA64_REALFW_WINDOW_END - image_size;
+
+    fit_ptr = ldq_le_p(image + (IA64_REALFW_PTR_FIT - base)) &
+              IA64_REALFW_PTR_ADDR_MASK;
+    sale_ptr = ldq_le_p(image + (IA64_REALFW_PTR_SALE - base)) &
+               IA64_REALFW_PTR_ADDR_MASK;
+    if (fit_ptr < base || fit_ptr + sizeof(fit_sig) > IA64_REALFW_WINDOW_END ||
+        sale_ptr < base || sale_ptr >= IA64_REALFW_WINDOW_END) {
+        error_setg(errp, "realfw image '%s': reset pointer block does not "
+                   "point into the image (FIT 0x%" PRIx64 ", SALE_ENTRY "
+                   "0x%" PRIx64 ")", s->realfw_path, fit_ptr, sale_ptr);
+        return false;
+    }
+    memcpy(fit_sig, image + (fit_ptr - base), sizeof(fit_sig));
+    if (memcmp(fit_sig, "_FIT_   ", sizeof(fit_sig)) != 0) {
+        error_setg(errp, "realfw image '%s': no _FIT_ signature at the "
+                   "FIT pointer target 0x%" PRIx64, s->realfw_path, fit_ptr);
+        return false;
+    }
+
+    /*
+     * The flash is a real Intel-CFI (command-set 0x0001) part: SDV firmware
+     * probes it during QuickBoot (write 0x50 Clear-Status, 0x70 Read-Status,
+     * read the WSM-ready bit 0x80, 0xff Read-Array) and uses it as writable
+     * non-volatile storage for EFI settings / boot config in the FIT-0x1E
+     * NVRAM sector.  Model it with pflash_cfi01 (the Intel CFI flash device)
+     * initialized from the vendor image, overlaying the firmware address
+     * space (priority above the identity RAM region) so its command interface
+     * shadows plain RAM at the flash window.  64 KiB blocks match the block
+     * size the firmware's flash descriptor uses.
+     */
+    {
+        DeviceState *dev = qdev_new(TYPE_PFLASH_CFI01);
+        MemoryRegion *flash_mr;
+        BlockBackend *flash_blk = NULL;
+
+        if (s->realfw_nvram_path != NULL) {
+            flash_blk = ia64_realfw_open_nvram(s->realfw_nvram_path, image,
+                                               image_size, errp);
+            if (flash_blk == NULL) {
+                return false;
+            }
+            qdev_prop_set_drive(dev, "drive", flash_blk);
+        }
+
+        qdev_prop_set_uint32(dev, "num-blocks", image_size / 0x10000);
+        qdev_prop_set_uint64(dev, "sector-length", 0x10000);
+        qdev_prop_set_uint8(dev, "width", 1);
+        qdev_prop_set_bit(dev, "big-endian", 0);
+        /*
+         * JEDEC ID the firmware checks: manufacturer 0x89 (Intel), device
+         * 0xAC (82802AB Firmware Hub).  It byte-reads read-ID offset 0 for
+         * the manufacturer and offset 1 for the device, then combines them to
+         * 0xAC89.  pflash returns id0<<8|id1 at word offset 0 and id2<<8|id3
+         * at word offset 1, so a byte read of offset 0 yields id1 (hold the
+         * manufacturer there) and a byte read of offset 1 yields id3 (hold
+         * the device there).  id0 also carries the device so that a 16-bit
+         * read of offset 0 reads 0xAC89 too.
+         */
+        qdev_prop_set_uint16(dev, "id0", 0x00ac);
+        qdev_prop_set_uint16(dev, "id1", 0x0089);        /* Intel (offset 0) */
+        qdev_prop_set_uint16(dev, "id2", 0x0000);
+        qdev_prop_set_uint16(dev, "id3", 0x00ac);        /* 82802AB (offset 1) */
+        qdev_prop_set_string(dev, "name", "ia64-realfw-flash");
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+
+        s->realfw_flash = PFLASH_CFI01(dev);
+        flash_mr = pflash_cfi01_get_memory(s->realfw_flash);
+        memory_region_add_subregion_overlap(get_system_memory(), base,
+                                            flash_mr, 2);
+        /*
+         * Without a persistence file the flash starts from the vendor image
+         * every boot; with one the pflash device has already loaded the
+         * (possibly firmware-updated) contents from the backing file, so the
+         * image copy would clobber them.
+         */
+        if (flash_blk == NULL) {
+            memcpy(memory_region_get_ram_ptr(flash_mr), image, image_size);
+        }
+    }
+
+    rom_add_blob_fixed("ia64-realfw-palstub", ia64_realfw_pal_stub,
+                       sizeof(ia64_realfw_pal_stub),
+                       IA64_REALFW_PAL_STUB_BASE);
+
+    {
+        /* Branch-to-self bundle (MIB: nop.m; nop.i; br.few 0). */
+        static const uint8_t self_branch[16] = {
+            0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+        };
+        g_autofree uint8_t *ivt = g_malloc(IA64_REALFW_IVT_SIZE);
+        size_t off;
+
+        for (off = 0; off < IA64_REALFW_IVT_SIZE; off += sizeof(self_branch)) {
+            memcpy(ivt + off, self_branch, sizeof(self_branch));
+        }
+        rom_add_blob_fixed("ia64-realfw-ivt", ivt, IA64_REALFW_IVT_SIZE,
+                           IA64_REALFW_IVT_BASE);
+    }
+
+    s->realfw_base = base;
+    s->realfw_entry = sale_ptr;
+    /* No project firmware image: machine_done must not parse a PE plabel. */
+    s->firmware_size = 0;
     return true;
 }
 
@@ -3079,6 +4439,10 @@ static bool ia64_vpc_load_firmware(IA64VpcMachineState *s,
     const char *firmware = machine->firmware;
     Error *local_err = NULL;
     int64_t firmware_size;
+
+    if (s->realfw_path != NULL) {
+        return ia64_vpc_load_realfw(s, errp);
+    }
 
     if (firmware == NULL) {
         /*
@@ -3104,17 +4468,33 @@ static bool ia64_vpc_load_firmware(IA64VpcMachineState *s,
         error_propagate(errp, local_err);
         return false;
     }
-    if (firmware_size <= 0 ||
-        (uint64_t)firmware_size > machine->ram_size - IA64_FW_BASE) {
-        error_setg(errp, "invalid firmware image size for '%s'",
-                   firmware);
-        return false;
+    {
+        uint64_t fw_base = ia64_vpc_fw_base(s, machine->ram_size);
+        g_autofree uint8_t *image = NULL;
+        gsize image_size = 0;
+        GError *gerr = NULL;
+
+        if (firmware_size <= 0 ||
+            (uint64_t)firmware_size > IA64_FW_IMAGE_SPAN) {
+            error_setg(errp, "invalid firmware image size for '%s'",
+                       firmware);
+            return false;
+        }
+        if (!g_file_get_contents(firmware_path, (gchar **)&image,
+                                 &image_size, &gerr)) {
+            error_setg(errp, "failed to read firmware '%s': %s", firmware,
+                       gerr->message);
+            g_error_free(gerr);
+            return false;
+        }
+        if (fw_base != IA64_FW_LINK_BASE &&
+            !ia64_vpc_relocate_firmware(image, image_size,
+                                        fw_base - IA64_FW_LINK_BASE, errp)) {
+            return false;
+        }
+        rom_add_blob_fixed("ia64-firmware", image, image_size, fw_base);
+        s->firmware_size = firmware_size;
     }
-    if (rom_add_file_fixed(firmware, IA64_FW_BASE, -1)) {
-        error_setg(errp, "failed to load firmware '%s'", firmware);
-        return false;
-    }
-    s->firmware_size = firmware_size;
     return true;
 }
 
@@ -3141,7 +4521,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (!ia64_vpc_map_firmware_address_space(s, errp)) {
         return false;
     }
-    ia64_vpc_init_rtc(s);
     ia64_vpc_init_watchdog(s);
     ia64_vpc_init_nvram(s);
     ia64_vpc_write_firmware_handoff(s);
@@ -3151,12 +4530,13 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         uint32_t cores = MAX(machine->smp.cores, 1U);
         uint32_t per_socket = threads * cores;
         uint32_t package_base = (i / per_socket) * per_socket;
-        IA64BootInfo boot_info = ia64_vpc_boot_info(machine, i,
-                                                    IA64_FW_BASE,
-                                                    IA64_FW_BASE);
+        uint64_t fw_base = ia64_vpc_fw_base(s, machine->ram_size);
+        IA64BootInfo boot_info = ia64_vpc_boot_info(machine, fw_base, i,
+                                                    fw_base, fw_base);
 
         cpu = IA64_CPU(object_new(machine->cpu_type));
         cpu->alat_full = s->alat_full;
+        cpu->fw_image_base = fw_base;
         cpu->socket_id = i / per_socket;
         cpu->core_id = (i / threads) % cores;
         cpu->thread_id = i % threads;
@@ -3193,16 +4573,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         return false;
     }
 
-    /* Fill IVT with break bundles (one-time, before any reset) */
-    {
-        uint64_t break_bundle[2] = {0, 0};
-        hwaddr offset;
-
-        for (offset = 0; offset < IA64_IVT_SIZE; offset += 16) {
-            cpu_physical_memory_write(IA64_IVT_BASE + offset,
-                                      break_bundle, 16);
-        }
-    }
+    /*
+     * The firmware IVT now lives inside the image (.fw_ivt, zero-filled =
+     * break bundles), so the historical machine-side fill is gone.
+     */
 
     /* Defer PE32+ plabel parsing until after ROM content is loaded */
     s->done_notifier.notify = ia64_vpc_machine_done;
@@ -3241,6 +4615,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     pci_bus_set_slot_reserved_mask(pci_bus, 1U << 0);
     pci_io = pci_bus->address_space_io;
     ia64_vpc_init_acpi_pm(s, iosapic, pci_io);
+    if (s->realfw_path != NULL) {
+        s->realfw_pci_bus = pci_bus;
+        ia64_vpc_init_realfw_devices(s, pci_io);
+    }
 
     /*
      * Early IA-64 kernel debuggers predate the ACPI DBGP table and drive a
@@ -3304,6 +4682,52 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
     }
     isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
+    if (s->realfw_path != NULL) {
+        ia64_vpc_init_realfw_pic(s, isa_bus);
+    }
+    /*
+     * The real-time clock is the standard MC146818 CMOS device at legacy
+     * ports 0x70/0x71 (IRQ 8), as the i2000/SDV Super-I/O provides - the
+     * invented MMIO seconds register at 0xFFEF0000 is gone (rework D8).
+     */
+    {
+        MC146818RtcState *rtc = mc146818_rtc_init(isa_bus, 2000, NULL);
+        if (s->realfw_path != NULL) {
+            /*
+             * Make the century byte (CMOS 0x32) a read-only hardware register,
+             * as on the real 460GX RTC.  Late in POST the i2000 SDV firmware
+             * probes it by writing 0 (with the RTC halted) and requires it to
+             * still read back the century; a writable byte reads back the
+             * written 0, the firmware's RTC self-test returns EFI_DEVICE_ERROR,
+             * and the zero result count trips a break 1 at POST 0x0a.  Dropping
+             * writes keeps the stored century so the probe reads it back.  Set
+             * directly rather than via a property because mc146818_rtc_init
+             * realizes the device before returning.  realfw-only; guests keep
+             * the standard writable byte.
+             */
+            rtc->century_read_only = true;
+            /*
+             * The 460GX RTC is a 256-byte part: the standard 128-byte bank is
+             * reached through ports 0x70/0x71 (RTCI/RTCD), and ports 0x72/0x73
+             * (RTCEI/RTCED) reach the upper 128-byte battery-backed bank ONLY
+             * when RTCCFG (IFB function 0, config offset C8h) bit 2 "Upper RAM
+             * Enable" is set.  [460GX SSDM 11.1.20, 11.2.5, 15.5.1]  The i2000
+             * firmware never writes RTCCFG (the IFB at bus0 dev 0x1e gets no
+             * config write to offset C8h), so that bit stays clear and 0x72/
+             * 0x73 alias 0x70/0x71 - the SAME 128-byte bank.  POST writes its
+             * CMOS configuration and checksum through 0x70/0x71 but reads them
+             * back through 0x72/0x73; without this alias every such read is
+             * open-bus 0xFF and the CMOS checksum never validates.  (This is
+             * distinct from the separate "New CPU frequency is set" reboot,
+             * which turns on the firmware's CPU-frequency-detection reads of
+             * unmodelled 460GX registers - see plans/phase5 SESSION 15.)
+             */
+            memory_region_init_alias(&s->realfw_rtc_ext_alias, OBJECT(s),
+                                     "rtc-ext-alias", &rtc->io, 0, 2);
+            memory_region_add_subregion(isa_bus->address_space_io, 0x72,
+                                        &s->realfw_rtc_ext_alias);
+        }
+    }
 #ifdef CONFIG_IA64_VPC_PS2
     if (s->i8042_enabled) {
         ISADevice *i8042 = isa_new(TYPE_I8042);
@@ -3353,6 +4777,17 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         if (!pci_realize_and_unref(s->vga_dev, pci_bus, errp)) {
             return false;
         }
+    } else if (g_strcmp0(s->vga_model, "nv15gl") == 0) {
+        /*
+         * The NVIDIA Quadro2 Pro (NV15GL, 10de:0153): an AGP graphics master
+         * with a 16 MB MMIO BAR0 and a 128 MB prefetchable framebuffer BAR1,
+         * chosen with -machine ia64-vpc,vga=nv15gl.  Created explicitly at the
+         * AGP/VGA slot; ia64_vpc_configure_vga() maps its BARs (NVIDIA layout).
+         */
+        s->vga_dev = pci_new(PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), "nv15gl-vga");
+        if (!pci_realize_and_unref(s->vga_dev, pci_bus, errp)) {
+            return false;
+        }
     } else {
         s->vga_dev = pci_vga_init(pci_bus);
     }
@@ -3371,7 +4806,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (!ia64_vpc_enable_vga_legacy_switch(s->vga_dev, errp)) {
         return false;
     }
-    ia64_vpc_configure_vga(s->vga_dev);
+    ia64_vpc_load_realfw_device_rom(s);
+    ia64_vpc_configure_vga(s->vga_dev,
+                           s->realfw_path != NULL ? IA64_VGA_IO_BASE_REALFW
+                                                  : IA64_VGA_IO_BASE);
     ia64_vpc_map_vga_fixed_windows(s, s->vga_dev);
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     if (s->vga_dev != NULL) {
@@ -3393,7 +4831,12 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * pci_ide_create_devs() auto-binds any if=ide media across them.
      */
 #ifdef CONFIG_IA64_VPC_STORAGE
-    if (s->ide_enabled) {
+    /*
+     * realfw mode always instantiates the controller: the SDV firmware probes
+     * a legacy IDE during POST regardless of the ide=on switch, and reaches it
+     * through the fixed legacy ports aliased below rather than the PCI BARs.
+     */
+    if (s->ide_enabled || s->realfw_path != NULL) {
         s->ide_dev = pci_new(PCI_DEVFN(0, 0), "cmd646-ide");
         qdev_prop_set_uint32(DEVICE(s->ide_dev), "secondary", 1);
         if (!pci_realize_and_unref(s->ide_dev, pci_bus, errp)) {
@@ -3401,6 +4844,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         }
         ia64_vpc_configure_pci_irq(s->ide_dev);
         pci_ide_create_devs(s->ide_dev);
+        if (s->realfw_path != NULL) {
+            ia64_vpc_map_realfw_legacy_ide(s, pci_io);
+        }
     }
 #endif
 
@@ -3432,9 +4878,12 @@ static void ia64_vpc_machine_instance_init(Object *obj)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
+    s->fw_map_quirk_disable = IA64_VPC_FW_QUIRK_DEFAULT_DISABLE;
+
 #ifdef CONFIG_IA64_VPC_PS2
     s->i8042_enabled = true;
 #endif
+    s->fw_relocate = true;
 #ifdef CONFIG_IA64_VPC_STORAGE
     /*
      * Default the SATA controller off: Windows XP/2003 IA-64 ship no inbox
@@ -3452,6 +4901,8 @@ static void ia64_vpc_machine_instance_init(Object *obj)
 #else
     s->firmware_console = IA64_FW_CONSOLE_SERIAL;
 #endif
+    /* Boot manager waits for the user by default (like the EFI sample). */
+    s->firmware_boot_timeout = IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER;
     /* The 460GX GXB AGP GART is on by default, as on real hardware. */
     s->agp_enabled = true;
     /* Default display adapter: the Rage 128 (honouring -vga); mach64 opt-in. */
@@ -3468,6 +4919,7 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
     g_free(s->nvram_path);
     g_free(s->nvram_resolved_path);
     g_free(s->vga_model);
+    g_free(s->realfw_path);
 }
 
 static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
@@ -3501,13 +4953,28 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
 #else
     mc->block_default_type = IF_NONE;
 #endif
-    mc->no_serial = 0;
+    /*
+     * The firmware UART is created explicitly below (serial_mm_init with
+     * serial_hd(0)); do not also let QEMU synthesise a default serial VC.
+     * With -display sdl that default would pop a separate console window
+     * streaming the firmware's UART diagnostics -- which reads as a garbled,
+     * never-cleared display.  A user who wants the serial still gets it by
+     * passing -serial explicitly; no_serial only suppresses the auto VC.
+     */
+    mc->no_serial = 1;
     mc->no_parallel = 1;
     mc->no_floppy = 1;
     mc->no_cdrom = 1;
 
     ia64_vpc_add_compat_defaults(mc);
 
+    object_class_property_add_bool(oc, "fw-relocate",
+                                   ia64_vpc_get_fw_relocate,
+                                   ia64_vpc_set_fw_relocate);
+    object_class_property_set_description(oc, "fw-relocate",
+        "Shadow the firmware image at the top of low RAM (default on; "
+        "off keeps the historical 1 MB execution home - the A/B lever "
+        "for plans/firmware-rework-plan.md phase 2.2)");
     object_class_property_add_bool(oc, "i8042",
                                    ia64_vpc_get_i8042,
                                    ia64_vpc_set_i8042);
@@ -3545,11 +5012,54 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_set_firmware_ide_dma);
     object_class_property_set_description(oc, "firmware-ide-dma",
         "Set on/off to enable/disable firmware IDE bus-master DMA");
+    object_class_property_add_str(oc, "fw-quirks",
+                                  ia64_vpc_get_fw_quirks,
+                                  ia64_vpc_set_fw_quirks);
+    object_class_property_set_description(oc, "fw-quirks",
+        "Comma list of firmware memory-map quirks to toggle: '-name' "
+        "disables, '+name'/'name' re-enables, 'default' resets.  Names: "
+        "split-page, low-boundaries, low-anchor, anchor-version-sniff, "
+        "2g-scratch, pal-8k-page, acpi-low-island.  Retired quirks "
+        "(acpi-low-island, 2g-scratch, low-boundaries, low-anchor, "
+        "anchor-version-sniff) default off, the rest default on; "
+        "toggling changes the guest-visible EFI memory map -- "
+        "A/B rig for plans/firmware-rework-plan.md Phase 2");
     object_class_property_add_str(oc, "firmware-console",
                                   ia64_vpc_get_firmware_console,
                                   ia64_vpc_set_firmware_console);
     object_class_property_set_description(oc, "firmware-console",
         "Set firmware HCDP primary console to 'serial' or 'vga'");
+    object_class_property_add(oc, "firmware-boot-timeout", "uint16",
+                              ia64_vpc_get_boot_timeout,
+                              ia64_vpc_set_boot_timeout, NULL, NULL);
+    object_class_property_set_description(oc, "firmware-boot-timeout",
+        "Default boot-manager Timeout in seconds when no NVRAM 'Timeout' "
+        "variable exists: 0 boots the BootOrder immediately, 0xFFFF (the "
+        "default) waits for the user like the EFI sample.");
+    object_class_property_add_str(oc, "realfw",
+                                  ia64_vpc_get_realfw,
+                                  ia64_vpc_set_realfw);
+    object_class_property_set_description(oc, "realfw",
+        "Path to a real vendor flash image (e.g. the HP i2000 bios130.BIN) "
+        "to map ending at 4 GiB and enter at its architected SALE_ENTRY "
+        "pointer with synthesized PALE_RESET exit state, instead of the "
+        "project firmware (plans/phase5-real-firmware-boot.md)");
+    object_class_property_add_str(oc, "realfw-vga-rom",
+                                  ia64_vpc_get_realfw_vga_rom,
+                                  ia64_vpc_set_realfw_vga_rom);
+    object_class_property_set_description(oc, "realfw-vga-rom",
+        "Path to a real video-card option ROM to shadow at 0xC0000 for the "
+        "realfw video POST, instead of the emulated card's own vgabios.  Used "
+        "to run the vendor firmware against an authentic card BIOS (e.g. the "
+        "ATI Rage 128 Pro the SDV shipped with); realfw mode only.");
+    object_class_property_add_str(oc, "realfw-nvram",
+                                  ia64_vpc_get_realfw_nvram,
+                                  ia64_vpc_set_realfw_nvram);
+    object_class_property_set_description(oc, "realfw-nvram",
+        "Path to a writable file that persists the realfw flash (the firmware's "
+        "NVRAM/EFI-variable store) across runs.  Created from the realfw image "
+        "on first use; thereafter the flash is loaded from and written back to "
+        "it.  realfw mode only.");
     object_class_property_add_str(oc, "nvram",
                                   ia64_vpc_get_nvram,
                                   ia64_vpc_set_nvram);

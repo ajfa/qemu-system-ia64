@@ -198,15 +198,16 @@ typedef struct {
 
 #define TEST_UART_BASE               0x00000047f0000000ULL
 #define TEST_UART_SIZE               0x0000000000002000ULL
-#define TEST_RTC_BASE                0x00000000ffef0000ULL
-#define TEST_RTC_SIZE                0x0000000000002000ULL
-#define TEST_NVRAM_BASE              0x00000000fff00000ULL
+/* The RTC is a legacy CMOS device on the I/O ports now (rework D8); it no
+ * longer has a memory-mapped runtime descriptor of its own. */
+#define TEST_NVRAM_BASE              0x00000000fff90000ULL
 #define TEST_NVRAM_SIZE              0x0000000000010000ULL
-#define TEST_ECAM_BASE               0x0000007ff0000000ULL
-#define TEST_ECAM_SIZE               0x0000000010000000ULL
+/* PCI config window at the E8870 MMCFG home, 64 MiB = 64 buses (rework D7). */
+#define TEST_ECAM_BASE               0x00000ffff8000000ULL
+#define TEST_ECAM_SIZE               0x0000000004000000ULL
 #define TEST_PCI_MMIO_BASE           0x00000000ee000000ULL
 #define TEST_PCI_MMIO_SIZE           0x0000000010000000ULL
-#define TEST_SPARSE_IO_BASE          0x000000800010000000ULL
+#define TEST_SPARSE_IO_BASE          0x00000ffffc000000ULL
 #define TEST_SPARSE_IO_SIZE          0x0000000004000000ULL
 #define TEST_PM_IO_BASE              0x2000U
 #define TEST_HCDP_LENGTH             129U
@@ -2480,7 +2481,8 @@ static BOOLEAN test_acpi_mcfg(const TEST_TABLE_CONTEXT *Context)
     return get_u64(mcfg + 36U) == 0 &&
            get_u64(mcfg + 44U) == TEST_ECAM_BASE &&
            get_u16(mcfg + 52U) == 0 && mcfg[54U] == 0 &&
-           mcfg[55U] == 255U && get_u32(mcfg + 56U) == 0;
+           mcfg[55U] == (UINT8)(TEST_ECAM_SIZE / 0x100000U - 1U) &&
+           get_u32(mcfg + 56U) == 0;
 }
 
 static BOOLEAN test_platform_memory_descriptors(
@@ -2491,9 +2493,6 @@ static BOOLEAN test_platform_memory_descriptors(
     return Context->Valid &&
            memory_range_has_type(map, TEST_UART_BASE, TEST_UART_SIZE,
                                  EfiMemoryMappedIO, EFI_MEMORY_UC) &&
-           memory_range_has_type(map, TEST_RTC_BASE, TEST_RTC_SIZE,
-                                 EfiMemoryMappedIO,
-                                 EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) &&
            memory_range_has_type(map, TEST_NVRAM_BASE, TEST_NVRAM_SIZE,
                                  EfiMemoryMappedIO,
                                  EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) &&
@@ -2731,7 +2730,7 @@ EFI_STATUS ia64_services_main(EFI_HANDLE ImageHandle,
         ia64_test_check(&context, "platform-memory-descriptors",
                         tables_initialized &&
                             test_platform_memory_descriptors(&tables),
-                        EFI_DEVICE_ERROR, "uart-rtc-nvram-ecam-sparse-io");
+                        EFI_DEVICE_ERROR, "uart-nvram-ecam-sparse-io");
         ia64_test_check(&context, "pci-root-resources",
                         test_pci_root_resources(SystemTable), EFI_DEVICE_ERROR,
                         "bus-io-memory-windows");

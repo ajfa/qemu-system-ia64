@@ -47,7 +47,7 @@ static const UINT8 mDebugPortProtocolGuid[16] = {
 static EFI_DEBUGPORT_PROTOCOL mDebugPortProtocol;
 static EFI_HANDLE mDebugPortHandle;
 static UINT64 mDebugPortBase;
-static FW_DEBUGPORT_DEVICE_PATH mDebugPortDevicePath;
+static FW_DEBUGPORT_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mDebugPortDevicePath;
 
 #define DEBUG_UART_LSR_OVERRUN 0x02U
 #define DEBUG_UART_LSR_ERROR   0x1eU

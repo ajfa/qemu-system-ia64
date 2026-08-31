@@ -129,7 +129,28 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
         return address == entry_pa;
     }
 
-    if (ia64_firmware_identity_pa(env->cr_iva, address, env->psr,
+    /*
+     * A break 0x100000 only ever sits at a PAL entry.  If the virtual IP
+     * equals the physical entry, it is that entry reached through its identity
+     * mapping (virtual==physical), so match it directly -- BEFORE the resolvers
+     * below.  The firmware-identity and SAL-boot resolvers cover only our own
+     * firmware, not a vendor image whose PAL stub sits at 0xff100000, and the
+     * cached-TLB lookup can transiently miss the firmware's own ITLB entry (the
+     * instruction fetch that reached this break used the softmmu TLB while this
+     * match walks the guest TLB, so the two diverge).  Worse, if one of those
+     * resolvers instead resolves this identity-mapped IP to some OTHER physical
+     * address, the pa==entry_pa test wrongly fails and the PAL-hook
+     * interception, decided here at translate time, drops the break into the
+     * firmware's Break vector, which rfi-loops.  Deciding the identity case up
+     * front avoids both the transient miss and the mis-resolution.  (This
+     * supersedes the earlier "last resort" fallback that ran only after every
+     * resolver had failed, which a wrong resolution slipped past.)
+     */
+    if (address == entry_pa) {
+        return true;
+    }
+
+    if (ia64_firmware_identity_pa(env->fw_image_base, env->cr_iva, address, env->psr,
                                   address, &pa) ||
         ia64_sal_boot_virtual_pa(env, address, &pa)) {
         return pa == entry_pa;
@@ -154,7 +175,8 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
 
 bool ia64_is_pal_proc_break(CPUIA64State *env, uint64_t address)
 {
-    const uint64_t pal_proc_entry_pa = IA64_FW_IDENTITY_BASE + 0x60;
+    const uint64_t pal_proc_entry_pa =
+        env->fw_image_base + IA64_FW_PAL_PROC_ENTRY_OFF;
 
     if (ia64_instruction_address_matches_physical_entry(
             env, address, pal_proc_entry_pa)) {
@@ -169,22 +191,25 @@ bool ia64_is_pal_proc_break(CPUIA64State *env, uint64_t address)
 bool ia64_is_sal_runtime_break(CPUIA64State *env, uint64_t address,
                                uint64_t imm)
 {
-    uint64_t entry_pa = imm == 0x100005 ? IA64_FW_SAL_RUNTIME_ENTRY_PA
-                                        : IA64_FW_SAL_RUNTIME_RETURN_PA;
+    uint64_t entry_pa = env->fw_image_base +
+        (imm == 0x100005 ? IA64_FW_SAL_RUNTIME_ENTRY_OFF
+                         : IA64_FW_SAL_RUNTIME_RETURN_OFF);
 
     return ia64_instruction_address_matches_physical_entry(env, address,
                                                            entry_pa);
 }
 
-bool ia64_is_firmware_debug_break(uint64_t address, uint64_t imm)
+bool ia64_is_firmware_debug_break(CPUIA64State *env, uint64_t address,
+                                  uint64_t imm)
 {
     if (imm == 0x100002) {
-        return address >= IA64_FIRMWARE_IVT_BASE &&
-               address < IA64_FIRMWARE_IVT_BASE + 0x8000;
+        uint64_t ivt = env->fw_image_base + IA64_FW_IVT_OFFSET;
+
+        return address >= ivt && address < ivt + 0x8000;
     }
     if (imm == 0x100003 || imm == 0x100004) {
-        return address >= IA64_FW_IDENTITY_BASE &&
-               address < IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE;
+        return address >= env->fw_image_base &&
+               address < env->fw_image_base + IA64_FW_IDENTITY_SIZE;
     }
     return false;
 }
@@ -958,6 +983,7 @@ static IA64AlignAcMode ia64_align_ac_mode(const Ia64Instruction *insn)
 static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
                                                bool always_fault,
                                                IA64AlignAcMode ac_mode,
+                                               bool is_write,
                                                TCGLabel *fault)
 {
     TCGv_i64 tmp;
@@ -972,21 +998,44 @@ static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
     tcg_gen_andi_i64(tmp, addr, size - 1);
     tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, ok);
 
-    if (always_fault || ac_mode == IA64_ALIGN_AC_SET) {
-        /* Misaligned always faults (PSR.ac set, or an alignment-required op). */
+    if (always_fault) {
+        /*
+         * Semaphore and ld16/st16 misalignment faults regardless of PSR.ac and
+         * of the memory attribute (SDM Vol.2 4.5), so it is never exempt.
+         */
         tcg_gen_br(fault);
     } else {
-        if (ac_mode == IA64_ALIGN_AC_RUNTIME) {
-            tcg_gen_andi_i64(tmp, cpu_psr, IA64_PSR_AC);
-            tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, fault);
-        }
         /*
-         * PSR.ac clear: a misaligned access still faults if it crosses a
-         * 4 KiB page boundary (SDM Vol.2 5.5.4).
+         * A misaligned ordinary reference faults when PSR.ac is set, or (with
+         * PSR.ac clear) when it crosses a 4 KiB page boundary (SDM Vol.2 5.5.4).
+         * But unaligned references to the I/O port space -- and more generally
+         * to any non-writeback-cacheable (UC/MMIO) target the platform
+         * decomposes -- are NOT detected as alignment faults, even with PSR.ac
+         * set (SDM Vol.2, "I/O port space"; PSR.ac == EFLAG.ac).  So gather the
+         * fault conditions and, only when one holds, consult the runtime
+         * exemption before actually faulting -- keeping the aligned and
+         * PSR.ac-clear-in-page fast paths free of the probing helper.
          */
-        tcg_gen_andi_i64(tmp, addr, 0xfff);
-        tcg_gen_addi_i64(tmp, tmp, size - 1);
-        tcg_gen_brcondi_i64(TCG_COND_GTU, tmp, 0xfff, fault);
+        TCGLabel *maybe_fault = gen_new_label();
+
+        if (ac_mode == IA64_ALIGN_AC_SET) {
+            tcg_gen_br(maybe_fault);
+        } else {
+            if (ac_mode == IA64_ALIGN_AC_RUNTIME) {
+                tcg_gen_andi_i64(tmp, cpu_psr, IA64_PSR_AC);
+                tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, maybe_fault);
+            }
+            tcg_gen_andi_i64(tmp, addr, 0xfff);
+            tcg_gen_addi_i64(tmp, tmp, size - 1);
+            tcg_gen_brcondi_i64(TCG_COND_GTU, tmp, 0xfff, maybe_fault);
+            tcg_gen_br(ok);
+        }
+
+        gen_set_label(maybe_fault);
+        gen_helper_ia64_alignment_exempt(tmp, tcg_env, addr,
+                                         tcg_constant_i32(size),
+                                         tcg_constant_i32(is_write));
+        tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, fault);
     }
 
     gen_set_label(ok);
@@ -1007,7 +1056,8 @@ void ia64_gen_check_alignment_access(const Ia64Instruction *insn,
     fault = gen_new_label();
     ok = gen_new_label();
     ia64_gen_branch_if_alignment_fault(addr, size, always_fault,
-                                       ia64_align_ac_mode(insn), fault);
+                                       ia64_align_ac_mode(insn),
+                                       (isr_access & IA64_ISR_W) != 0, fault);
     tcg_gen_br(ok);
 
     gen_set_label(fault);
@@ -2709,10 +2759,74 @@ bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     return false;
 }
 
+/*
+ * One-shot guest-physical dump when a guest virtual page is first translated:
+ *   IA64_DUMP_ON_TRANSLATE=<trigger-va>:<phys-base>:<length>:<file>
+ * fires the first time a TB whose entry pc lands in <trigger-va>'s 4 KiB page
+ * is translated, writing guest-physical [<phys-base>, +<length>) to <file>.
+ * Debug rig for capturing an OS loader's phase-0 memory-descriptor lists at a
+ * precise code point without a debugger (plans/firmware-rework-plan.md
+ * experiment E1; generalizes the scratch IA64_DUMP_TRIM hook from the RC 3663
+ * investigation).  Zero cost unless the environment variable is set.
+ */
+static void ia64_dump_on_translate(uint64_t pc)
+{
+    static int state; /* 0 unparsed, -1 off, 1 armed, 2 fired */
+    static uint64_t trigger_va;
+    static uint64_t dump_pa;
+    static uint64_t dump_len;
+    static char dump_file[256];
+
+    if (state < 0 || state == 2) {
+        return;
+    }
+    if (state == 0) {
+        const char *spec = getenv("IA64_DUMP_ON_TRANSLATE");
+        char *end;
+
+        state = -1;
+        if (spec == NULL) {
+            return;
+        }
+        trigger_va = strtoull(spec, &end, 0);
+        if (*end != ':') {
+            return;
+        }
+        dump_pa = strtoull(end + 1, &end, 0);
+        if (*end != ':') {
+            return;
+        }
+        dump_len = strtoull(end + 1, &end, 0);
+        if (*end != ':' || dump_len == 0 ||
+            strlen(end + 1) >= sizeof(dump_file)) {
+            return;
+        }
+        g_strlcpy(dump_file, end + 1, sizeof(dump_file));
+        state = 1;
+    }
+    if ((pc >> 12) == (trigger_va >> 12)) {
+        void *buf = g_malloc(dump_len);
+        FILE *f = fopen(dump_file, "wb");
+
+        cpu_physical_memory_read(dump_pa, buf, dump_len);
+        if (f != NULL) {
+            fwrite(buf, 1, dump_len, f);
+            fclose(f);
+        }
+        g_free(buf);
+        fprintf(stderr, "IA64_DUMP_ON_TRANSLATE: pc=0x%" PRIx64
+                " dumped [0x%" PRIx64 ", +0x%" PRIx64 ") to %s\n",
+                pc, dump_pa, dump_len, dump_file);
+        state = 2;
+    }
+}
+
 static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
 {
     DisasContext *ctx = container_of(db, DisasContext, base);
     uint32_t flags = ctx->base.tb->flags;
+
+    ia64_dump_on_translate(ctx->base.pc_first);
 
     ctx->env = cpu_env(cs);
     ctx->memory.mmu_idx = (flags & IA64_TB_FLAG_DT) ?
@@ -2792,6 +2906,82 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         gen_helper_ia32_unsupported(tcg_env);
         db->is_jmp = DISAS_NORETURN;
         return;
+    }
+
+    {
+        /* Full-speed IP trace (debug).  IA64_IPTRACE=hex[,hex...] lists
+         * bundle IPs to log when executed (helper_ia64_ip_trace). */
+        static bool tgt_read;
+        static uint64_t tgt[8];
+        static int ntgt;
+
+        if (!tgt_read) {
+            const char *e = getenv("IA64_IPTRACE");
+
+            tgt_read = true;
+            while (e && *e && ntgt < 8) {
+                tgt[ntgt++] = strtoull(e, (char **)&e, 16);
+                if (*e == ',') {
+                    e++;
+                }
+            }
+        }
+        for (int i = 0; i < ntgt; i++) {
+            if (bundle_ip == tgt[i]) {
+                tcg_gen_movi_i64(cpu_ip, bundle_ip);
+                gen_helper_ia64_ip_trace(tcg_env);
+                break;
+            }
+        }
+    }
+
+    {
+        /* Region-gated ring trace (debug).  IA64_TRACE="lo:hi" records a full
+         * register snapshot for every bundle in [lo,hi); IA64_TRACE_TRIG=<hex>
+         * dumps the ring.  See helper_ia64_trace_rec/dump. */
+        static bool trace_read;
+        static uint64_t trace_lo, trace_hi, trace_trig;
+        static uint64_t trace_xlo, trace_xhi, trace_xlo2, trace_xhi2;
+
+        if (!trace_read) {
+            const char *e = getenv("IA64_TRACE");
+            const char *colon = e ? strchr(e, ':') : NULL;
+            const char *t = getenv("IA64_TRACE_TRIG");
+            const char *x = getenv("IA64_TRACE_EXCL");
+            const char *xcolon = x ? strchr(x, ':') : NULL;
+            const char *x2 = getenv("IA64_TRACE_EXCL2");
+            const char *x2colon = x2 ? strchr(x2, ':') : NULL;
+
+            if (colon) {
+                trace_lo = strtoull(e, NULL, 16);
+                trace_hi = strtoull(colon + 1, NULL, 16);
+            }
+            if (t) {
+                trace_trig = strtoull(t, NULL, 16);
+            }
+            if (xcolon) {
+                trace_xlo = strtoull(x, NULL, 16);
+                trace_xhi = strtoull(xcolon + 1, NULL, 16);
+            }
+            if (x2colon) {
+                trace_xlo2 = strtoull(x2, NULL, 16);
+                trace_xhi2 = strtoull(x2colon + 1, NULL, 16);
+            }
+            trace_read = true;
+        }
+        if (trace_hi > trace_lo &&
+            bundle_ip >= trace_lo && bundle_ip < trace_hi &&
+            !(trace_xhi > trace_xlo &&
+              bundle_ip >= trace_xlo && bundle_ip < trace_xhi) &&
+            !(trace_xhi2 > trace_xlo2 &&
+              bundle_ip >= trace_xlo2 && bundle_ip < trace_xhi2)) {
+            tcg_gen_movi_i64(cpu_ip, bundle_ip);
+            gen_helper_ia64_trace_rec(tcg_env);
+        }
+        if (trace_trig && bundle_ip == trace_trig) {
+            tcg_gen_movi_i64(cpu_ip, bundle_ip);
+            gen_helper_ia64_trace_dump(tcg_env);
+        }
     }
 
     low = translator_ldq_end(ctx->env, db, bundle_ip, MO_LE);

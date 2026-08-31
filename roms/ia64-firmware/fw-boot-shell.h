@@ -60,10 +60,7 @@
 #define FW_NVRAM_VARIABLE_DATA_MAX 1024U
 #define NVRAM_VAR_DATA_MAX FW_NVRAM_VARIABLE_DATA_MAX
 
-typedef struct {
-    UINT16 ScanCode;
-    CHAR16 UnicodeChar;
-} EFI_INPUT_KEY;
+/* EFI_INPUT_KEY lives in fw-efi-types.h. */
 
 typedef struct {
     UINT16 Year;
@@ -152,6 +149,8 @@ UINT16 conin_ansi_numeric_scan(UINTN number);
 
 EFI_STATUS fw_console_read_key(EFI_INPUT_KEY *key);
 EFI_STATUS fw_console_clear(VOID);
+void fw_console_set_cursor_visible(BOOLEAN Visible);
+void fw_console_set_attr(UINTN Attribute);
 BOOLEAN fw_boot_services_exited(VOID);
 
 EFI_STATUS bs_handle_protocol(EFI_HANDLE handle, VOID *protocol,
@@ -187,6 +186,7 @@ void fw_boot_option_name(UINT16 option, CHAR16 name[9]);
 UINTN fw_load_option_description_size(const UINT8 *option,
                                       UINTN option_size);
 EFI_STATUS fw_boot_image_from_boot_option(UINT16 option_number);
+BOOLEAN fw_device_path_is_internal_shell(const VOID *DevicePath);
 
 UINTN fw_partition_count(VOID);
 UINTN fw_processor_count(VOID);
@@ -194,12 +194,14 @@ UINT64 fw_installed_ram_size(VOID);
 BOOLEAN fw_handoff_vga_console_primary(VOID);
 UINT32 fw_graphics_width(VOID);
 UINT32 fw_graphics_height(VOID);
+void graphics_set_text_cursor(UINT16 Location, BOOLEAN Visible);
 const CHAR8 *fw_storage_description(BOOLEAN boot_device);
 BOOLEAN fw_handoff_nvram_persistent(VOID);
+UINT16 fw_handoff_boot_timeout(VOID);
 void fw_reset_cold(VOID);
 
-BOOLEAN fw_boot_shell_hotkey_window(VOID);
 BOOLEAN fw_boot_shell_selftest(VOID);
 void fw_boot_shell_run(VOID);
+void fw_boot_menu_run(VOID);
 
 #endif /* IA64_FIRMWARE_FW_BOOT_SHELL_H */

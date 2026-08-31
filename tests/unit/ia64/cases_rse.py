@@ -4841,7 +4841,7 @@ test_rse_firmware_unaligned_postinc_marks_stacked_base_dirty = \
         (0x90, *movl_mlx(4, 0x99aabbccddeeff00)),
         (0xa0, 0x00, st8(2, 4), nop_i(),
          nop_i()),
-        (0xb0, 0x00, addl(2, 0x10000, 0), nop_i(), nop_i()),
+        (0xb0, 0x00, addl(2, 0x108000, 0), nop_i(), nop_i()),
         (0xc0, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
         (0xd0, 0x00, nop_m(), alloc(36, 5, 5, 0, 0),
          addl(33, 0x8004, 0)),

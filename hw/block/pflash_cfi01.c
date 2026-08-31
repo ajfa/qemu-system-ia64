@@ -498,7 +498,15 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
             break;
         case 0x50: /* Clear status bits */
             trace_pflash_write(pfl->name, "clear status bits");
-            pfl->status = 0x0;
+            /*
+             * Clear Status Register clears only the error bits SR.5/4/3/1
+             * (program/erase/sequence/protect errors); the WSM-ready bit
+             * SR.7 reflects the state machine and stays set while idle.
+             * Wiping the whole register would report "not ready" to a guest
+             * that probes the part by issuing Clear-Status then Read-Status
+             * (e.g. IA-64 SDV firmware), which then treats the flash as dead.
+             */
+            pfl->status &= ~0x3a;
             goto mode_read_array;
         case 0x60: /* Block (un)lock */
             trace_pflash_write(pfl->name, "block unlock");

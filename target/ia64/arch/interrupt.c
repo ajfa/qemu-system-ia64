@@ -234,6 +234,37 @@ void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
     }
 }
 
+static void ia64_sapic_set_extint_work(CPUState *cs, run_on_cpu_data data)
+{
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+
+    /*
+     * ExtINT is SAPIC vector 0 and is level-sensitive: it follows the external
+     * 8259 PIC's INTR line rather than latching like a normal edge-delivered
+     * vector.  Track the line directly in IRR bit 0 so that de-asserting INTR
+     * (for example when firmware masks the PIC before draining IVR) withdraws
+     * the pending ExtINT instead of leaving a phantom vector 0 that a stray
+     * IVR read would move in-service and never EOI.
+     */
+    if (data.host_int) {
+        cpu->env.interrupt.sapic_irr[0] |= 1ULL;
+    } else {
+        cpu->env.interrupt.sapic_irr[0] &= ~1ULL;
+    }
+    ia64_sapic_update_interrupt(&cpu->env);
+}
+
+void ia64_sapic_set_extint(CPUState *cs, int level)
+{
+    run_on_cpu_data data = RUN_ON_CPU_HOST_INT(!!level);
+
+    if (qemu_cpu_is_self(cs)) {
+        ia64_sapic_set_extint_work(cs, data);
+    } else {
+        async_run_on_cpu(cs, ia64_sapic_set_extint_work, data);
+    }
+}
+
 static void ia64_itm_raise(CPUIA64State *env, uint64_t itm_value)
 {
     IA64CPU *cpu = container_of(env, IA64CPU, env);
