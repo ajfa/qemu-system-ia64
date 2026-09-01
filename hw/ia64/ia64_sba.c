@@ -48,6 +48,21 @@
 /* IOVA span covered by the translating region (50-bit IOC physical reach). */
 #define IA64_SBA_IOMMU_SIZE            (HP_ZX1_IOMMU_PHYS_MASK + UINT64_C(1))
 
+/*
+ * The "safe IOVA space" the IOC advertises through its IBASE/IMASK registers.
+ * On real zx1 the firmware programs a window that overlaps neither DRAM nor
+ * LMMIO; the OS (Linux sba_iommu) *reads* it to size its in-DRAM IOPDIR
+ * (iov_size = ~imask + 1) before programming its own mappings -- with a 0 mask
+ * it would try to allocate a 4 GiB-worth page table and panic ("IOC: Couldn't
+ * allocate I/O Page Table").  We present the classic 1 GiB window at 1 GiB: it
+ * is 32-bit-addressable (so a 32-bit master like the Rage 128 can issue IOVAs
+ * into it) and the OS's low bounce/swiotlb buffers sit below it.  The IBASE
+ * enable bit is left clear at reset, so until an sba_iommu-class OS turns
+ * translation on the IOC stays in bypass and every other guest DMAs directly.
+ */
+#define IA64_SBA_IOVA_BASE            UINT64_C(0x0000000040000000)
+#define IA64_SBA_IOVA_SIZE            UINT64_C(0x0000000040000000) /* 1 GiB */
+
 /* A whole-aperture UNMAP, emitted on non-PCOM register writes and on reset. */
 static const HPSBAIOMMUPurge ia64_sba_full_unmap = {
     .iova = 0,
@@ -260,8 +275,20 @@ static const PCIIOMMUOps ia64_sba_iommu_ops = {
 
 static void ia64_sba_frontend_reset(IA64SBAState *s)
 {
-    /* All-zero config: IBASE.enable clear => the IOC is in bypass. */
-    HPZX1IOMMUResetConfig config = { 0 };
+    /*
+     * Present the firmware-programmed safe IOVA window in IBASE/IMASK, with the
+     * IBASE enable bit clear so the IOC starts in bypass (identity DMA) until an
+     * OS turns translation on.  imask encodes the window size the same way the
+     * hardware does: iov_size = ~imask + 1 (the high 32 bits are don't-care --
+     * both this model and Linux force them set).
+     */
+    HPZX1IOMMUResetConfig config = {
+        .ibase = IA64_SBA_IOVA_BASE,          /* enable bit (bit0) clear */
+        .imask = ~(IA64_SBA_IOVA_SIZE - 1),   /* 1 GiB => 0xffffffffc0000000 */
+        .pcom = 0,
+        .tcnfg = 0,
+        .pdir_base = 0,
+    };
     bool ok = hp_zx1_iommu_frontend_reset(&s->fe, &config);
 
     g_assert(ok);

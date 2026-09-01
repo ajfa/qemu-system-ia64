@@ -44,12 +44,29 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
             Name (_CID, EisaId ("PNP0A05"))
             Name (_UID, Zero)
             Name (_CCA, One)
-            // The IOC CSR block.  Linux sba_iommu takes this base and reads the
-            // IOC registers at base + ZX1_IOC_OFFSET(0x1000) + IBASE(0x300);
-            // the model maps the IOMMU register window at CSR offset 0x1300.
-            // Keep in lockstep with IA64_SBA_CSR_BASE / IA64_SBA_CSR_SIZE.
+            // The IOC CSR block.  Linux sba_iommu locates the IOC base NOT from
+            // a memory descriptor but from an HP-specific "CCSR" vendor-defined
+            // resource: hp_acpi_csr_space() -> acpi_find_vendor_resource() looks
+            // for a Vendor-Defined Large (0x84) resource whose data is
+            //   guid_id=0x02, GUID 69e9adf9-924f-ab5f-f64a-24d201370ead,
+            //   then u64 csr_base + u64 csr_length (16-byte payload).
+            // It then reads the IOC registers at csr_base + ZX1_IOC_OFFSET
+            // (0x1000) + IBASE(0x300); the model maps the IOMMU register window
+            // at CSR offset 0x1300.  Emitting only a memory descriptor (as a
+            // first attempt did) leaves the IOC uninitialised.  The GUID bytes
+            // below are the EFI_GUID(0x69e9adf9,0x924f,0xab5f,f6,4a,24,d2,01,37,
+            // 0e,ad) little-endian encoding.  Keep the base/length in lockstep
+            // with IA64_SBA_CSR_BASE / IA64_SBA_CSR_SIZE.
             Name (_CRS, ResourceTemplate ()
             {
+                VendorLong ()
+                {
+                    0x02,                                           // guid_id
+                    0xF9, 0xAD, 0xE9, 0x69, 0x4F, 0x92, 0x5F, 0xAB, // GUID[0:7]
+                    0xF6, 0x4A, 0x24, 0xD2, 0x01, 0x37, 0x0E, 0xAD, // GUID[8:15]
+                    0x00, 0x00, 0xD0, 0xFE, 0x00, 0x00, 0x00, 0x00, // base 0xFED00000
+                    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00  // length 0x10000
+                }
                 Memory32Fixed (ReadWrite, 0xFED00000, 0x00010000)
             })
 
