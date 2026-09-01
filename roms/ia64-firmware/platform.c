@@ -248,10 +248,24 @@ void fw_init_guest_high_ram_ranges(UINT64 RamSize)
      * Match real 460GX: low DRAM is contiguous from 0 to the PCI/MMIO aperture
      * (mGuestLowRamEnd), and anything displaced by the top-of-memory gap is
      * remapped ABOVE 4 GiB.  There is no sub-4 GiB DRAM island above the
-     * aperture.  (Keep this in lockstep with ia64_vpc_map_ram() in
-     * hw/ia64/ia64_vpc.c.)
+     * aperture.
+     *
+     * The zx1 machine additionally carves the 1 GiB SBA "safe IOVA space" hole
+     * out of the low band (fw_zx1_iova_hole_active(): zx1 with RAM past the
+     * aperture), so its low band holds IA64_SBA_IOVA_SIZE fewer bytes and that
+     * much more DRAM is displaced above 4 GiB.  In that regime mGuestLowRamEnd
+     * is the aperture, so subtracting the hole size is exact.  (Keep this in
+     * lockstep with ia64_vpc_map_ram() in hw/ia64/ia64_vpc.c and
+     * efi_add_low_ram_band() above.)
      */
-    remaining = RamSize > mGuestLowRamEnd ? RamSize - mGuestLowRamEnd : 0;
+    {
+        UINT64 low_band = mGuestLowRamEnd;
+
+        if (fw_zx1_iova_hole_active()) {
+            low_band -= IA64_SBA_IOVA_SIZE;
+        }
+        remaining = RamSize > low_band ? RamSize - low_band : 0;
+    }
     fw_add_guest_high_ram_range(FW_FIRMWARE_ADDRESS_SPACE_END,
                                 ~0ULL, &remaining);
 }
@@ -602,6 +616,22 @@ BOOLEAN fw_platform_is_460gx(void)
     family = (fw_read_cpuid3() >> IA64_CPUID3_FAMILY_SHIFT) &
              IA64_CPUID3_FAMILY_MASK;
     return family == IA64_CPUID3_FAMILY_MERCED;
+}
+
+/*
+ * True when the SBA "safe IOVA space" DRAM hole is carved for this boot: the
+ * zx1 machine, with installed RAM past the PCI aperture so there is already
+ * displaced above-4-GiB RAM and the low band fills to the aperture regardless.
+ * Only in that regime does the hole leave mGuestLowRamEnd and the firmware's
+ * aperture-relative self-placement untouched, keeping the QEMU RAM map and the
+ * firmware EFI/high-RAM ranges trivially consistent.  A guest at or below the
+ * aperture uses the contiguous 460gx-identical layout (no hole).  Keep the
+ * predicate identical to the `remaining > IA64_LOW_RAM_LIMIT` gate in
+ * ia64_vpc_map_ram().
+ */
+BOOLEAN fw_zx1_iova_hole_active(void)
+{
+    return fw_platform_is_zx1() && fw_guest_ram_size() > FW_LOW_RAM_LIMIT;
 }
 
 UINT16 fw_sal_revision(void)

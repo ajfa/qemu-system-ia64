@@ -49,19 +49,16 @@
 #define IA64_SBA_IOMMU_SIZE            (HP_ZX1_IOMMU_PHYS_MASK + UINT64_C(1))
 
 /*
- * The "safe IOVA space" the IOC advertises through its IBASE/IMASK registers.
- * On real zx1 the firmware programs a window that overlaps neither DRAM nor
- * LMMIO; the OS (Linux sba_iommu) *reads* it to size its in-DRAM IOPDIR
- * (iov_size = ~imask + 1) before programming its own mappings -- with a 0 mask
- * it would try to allocate a 4 GiB-worth page table and panic ("IOC: Couldn't
- * allocate I/O Page Table").  We present the classic 1 GiB window at 1 GiB: it
- * is 32-bit-addressable (so a 32-bit master like the Rage 128 can issue IOVAs
- * into it) and the OS's low bounce/swiotlb buffers sit below it.  The IBASE
- * enable bit is left clear at reset, so until an sba_iommu-class OS turns
- * translation on the IOC stays in bypass and every other guest DMAs directly.
+ * The "safe IOVA space" the IOC advertises through its IBASE/IMASK registers
+ * (IA64_SBA_IOVA_BASE/SIZE, in ia64_vpc_abi.h): the OS's sba_iommu *reads* it to
+ * size its in-DRAM IOPDIR (iov_size = ~imask + 1) before programming its own
+ * mappings -- with a 0 mask it would try to allocate a 4 GiB-worth page table
+ * and panic ("IOC: Couldn't allocate I/O Page Table").  It is the classic 1 GiB
+ * window at 1 GiB, 32-bit-addressable so a 32-bit master (the Rage 128) can
+ * issue IOVAs into it, and the zx1 machine keeps a DRAM hole there so it
+ * overlaps no memory.  The IBASE enable bit is left clear at reset, so until an
+ * sba_iommu-class OS turns translation on the IOC stays in bypass.
  */
-#define IA64_SBA_IOVA_BASE            UINT64_C(0x0000000040000000)
-#define IA64_SBA_IOVA_SIZE            UINT64_C(0x0000000040000000) /* 1 GiB */
 
 /* A whole-aperture UNMAP, emitted on non-PCOM register writes and on reset. */
 static const HPSBAIOMMUPurge ia64_sba_full_unmap = {

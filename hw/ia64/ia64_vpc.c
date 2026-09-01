@@ -2717,15 +2717,45 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
      * remapped above 4 GiB.  There is no DRAM island between the aperture and
      * the chipset region.  With the IOSAPIC no longer parked at 2 GiB the low
      * band is a single unbroken run, which also avoids the fragmented
-     * single-DMA-zone layout that Linux 2.6.8 IA-64 mishandled.  Keep this in
-     * lockstep with fw_init_guest_high_ram_ranges() in
-     * roms/ia64-firmware/firmware.c.
+     * single-DMA-zone layout that Linux 2.6.8 IA-64 mishandled.
+     *
+     * The zx1 machine additionally carves a DRAM hole for the SBA "safe IOVA
+     * space" [IA64_SBA_IOVA_BASE, IA64_SBA_IOVA_END) (1-2 GiB): the RAM that
+     * would sit there is shifted up past IA64_SBA_IOVA_END, so the enabled IOVA
+     * window overlaps no DRAM (see IA64_SBA_IOVA_BASE in ia64_vpc_abi.h).
+     *
+     * The hole is only carved once installed RAM exceeds the PCI aperture
+     * (IA64_LOW_RAM_LIMIT ~= 3.72 GiB), i.e. exactly when there is already RAM
+     * displaced above 4 GiB.  In that regime the low band fills to the aperture
+     * regardless of the hole, so the firmware's aperture-relative self-placement
+     * (image, CPU-assist, SRAT/SMBIOS top) is unaffected and the two maps stay
+     * trivially consistent.  For a guest at or below the aperture the layout is
+     * identical to 460gx (a single contiguous low run) -- carving the hole there
+     * would move the top of low RAM and the firmware image with it, which needs
+     * a hole-aware low_ram_end the firmware does not yet compute.  See
+     * plans/zx1-chipset-port-plan.md for the mid-range follow-up.
+     *
+     * Keep this in lockstep with fw_init_guest_high_ram_ranges() +
+     * efi_add_low_ram_band() in roms/ia64-firmware/.
      */
-    size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
-                                  IA64_LOW_RAM_LIMIT,
-                                  "ia64-vpc.low-ram");
-    offset += size;
-    remaining -= size;
+    if (ia64_vpc_chipset_is_zx1(s) && remaining > IA64_LOW_RAM_LIMIT) {
+        size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
+                                      IA64_SBA_IOVA_BASE,
+                                      "ia64-vpc.low-ram-below-iova");
+        offset += size;
+        remaining -= size;
+        size = ia64_vpc_map_ram_alias(s, IA64_SBA_IOVA_END, offset, remaining,
+                                      IA64_LOW_RAM_LIMIT - IA64_SBA_IOVA_END,
+                                      "ia64-vpc.low-ram-above-iova");
+        offset += size;
+        remaining -= size;
+    } else {
+        size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
+                                      IA64_LOW_RAM_LIMIT,
+                                      "ia64-vpc.low-ram");
+        offset += size;
+        remaining -= size;
+    }
 
     ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_AFTER_FIRMWARE_BASE,
                            offset, remaining, remaining,

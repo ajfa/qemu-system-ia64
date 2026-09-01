@@ -239,6 +239,30 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  */
 #define IA64_SBA_CSR_BASE             IA64_U64(0x00000000fed00000)
 #define IA64_SBA_CSR_SIZE             IA64_U64(0x0000000000010000)
+/*
+ * The zx1 SBA "safe IOVA space": the 1 GiB window at 1 GiB the IOC advertises
+ * through IBASE/IMASK and that the OS's sba_iommu allocates IOVAs from.  On the
+ * zx1 machine this range is a DRAM HOLE -- the machine shifts the RAM that would
+ * sit here up past the window, exactly as real zx1 keeps a "Virtual I/O" hole so
+ * the IOVA window never overlaps memory.  Without the hole, Linux sba_iommu's
+ * ALLOW_IOV_BYPASS path (which DMAs to a buffer's raw physical address) can put
+ * a >1 GiB buffer inside the enabled window and have the IOC mis-translate it.
+ *
+ * The hole is only carved when installed RAM exceeds the PCI aperture
+ * (IA64_PCI_MMIO_BASE), i.e. when there is already RAM displaced above 4 GiB and
+ * the low band fills to the aperture regardless of the hole (see the gate in
+ * hw/ia64/ia64_vpc.c and fw_zx1_iova_hole_active() in the firmware).  Carving it
+ * for a smaller guest would move the top of low RAM -- and the firmware image,
+ * CPU-assist region and SRAT/SMBIOS ranges pinned near it -- which needs a
+ * hole-aware low_ram_end the firmware does not yet compute; see
+ * plans/zx1-chipset-port-plan.md.  hw/ia64/ia64_vpc.c (RAM map),
+ * roms/ia64-firmware/efi_memmap.c (EFI map) and platform.c (high-RAM ranges)
+ * carve this hole in lockstep.
+ */
+#define IA64_SBA_IOVA_BASE            IA64_U64(0x0000000040000000)
+#define IA64_SBA_IOVA_SIZE            IA64_U64(0x0000000040000000) /* 1 GiB */
+#define IA64_SBA_IOVA_END \
+    (IA64_SBA_IOVA_BASE + IA64_SBA_IOVA_SIZE)
 /* 16 MiB PAL/SAL firmware address space below 4 GiB. */
 #define IA64_FW_ADDRESS_SPACE_BASE    IA64_U64(0x00000000ff000000)
 #define IA64_FW_ADDRESS_SPACE_SIZE    IA64_U64(0x0000000001000000)

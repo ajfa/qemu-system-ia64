@@ -138,6 +138,7 @@ extern const UINT8 mDevicePathProtocolGuid[16];
 
 UINT64 fw_guest_ram_size(void);
 UINT64 fw_guest_low_ram_end(void);
+BOOLEAN fw_zx1_iova_hole_active(void);
 UINTN fw_guest_processor_count(void);
 UINTN fw_guest_socket_count(void);
 UINTN fw_guest_cores_per_socket(void);
