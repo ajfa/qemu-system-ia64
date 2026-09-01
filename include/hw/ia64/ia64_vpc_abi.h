@@ -240,6 +240,20 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_SBA_CSR_BASE             IA64_U64(0x00000000fed00000)
 #define IA64_SBA_CSR_SIZE             IA64_U64(0x0000000000010000)
 /*
+ * The IOC (MIO "function 1") identity registers, read by Linux sba_iommu's
+ * ioc_init() at IOC base + 0x000 (FUNC_ID) and + 0x008 (FCLASS).  Values from
+ * the HP zx1 mio ERS (Reg 21/22, p.46-47) and upstream hp-zx1-mio-regs.c:
+ * FUNC_ID = device 0x122a (IOC) | vendor 0x103c (HP); FCLASS low byte 0x23 is
+ * revision 2.3 (>= the 2.0 the driver requires), then class 0x068000 and a
+ * 0x20 (128-byte) cache-line.  With FUNC_ID served, the driver's
+ * func_id == ZX1_IOC_ID test passes and it runs the zx1-specific ioc_zx1_init()
+ * path (name, dma_mask, rope config) instead of falling back to the generic
+ * "Unknown 0.0" IOC.  These live in the IOC function block (CSR offset 0x1000);
+ * keep in lockstep with ia64_sba.c.
+ */
+#define IA64_SBA_IOC_FUNC_ID          IA64_U64(0x00000000122a103c)
+#define IA64_SBA_IOC_FCLASS           IA64_U64(0x0000002006800023)
+/*
  * The zx1 SBA "safe IOVA space": the 1 GiB window at 1 GiB the IOC advertises
  * through IBASE/IMASK and that the OS's sba_iommu allocates IOVAs from.  On the
  * zx1 machine this range is a DRAM HOLE -- the machine shifts the RAM that would

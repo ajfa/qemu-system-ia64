@@ -41,6 +41,9 @@
  * IMASK, PCOM, TCNFG, PDIR_BASE) are at frontend offsets 0x300..0x320.
  */
 #define IA64_SBA_IOC_FUNCTION_OFFSET   UINT64_C(0x1000)
+/* IOC identity registers at the function block base: FUNC_ID + FCLASS. */
+#define IA64_SBA_IOC_FUNC_ID_OFFSET    (IA64_SBA_IOC_FUNCTION_OFFSET + 0x000)
+#define IA64_SBA_IOC_FCLASS_OFFSET     (IA64_SBA_IOC_FUNCTION_OFFSET + 0x008)
 #define IA64_SBA_IOMMU_FIRST           UINT64_C(0x1300)
 #define IA64_SBA_IOMMU_LAST            UINT64_C(0x1320)
 #define IA64_SBA_IOMMU_END             UINT64_C(0x1328)
@@ -171,10 +174,32 @@ static bool ia64_sba_is_iommu_addr(hwaddr addr)
     return addr >= IA64_SBA_IOMMU_FIRST && addr < IA64_SBA_IOMMU_END;
 }
 
+/*
+ * The IOC identity registers Linux sba_iommu reads to name the IOC and take its
+ * revision (FCLASS & 0xff).  Serving these lets func_id == ZX1_IOC_ID match, so
+ * the driver runs the zx1-specific ioc_zx1_init() path rather than reporting an
+ * "Unknown 0.0" IOC.  Only these two offsets in the function block are modeled;
+ * every other MIO CSR still reads zero.
+ */
+static bool ia64_sba_identity_reg(hwaddr base, uint64_t *reg)
+{
+    switch (base) {
+    case IA64_SBA_IOC_FUNC_ID_OFFSET:
+        *reg = IA64_SBA_IOC_FUNC_ID;
+        return true;
+    case IA64_SBA_IOC_FCLASS_OFFSET:
+        *reg = IA64_SBA_IOC_FCLASS;
+        return true;
+    default:
+        return false;
+    }
+}
+
 static MemTxResult ia64_sba_csr_read(void *opaque, hwaddr addr, uint64_t *data,
                                      unsigned int size, MemTxAttrs attrs)
 {
     IA64SBAState *s = opaque;
+    uint64_t reg;
     bool ok = false;
 
     (void)attrs;
@@ -185,6 +210,14 @@ static MemTxResult ia64_sba_csr_read(void *opaque, hwaddr addr, uint64_t *data,
                  &s->fe, addr - IA64_SBA_IOC_FUNCTION_OFFSET, data);
     }
     qemu_rec_mutex_unlock(&s->iommu_lock);
+
+    if (!ok && size >= 1 && size <= 8 && (addr & 7) + size <= 8 &&
+        ia64_sba_identity_reg(addr & ~UINT64_C(7), &reg)) {
+        /* Right-justify the addressed byte lane, like the IOMMU/LBA reads. */
+        *data = (reg >> ((addr & 7) * 8)) &
+                (size >= 8 ? UINT64_MAX : (UINT64_C(1) << (size * 8)) - 1);
+        ok = true;
+    }
 
     if (!ok) {
         /* Unmodeled IOC registers read as zero (do not fault the guest). */

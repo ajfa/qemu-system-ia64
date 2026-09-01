@@ -755,6 +755,28 @@ static void test_lba_agp_capability(void)
 }
 
 /*
+ * The SBA/IOC identity registers Linux sba_iommu's ioc_init() reads at the IOC
+ * function block (CSR base + 0x1000 FUNC_ID, + 0x1008 FCLASS).  FUNC_ID must
+ * read as the zx1 IOC (device 0x122a, vendor 0x103c) so func_id == ZX1_IOC_ID
+ * matches and the driver runs ioc_zx1_init(); FCLASS's low byte is the IOC
+ * revision (0x23 = 2.3), which must be >= 2.0.  Values from the HP zx1 mio ERS.
+ */
+static void test_sba_ioc_identity(void)
+{
+    const uint64_t ioc = IA64_SBA_CSR_BASE + 0x1000;
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+
+    /* 64-bit reads, as the driver performs them. */
+    g_assert_cmphex(qtest_readq(qts, ioc + 0x000), ==, IA64_SBA_IOC_FUNC_ID);
+    g_assert_cmphex(qtest_readq(qts, ioc + 0x008), ==, IA64_SBA_IOC_FCLASS);
+    /* Vendor (HP) and device (zx1 IOC) sub-fields, and the >= 2.0 revision. */
+    g_assert_cmphex(qtest_readw(qts, ioc + 0x000), ==, 0x103c);
+    g_assert_cmphex(qtest_readw(qts, ioc + 0x002), ==, 0x122a);
+    g_assert_cmphex(qtest_readb(qts, ioc + 0x008), ==, 0x23);
+    qtest_quit(qts);
+}
+
+/*
  * Real 460GX layout: low DRAM is a single contiguous run from 0 up to the PCI
  * aperture (0xEE000000, ~3.72 GiB); only RAM displaced by that top-of-memory
  * gap spills above 4 GiB.  There is no sub-4 GiB DRAM island and no hole at
@@ -3453,6 +3475,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/firmware-handoff/zx1",
                    test_firmware_handoff_zx1);
     qtest_add_func("/ia64-vpc/lba/agp-capability", test_lba_agp_capability);
+    qtest_add_func("/ia64-vpc/sba/ioc-identity", test_sba_ioc_identity);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);
     qtest_add_func("/ia64-vpc/ahci/off-default", test_ahci_off_default);
     qtest_add_func("/ia64-vpc/ahci/on", test_ahci_on);
