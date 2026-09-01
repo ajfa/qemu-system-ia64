@@ -55,6 +55,7 @@
 #include "hw/ia64/ia64_iosapic.h"
 #include "hw/ia64/ia64_agp.h"
 #include "hw/ia64/ia64_sba.h"
+#include "hw/ia64/ia64_lba.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "system/rtc.h"
@@ -514,6 +515,7 @@ struct IA64VpcMachineState {
 
     PCIDevice *agp_dev;
     PCIDevice *sba_dev;
+    DeviceState *lba_dev;
     PCIDevice *ahci_dev;
     PCIDevice *ide_dev;
     PCIDevice *ohci_dev;
@@ -4665,8 +4667,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * space for every master, walking the guest-programmed in-DRAM IOPDIR, so a
      * 32-bit master (the Rage 128) reaches RAM above 4 GiB by address
      * translation.  No 460GX GXB is created; the Rage 128 falls back to its own
-     * PCI-GART, now translated >4 GiB by the SBA.  (The hp-agp AGP-DRI LBA is a
-     * later milestone.)  Parked at a fixed high slot like the GXB.
+     * PCI-GART, now translated >4 GiB by the SBA.  The zx1 LBA (created below)
+     * additionally lets Linux hp-agp negotiate AGP mode reusing the SBA IOPDIR
+     * as the GART.  The SBA is parked at a fixed high slot like the GXB.
      *
      * chipset=460gx (default): the 460GX GXB AGP host bridge + GART, which
      * translates only the AGP graphics master (the Rage 128 at the fixed
@@ -4677,6 +4680,21 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         object_property_set_uint(OBJECT(s->sba_dev), "csr-base",
                                  IA64_SBA_CSR_BASE, &error_abort);
         if (!pci_realize_and_unref(s->sba_dev, pci_bus, errp)) {
+            return false;
+        }
+        /*
+         * The zx1 LBA AGP capability block, published to guests as ACPI
+         * HWP0003 nested inside the SBA (HWP0001).  Linux hp-agp negotiates AGP
+         * mode against it and reuses the SBA IOPDIR as the GART; it is faithful
+         * real-zx1 hardware, so it is present regardless of the agp option.
+         * The AGP capability it advertises only becomes usable once the
+         * graphics master also advertises a PCI AGP capability, which the agp
+         * option gates below.
+         */
+        s->lba_dev = qdev_new(TYPE_IA64_LBA);
+        object_property_set_uint(OBJECT(s->lba_dev), "csr-base",
+                                 IA64_LBA_CSR_BASE, &error_abort);
+        if (!qdev_realize_and_unref(s->lba_dev, NULL, errp)) {
             return false;
         }
     } else {

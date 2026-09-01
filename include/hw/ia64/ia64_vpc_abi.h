@@ -263,6 +263,26 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_SBA_IOVA_SIZE            IA64_U64(0x0000000040000000) /* 1 GiB */
 #define IA64_SBA_IOVA_END \
     (IA64_SBA_IOVA_BASE + IA64_SBA_IOVA_SIZE)
+/*
+ * The zx1 LBA (Local Bus Adapter / Mercury I/O adapter) config block.  Linux
+ * hp-agp (drivers/char/agp/hp-agp.c) finds it via the ACPI HWP0003 device's
+ * CCSR VendorLong resource, ioremaps it, and reads it as PCI config space to
+ * locate an AGP capability: PCI_STATUS(0x06).CAP_LIST, cap-list pointer at
+ * 0x34, AGP capability (id 0x02) at 0x60, AGP status at 0x64, AGP command at
+ * 0x68.  It is a small MMIO block, distinct from the SBA CSR, placed just above
+ * it in the chipset gap.  The register values mirror upstream's
+ * hw/pci-host/hp-zx1-ioa-regs.c (AGP mode).  Keep base/length in lockstep with
+ * the LBA0 _CRS in dsdt-pci-root-zx1.asl.
+ */
+#define IA64_LBA_CSR_BASE             IA64_U64(0x00000000fed10000)
+#define IA64_LBA_CSR_SIZE             IA64_U64(0x0000000000001000)
+/* AGP capability (byte 0x60) and writable-command mask, from the IOA model. */
+#define IA64_LBA_AGP_CAPABILITY       IA64_U64(0x0f00023700200002)
+#define IA64_LBA_AGP_COMMAND_WRITABLE IA64_U64(0x0000000000000337)
+#define IA64_LBA_PCI_STATUS_RESET     IA64_U64(0x00000000000002b0)
+#define IA64_LBA_VENDOR_ID            IA64_U64(0x000000000000103c) /* HP */
+#define IA64_LBA_DEVICE_ID            IA64_U64(0x000000000000122e) /* zx1 LBA */
+#define IA64_LBA_AGP_CAP_OFFSET       IA64_U64(0x0000000000000060)
 /* 16 MiB PAL/SAL firmware address space below 4 GiB. */
 #define IA64_FW_ADDRESS_SPACE_BASE    IA64_U64(0x00000000ff000000)
 #define IA64_FW_ADDRESS_SPACE_SIZE    IA64_U64(0x0000000001000000)

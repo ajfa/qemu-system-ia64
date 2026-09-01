@@ -719,6 +719,42 @@ static void test_firmware_handoff_zx1(void)
 }
 
 /*
+ * The zx1 LBA advertises an AGP capability exactly where Linux hp-agp
+ * (drivers/char/agp/hp-agp.c) reads it: PCI_STATUS(0x06) with the capability
+ * list bit set, the cap-list pointer at 0x34 -> 0x60, the AGP capability
+ * (id 0x02) at 0x60, AGP status at 0x64, and a writable AGP command at 0x68.
+ * These are the config reads hp_zx1_lba_init()/hp_zx1_lba_find_capability()
+ * perform against the ioremapped LBA CSR block.
+ */
+static void test_lba_agp_capability(void)
+{
+    const uint64_t lba = IA64_LBA_CSR_BASE;
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+
+    /* PCI_STATUS: capability-list bit (0x10) present (reset value 0x02b0). */
+    g_assert_cmphex(qtest_readw(qts, lba + PCI_STATUS), ==,
+                    IA64_LBA_PCI_STATUS_RESET);
+    g_assert_cmphex(qtest_readw(qts, lba + PCI_STATUS) & PCI_STATUS_CAP_LIST,
+                    ==, PCI_STATUS_CAP_LIST);
+    /* Capability-list pointer points at the AGP capability. */
+    g_assert_cmphex(qtest_readb(qts, lba + PCI_CAPABILITY_LIST), ==,
+                    IA64_LBA_AGP_CAP_OFFSET);
+    /* AGP capability id (0x02) at the advertised offset. */
+    g_assert_cmphex(qtest_readb(qts, lba + IA64_LBA_AGP_CAP_OFFSET), ==,
+                    PCI_CAP_ID_AGP);
+    g_assert_cmphex(qtest_readl(qts, lba + IA64_LBA_AGP_CAP_OFFSET) & 0xff, ==,
+                    PCI_CAP_ID_AGP);
+    /* AGP status (mode) at cap + 4, from the upstream IOA model. */
+    g_assert_cmphex(qtest_readl(qts, lba + IA64_LBA_AGP_CAP_OFFSET + 4), ==,
+                    (uint32_t)(IA64_LBA_AGP_CAPABILITY >> 32));
+    /* AGP command (cap + 8) is writable, masked to IA64_LBA_AGP_COMMAND_WRITABLE. */
+    qtest_writel(qts, lba + IA64_LBA_AGP_CAP_OFFSET + 8, 0xffffffffu);
+    g_assert_cmphex(qtest_readl(qts, lba + IA64_LBA_AGP_CAP_OFFSET + 8), ==,
+                    (uint32_t)IA64_LBA_AGP_COMMAND_WRITABLE);
+    qtest_quit(qts);
+}
+
+/*
  * Real 460GX layout: low DRAM is a single contiguous run from 0 up to the PCI
  * aperture (0xEE000000, ~3.72 GiB); only RAM displaced by that top-of-memory
  * gap spills above 4 GiB.  There is no sub-4 GiB DRAM island and no hole at
@@ -3416,6 +3452,7 @@ int main(int argc, char **argv)
                    test_firmware_handoff_defaults);
     qtest_add_func("/ia64-vpc/firmware-handoff/zx1",
                    test_firmware_handoff_zx1);
+    qtest_add_func("/ia64-vpc/lba/agp-capability", test_lba_agp_capability);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);
     qtest_add_func("/ia64-vpc/ahci/off-default", test_ahci_off_default);
     qtest_add_func("/ia64-vpc/ahci/on", test_ahci_on);
