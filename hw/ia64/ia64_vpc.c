@@ -4868,6 +4868,21 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
+    /*
+     * On zx1 with agp=on, give the Rage 128 a PCI AGP capability so Linux
+     * sba_iommu reserves the SBA IOVA GART half (and writes the cookie hp-agp
+     * handshakes on) and hp-agp can negotiate AGP mode.  The default VGA is
+     * created by pci_vga_init() below, which realizes it internally, so opt it
+     * in through a global property applied to the ati-vga it creates.  460gx
+     * uses the GXB GART instead and never needs this.
+     */
+    if (ia64_vpc_chipset_is_zx1(s) && s->agp_enabled) {
+        static GlobalProperty ati_agp = {
+            .driver = "ati-vga", .property = "agp", .value = "on",
+        };
+        qdev_prop_register_global(&ati_agp);
+    }
+
     if (g_strcmp0(s->vga_model, "mach64") == 0) {
         /*
          * The Mach64 3D Rage (DEV_4754): a PCI 2D adapter with no AGP, chosen
@@ -5004,8 +5019,15 @@ static void ia64_vpc_machine_instance_init(Object *obj)
 #endif
     /* Boot manager waits for the user by default (like the EFI sample). */
     s->firmware_boot_timeout = IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER;
-    /* The 460GX GXB AGP GART is on by default, as on real hardware. */
-    s->agp_enabled = true;
+    /*
+     * agp default depends on the chipset.  On 460gx it turns on the GXB AGP
+     * GART, as on real hardware.  On zx1 the Rage 128 already reaches memory
+     * through the SBA in PCI-GART mode (the pixel-perfect default), so agp
+     * defaults OFF there and only opts the Rage 128 into the hp-agp AGP path
+     * (a PCI AGP capability -> sba_iommu reserves the GART -> hp-agp binds)
+     * when explicitly set.
+     */
+    s->agp_enabled = !ia64_vpc_chipset_is_zx1(s);
     /* Default display adapter: the Rage 128 (honouring -vga); mach64 opt-in. */
     s->vga_model = g_strdup("rage128");
 }
@@ -5106,9 +5128,12 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_get_agp,
                                    ia64_vpc_set_agp);
     object_class_property_set_description(oc, "agp",
-        "Set on/off to enable/disable the 460GX AGP GART (default on, as on "
-        "real hardware); off makes the Rage 128 fall back to its 32-bit PCI "
-        "GART -- clean 2D, but graphics DMA cannot reach RAM above 4 GiB");
+        "AGP support. On 460gx (default on, as on real hardware) it enables the "
+        "GXB AGP GART; off makes the Rage 128 fall back to its 32-bit PCI GART "
+        "(clean 2D, but graphics DMA cannot reach RAM above 4 GiB). On zx1 "
+        "(default off) the Rage 128 already reaches >4 GiB through the SBA in "
+        "PCI-GART mode; on gives it a PCI AGP capability so Linux hp-agp "
+        "negotiates AGP mode reusing the SBA IOPDIR as the GART");
     object_class_property_add_str(oc, "vga",
                                   ia64_vpc_get_vga,
                                   ia64_vpc_set_vga);

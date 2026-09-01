@@ -148,6 +148,7 @@ struct ATIVGAState {
     uint8_t mode;
     uint8_t use_pixman;
     bool cursor_guest_mode;
+    bool agp;
     uint16_t cursor_size;
     uint32_t cursor_offset;
     QEMUCursor *cursor;

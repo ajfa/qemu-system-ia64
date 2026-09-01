@@ -127,6 +127,34 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     Package () { 0x0006FFFF, 3, 0x00, 17 }
                 })
             }
+
+            // HP zx1 LBA (Local Bus Adapter), the AGP-capable host bridge.
+            // Linux hp-agp (drivers/char/agp/hp-agp.c) finds it via HWP0003,
+            // reads its CSR block as PCI config space for an AGP capability, and
+            // walks *up* the ACPI parent chain for the enclosing HWP0001 IOC
+            // (SBA0) whose IOPDIR it reuses as the GART -- so LBA0 must nest
+            // inside SBA0.  Its CSR base comes from the same HP CCSR
+            // vendor-defined resource as the IOC (guid_id=0x02, GUID
+            // 69e9adf9-...); keep base/length in lockstep with IA64_LBA_CSR_BASE
+            // / IA64_LBA_CSR_SIZE and the ia64-zx1-lba device.
+            Device (LBA0)
+            {
+                Name (_HID, EisaId ("HWP0003"))
+                Name (_UID, One)
+                Name (_CCA, One)
+                Name (_CRS, ResourceTemplate ()
+                {
+                    VendorLong ()
+                    {
+                        0x02,                                           // guid_id
+                        0xF9, 0xAD, 0xE9, 0x69, 0x4F, 0x92, 0x5F, 0xAB, // GUID[0:7]
+                        0xF6, 0x4A, 0x24, 0xD2, 0x01, 0x37, 0x0E, 0xAD, // GUID[8:15]
+                        0x00, 0x00, 0xD1, 0xFE, 0x00, 0x00, 0x00, 0x00, // base 0xFED10000
+                        0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // length 0x1000
+                    }
+                    Memory32Fixed (ReadWrite, 0xFED10000, 0x00001000)
+                })
+            }
         }
     }
 }

@@ -2389,6 +2389,26 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
     /* most interrupts are not yet emulated but MacOS needs at least VBlank */
     dev->config[PCI_INTERRUPT_PIN] = 1;
     timer_init_ns(&s->vblank_timer, QEMU_CLOCK_VIRTUAL, ati_vga_vblank_irq, s);
+
+    /*
+     * Optional PCI AGP capability, at the Rage 128's real offset 0x50.  Two
+     * guests key on it: Linux sba_iommu scans every PCI device for an AGP
+     * capability and, finding one, reserves half its IOVA space as the AGP GART
+     * (and writes the handshake cookie hp-agp looks for); and the r128 DRM will
+     * negotiate AGP mode against it.  Off by default -- on the zx1 machine the
+     * Rage 128 reaches memory through the SBA in PCI-GART mode, which needs no
+     * AGP capability; the ia64 machine only sets this when its agp option opts
+     * into the hp-agp AGP path.
+     */
+    if (s->agp) {
+        if (pci_add_capability(dev, PCI_CAP_ID_AGP, 0x50, 8, errp) < 0) {
+            return;
+        }
+        /* AGP 2.0, 1x/2x/4x, so the OS negotiates a rate. */
+        pci_set_long(dev->config +
+                     pci_find_capability(dev, PCI_CAP_ID_AGP) + PCI_AGP_STATUS,
+                     0x1f000207);
+    }
 }
 
 static void ati_vga_reset(DeviceState *dev)
@@ -2451,6 +2471,7 @@ static const Property ati_vga_properties[] = {
     DEFINE_PROP_UINT16("x-device-id", ATIVGAState, dev_id,
                        PCI_DEVICE_ID_ATI_RAGE128_PF),
     DEFINE_PROP_BOOL("guest_hwcursor", ATIVGAState, cursor_guest_mode, false),
+    DEFINE_PROP_BOOL("agp", ATIVGAState, agp, false),
     /* this is a debug option, prefer PROP_UINT over PROP_BIT for simplicity */
     DEFINE_PROP_UINT8("x-pixman", ATIVGAState, use_pixman, DEFAULT_X_PIXMAN),
     DEFINE_PROP_UINT64("x-linear-aper-size", ATIVGAState, linear_aper_sz, 0),
