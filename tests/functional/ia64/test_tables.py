@@ -27,14 +27,13 @@ class Ia64PlatformTables(Ia64FirmwareTest):
         debug_log = self.scratch_file("debugcon.log")
         nvram = self.make_nvram()
         make_fat_disk(disk, app_path("tables"))
-        # Exercise the zx1 chipset profile: it advertises MCFG/ECAM (like the
-        # former CPU-derived E8870 default), so this validates the full table
-        # set -- now including the nested HWP0001 IOC DSDT -- against the new
-        # profile.  The 460gx profile deliberately omits MCFG (SAL config), so
-        # the MCFG-requiring table suite does not apply there.
+        # The default machine (ia64-vpc == zx1) advertises MCFG/ECAM and the
+        # nested HWP0001 IOC DSDT, so this validates the full table set against
+        # the zx1 profile.  The 460gx machine deliberately omits MCFG (SAL
+        # config), so the MCFG-requiring table suite does not apply there.
         vm = self.launch_ia64(
             media=disk, smp=4,
-            machine_options=f"firmware-console=serial,nvram={nvram},chipset=zx1",
+            machine_options=f"firmware-console=serial,nvram={nvram}",
             extra_args=("-debug-port", f"file:{debug_log}"))
         result = self.wait_ia64_suite(
             vm, "tables", TABLE_CASES, timeout=35.0)

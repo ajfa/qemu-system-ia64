@@ -176,7 +176,7 @@ static void iosapic_write(QTestState *qts, uint32_t reg, uint32_t value);
 
 static QTestState *ia64_vpc_start(const char *extra_args)
 {
-    return qtest_initf("-machine ia64-vpc -m 256M -S %s",
+    return qtest_initf("-machine 460gx -m 256M -S %s",
                        extra_args ?: "");
 }
 
@@ -667,7 +667,7 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
                     IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF);
     g_assert_cmphex(le64_to_cpu(handoff.BootTimeout), ==,
                     IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER);
-    /* Default machine is chipset=460gx, which selects the 460GX personality. */
+    /* This suite runs on the 460gx machine, which selects the 460GX personality. */
     g_assert_cmphex(le64_to_cpu(handoff.ChipsetProfile), ==,
                     IA64_FW_CHIPSET_460GX);
 }
@@ -702,11 +702,11 @@ static void test_firmware_handoff_defaults(void)
     qtest_quit(qts);
 }
 
-/* chipset=zx1 overrides the CPU-derived personality with the zx1 profile. */
+/* The zx1 machine writes the zx1 firmware personality. */
 static void test_firmware_handoff_zx1(void)
 {
     IA64VpcHandoff handoff;
-    QTestState *qts = qtest_initf("-machine ia64-vpc,chipset=zx1 -m 256M -S");
+    QTestState *qts = qtest_initf("-machine zx1 -m 256M -S");
 
     g_assert_cmpuint(sizeof(handoff), ==, 128);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
@@ -741,7 +741,7 @@ static void test_ram_high_remap(void)
      * the old 2 GiB seam (both 0x80000000 and 0x80200000 are ordinary backed
      * RAM now) and nothing lands above 4 GiB.
      */
-    QTestState *qts = qtest_init("-machine ia64-vpc -m 2304M -S");
+    QTestState *qts = qtest_init("-machine 460gx -m 2304M -S");
 
     qtest_writeq(qts, IA64_RAM_AT_2GIB, magic);
     g_assert_cmphex(qtest_readq(qts, IA64_RAM_AT_2GIB), ==, magic);
@@ -756,7 +756,7 @@ static void test_ram_high_remap(void)
      * 4096 MiB exceeds the aperture: DRAM is contiguous up to it AND the
      * displaced remainder is remapped above 4 GiB.
      */
-    qts = qtest_init("-machine ia64-vpc -m 4096M -S");
+    qts = qtest_init("-machine 460gx -m 4096M -S");
     qtest_writeq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE, magic);
     g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE), ==, magic);
     qtest_writeq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, magic);
@@ -811,7 +811,7 @@ static void test_cpu_itanium_alias(void)
 
 static void test_firmware_handoff_i8042_off(void)
 {
-    QTestState *qts = qtest_init("-machine ia64-vpc,i8042=off "
+    QTestState *qts = qtest_init("-machine 460gx,i8042=off "
                                  "-m 256M -S");
 
     assert_firmware_handoff(qts, 0, 1, 0, 1, 1, 1);
@@ -823,7 +823,7 @@ static void test_firmware_handoff_boot_timeout(void)
     IA64VpcHandoff handoff;
     /* A finite firmware-boot-timeout overrides the wait-forever default and
      * reaches the OS handoff verbatim, driving the boot manager's countdown. */
-    QTestState *qts = qtest_init("-machine ia64-vpc,firmware-boot-timeout=5 "
+    QTestState *qts = qtest_init("-machine 460gx,firmware-boot-timeout=5 "
                                  "-m 256M -S");
 
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
@@ -894,7 +894,7 @@ static void test_smp_rejects_full_alat(void)
 {
     const char *argv[] = {
         qtest_qemu_binary(NULL),
-        "-machine", "ia64-vpc,alat=full",
+        "-machine", "460gx,alat=full",
         "-smp", "2",
         "-display", "none",
         NULL,
@@ -991,7 +991,7 @@ static void test_nvram_commit_and_restart(void)
     path = g_build_filename(tmpdir, "nvram.bin", NULL);
     quoted_path = g_shell_quote(path);
 
-    qts = qtest_initf("-machine ia64-vpc,nvram=%s -m 256M -S",
+    qts = qtest_initf("-machine 460gx,nvram=%s -m 256M -S",
                       quoted_path);
     qtest_writeq(qts, IA64_NVRAM_BASE, test_value);
     qtest_writeq(qts, IA64_NVRAM_BASE + IA64_NVRAM_COMMIT_OFFSET,
@@ -1003,7 +1003,7 @@ static void test_nvram_commit_and_restart(void)
     g_assert_cmpuint(length, ==, IA64_NVRAM_SIZE);
     g_assert_cmphex(ldq_le_p(contents), ==, test_value);
 
-    qts = qtest_initf("-machine ia64-vpc,nvram=%s -m 256M -S",
+    qts = qtest_initf("-machine 460gx,nvram=%s -m 256M -S",
                       quoted_path);
     g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, test_value);
     qtest_quit(qts);
@@ -1048,7 +1048,7 @@ static void test_realfw_flash_window(void)
     g_assert_true(g_file_set_contents(path, (char *)image, image_size,
                                       &error));
 
-    qts = qtest_initf("-machine ia64-vpc,realfw=%s -m 256M -S", quoted_path);
+    qts = qtest_initf("-machine 460gx,realfw=%s -m 256M -S", quoted_path);
     /* Flash content is visible at its physical home. */
     g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
     g_assert_cmphex(qtest_readq(qts, fit_addr) & 0xffffffffffffULL, ==,
@@ -1384,7 +1384,7 @@ static void test_e1000_packet_transfer(void)
     qemu_clear_cloexec(sockets[1]);
     args = g_strdup_printf("-nic socket,fd=%d,model=e1000,"
                            "mac=52:54:00:12:34:56", sockets[1]);
-    qts = qtest_initf("-machine ia64-vpc -m 256M %s", args);
+    qts = qtest_initf("-machine 460gx -m 256M %s", args);
     close(sockets[1]);
 
     qtest_memwrite(qts, IA64_E1000_TX_BUFFER_ADDR, packet, sizeof(packet));
@@ -1738,7 +1738,7 @@ static unsigned count_unattached_children(QTestState *qts,
 
 static void test_default_usb_input(void)
 {
-    QTestState *qts = qtest_init("-machine ia64-vpc,i8042=off "
+    QTestState *qts = qtest_init("-machine 460gx,i8042=off "
                                  "-m 256M -S");
 
     g_assert_cmpuint(count_unattached_children(qts, "usb-kbd"), ==, 1);
@@ -2213,7 +2213,7 @@ static void ati_pll_wr(ATITestDev *a, uint32_t idx, uint32_t v)
 
 static void test_agp_gxb(void)
 {
-    QTestState *qts = qtest_init("-machine ia64-vpc -m 256M -S");
+    QTestState *qts = qtest_init("-machine 460gx -m 256M -S");
     QGenericPCIBus gbus;
     QPCIDevice *dev;
     uint8_t cap;
@@ -2271,7 +2271,7 @@ static void test_agp_gxb(void)
  */
 static void test_agp_off(void)
 {
-    QTestState *qts = qtest_init("-machine ia64-vpc,agp=off -m 3G -S");
+    QTestState *qts = qtest_init("-machine 460gx,agp=off -m 3G -S");
     QGenericPCIBus gbus;
     QPCIDevice *dev;
     uint8_t cap;
@@ -3041,7 +3041,7 @@ static void test_agp_gart_dma(void)
 
 /*
  * Mach64 3D Rage (DEV_4754) tests.  The adapter is selected with
- * -machine ia64-vpc,vga=mach64; its BAR2 register block and BAR0 framebuffer
+ * -machine 460gx,vga=mach64; its BAR2 register block and BAR0 framebuffer
  * land on the same fixed windows the machine assigns to any VGA-slot device.
  * A Block-0 register at Mach64 block index r decodes to BAR2 + 0x400 + r*4.
  */

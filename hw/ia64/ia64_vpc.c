@@ -449,8 +449,25 @@ static const uint8_t ia64_int10_rom_init[] = {
 };
 #endif
 
-#define TYPE_IA64_VPC_MACHINE MACHINE_TYPE_NAME("ia64-vpc")
-OBJECT_DECLARE_SIMPLE_TYPE(IA64VpcMachineState, IA64_VPC_MACHINE)
+/*
+ * The IA-64 machine is modeled as an abstract base ("ia64-base") carrying all
+ * the shared platform (PCI host, IOSAPIC, firmware, devices), with two concrete
+ * machine types built on it: "460gx" (Intel SDV / HP i2000, Merced + 460GX) and
+ * "zx1" (HP rx2600 / zx2000 / zx6000, Itanium 2 + zx1 SBA).  Each concrete class
+ * fixes its default CPU and its chipset personality via ChipsetProfile below;
+ * "ia64-vpc" survives as a deprecated alias of zx1.
+ */
+#define TYPE_IA64_VPC_MACHINE MACHINE_TYPE_NAME("ia64-base")
+OBJECT_DECLARE_TYPE(IA64VpcMachineState, IA64VpcMachineClass, IA64_VPC_MACHINE)
+
+#define TYPE_IA64_460GX_MACHINE MACHINE_TYPE_NAME("460gx")
+#define TYPE_IA64_ZX1_MACHINE   MACHINE_TYPE_NAME("zx1")
+
+struct IA64VpcMachineClass {
+    MachineClass parent_class;
+    /* The chipset personality this machine type fixes: IA64_FW_CHIPSET_*. */
+    uint64_t chipset_profile;
+};
 
 struct IA64VpcMachineState {
     MachineState parent_obj;
@@ -493,7 +510,6 @@ struct IA64VpcMachineState {
     uint8_t *realfw_chipset_cfg;
     PCIBus *realfw_pci_bus;
     char *vga_model;
-    char *chipset;
     bool alat_full;
 
     PCIDevice *agp_dev;
@@ -2334,30 +2350,12 @@ static void ia64_vpc_set_vga(Object *obj, const char *value, Error **errp)
     s->vga_model = g_strdup(value);
 }
 
+/* The chipset personality is fixed by the concrete machine type's class. */
 static bool ia64_vpc_chipset_is_zx1(const IA64VpcMachineState *s)
 {
-    return g_strcmp0(s->chipset, "zx1") == 0;
-}
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
 
-static char *ia64_vpc_get_chipset(Object *obj, Error **errp)
-{
-    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
-
-    (void)errp;
-
-    return g_strdup(s->chipset ? s->chipset : "460gx");
-}
-
-static void ia64_vpc_set_chipset(Object *obj, const char *value, Error **errp)
-{
-    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
-
-    if (g_strcmp0(value, "460gx") != 0 && g_strcmp0(value, "zx1") != 0) {
-        error_setg(errp, "chipset must be '460gx' or 'zx1'");
-        return;
-    }
-    g_free(s->chipset);
-    s->chipset = g_strdup(value);
+    return imc->chipset_profile == IA64_FW_CHIPSET_ZX1;
 }
 
 static char *ia64_vpc_get_alat(Object *obj, Error **errp)
@@ -2772,17 +2770,16 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     handoff.MapQuirkDisable = cpu_to_le64(s->fw_map_quirk_disable);
     handoff.BootTimeout = cpu_to_le64(s->firmware_boot_timeout);
     /*
-     * The chipset= option authoritatively sets the firmware personality,
-     * independent of the CPU model: chipset=460gx selects the Intel 460GX and
-     * chipset=zx1 the HP zx1.  This retires the old CPU-keyed default (which
-     * gave the default Itanium 2 machine a half-modelled E8870 personality);
-     * users pair chipset and CPU at their own risk (460GX suits Merced, zx1
-     * suits Itanium 2).  DERIVE remains only as the firmware's fallback for a
-     * pre-version-14 handoff.
+     * The machine type fixes the firmware personality, independent of the CPU
+     * model: the 460gx machine selects the Intel 460GX and the zx1 machine the
+     * HP zx1.  This retired the old CPU-keyed default (which gave the default
+     * Itanium 2 machine a half-modelled E8870 personality); users pair machine
+     * and CPU at their own risk (460GX suits Merced, zx1 suits Itanium 2).
+     * DERIVE remains only as the firmware's fallback for a pre-version-14
+     * handoff.
      */
-    handoff.ChipsetProfile = cpu_to_le64(ia64_vpc_chipset_is_zx1(s) ?
-                                         IA64_FW_CHIPSET_ZX1 :
-                                         IA64_FW_CHIPSET_460GX);
+    handoff.ChipsetProfile =
+        cpu_to_le64(IA64_VPC_MACHINE_GET_CLASS(s)->chipset_profile);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, &handoff,
                               sizeof(handoff));
 }
@@ -4963,8 +4960,6 @@ static void ia64_vpc_machine_instance_init(Object *obj)
     s->agp_enabled = true;
     /* Default display adapter: the Rage 128 (honouring -vga); mach64 opt-in. */
     s->vga_model = g_strdup("rage128");
-    /* Default core chipset: the Intel 460GX GXB AGP GART, as today. */
-    s->chipset = g_strdup("460gx");
 }
 
 static void ia64_vpc_machine_instance_finalize(Object *obj)
@@ -4977,21 +4972,24 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
     g_free(s->nvram_path);
     g_free(s->nvram_resolved_path);
     g_free(s->vga_model);
-    g_free(s->chipset);
     g_free(s->realfw_path);
 }
 
+/*
+ * Shared class-init for the abstract "ia64-base": everything common to both
+ * concrete machines.  The concrete 460gx/zx1 class-inits (below) run after this
+ * and set the fields that differ -- desc, default CPU, and chipset_profile.
+ */
 static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
     (void)data;
 
-    mc->desc = "IA-64 virtual PC platform";
+    mc->desc = "IA-64 virtual PC platform (abstract base)";
     mc->init = ia64_vpc_init;
     mc->max_cpus = IA64_VPC_MAX_CPUS;
     mc->default_cpus = 1;
-    mc->default_cpu_type = IA64_CPU_TYPE_NAME("madison");
     mc->smp_props.prefer_sockets = true;
     mc->default_ram_size = 1 * GiB;
     mc->default_ram_id = "ia64-vpc.ram";
@@ -5025,7 +5023,11 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
     mc->no_floppy = 1;
     mc->no_cdrom = 1;
 
-    ia64_vpc_add_compat_defaults(mc);
+    /*
+     * mc->compat_props is allocated by machine_class_base_init only for
+     * concrete (non-abstract) machine classes, so the compat defaults are
+     * added by each concrete class-init below, not here on the abstract base.
+     */
 
     object_class_property_add_bool(oc, "fw-relocate",
                                    ia64_vpc_get_fw_relocate,
@@ -5066,13 +5068,6 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Display adapter: 'rage128' (default, ATI Rage 128, honours -vga), "
         "'mach64' (ATI Mach64 3D Rage, a PCI 2D adapter with no AGP), or "
         "'std'");
-    object_class_property_add_str(oc, "chipset",
-                                  ia64_vpc_get_chipset,
-                                  ia64_vpc_set_chipset);
-    object_class_property_set_description(oc, "chipset",
-        "Core chipset: '460gx' (default, Intel 460GX GXB AGP GART) or 'zx1' "
-        "(HP zx1 SBA IOMMU -- translates all DMA >4 GiB with no bounce; a "
-        "Linux and Windows-3790/2003 platform, not for XP 2002/build 2600)");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,
                                    ia64_vpc_set_firmware_ide_dma);
@@ -5138,18 +5133,56 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Set the IA-64 ALAT model to 'zero' (default) or 'full'");
 }
 
-static const TypeInfo ia64_vpc_machine_typeinfo = {
-    .name = TYPE_IA64_VPC_MACHINE,
-    .parent = TYPE_MACHINE,
-    .instance_size = sizeof(IA64VpcMachineState),
-    .instance_init = ia64_vpc_machine_instance_init,
-    .instance_finalize = ia64_vpc_machine_instance_finalize,
-    .class_init = ia64_vpc_machine_class_init,
-};
-
-static void ia64_vpc_machine_register_types(void)
+/* Concrete: Intel SDV / HP i2000 -- 460GX chipset, Merced. */
+static void ia64_460gx_machine_class_init(ObjectClass *oc, const void *data)
 {
-    type_register_static(&ia64_vpc_machine_typeinfo);
+    MachineClass *mc = MACHINE_CLASS(oc);
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_CLASS(oc);
+
+    (void)data;
+    mc->desc = "Intel SDV / HP i2000 (460GX chipset, Merced)";
+    mc->default_cpu_type = IA64_CPU_TYPE_NAME("merced");
+    imc->chipset_profile = IA64_FW_CHIPSET_460GX;
+    ia64_vpc_add_compat_defaults(mc);
 }
 
-type_init(ia64_vpc_machine_register_types)
+/* Concrete: HP rx2600 / zx2000 / zx6000 -- zx1 chipset, Itanium 2. Default. */
+static void ia64_zx1_machine_class_init(ObjectClass *oc, const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_CLASS(oc);
+
+    (void)data;
+    mc->desc = "HP rx2600 / zx2000 / zx6000 (zx1 chipset, Itanium 2)";
+    mc->default_cpu_type = IA64_CPU_TYPE_NAME("madison");
+    imc->chipset_profile = IA64_FW_CHIPSET_ZX1;
+    /* The zx1 machine is the default; "ia64-vpc" is a deprecated alias of it. */
+    mc->is_default = true;
+    mc->alias = "ia64-vpc";
+    ia64_vpc_add_compat_defaults(mc);
+}
+
+static const TypeInfo ia64_machine_typeinfos[] = {
+    {
+        .name = TYPE_IA64_VPC_MACHINE,
+        .parent = TYPE_MACHINE,
+        .abstract = true,
+        .instance_size = sizeof(IA64VpcMachineState),
+        .instance_init = ia64_vpc_machine_instance_init,
+        .instance_finalize = ia64_vpc_machine_instance_finalize,
+        .class_size = sizeof(IA64VpcMachineClass),
+        .class_init = ia64_vpc_machine_class_init,
+    },
+    {
+        .name = TYPE_IA64_460GX_MACHINE,
+        .parent = TYPE_IA64_VPC_MACHINE,
+        .class_init = ia64_460gx_machine_class_init,
+    },
+    {
+        .name = TYPE_IA64_ZX1_MACHINE,
+        .parent = TYPE_IA64_VPC_MACHINE,
+        .class_init = ia64_zx1_machine_class_init,
+    },
+};
+
+DEFINE_TYPES(ia64_machine_typeinfos)
