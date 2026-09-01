@@ -5020,14 +5020,14 @@ static void ia64_vpc_machine_instance_init(Object *obj)
     /* Boot manager waits for the user by default (like the EFI sample). */
     s->firmware_boot_timeout = IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER;
     /*
-     * agp default depends on the chipset.  On 460gx it turns on the GXB AGP
-     * GART, as on real hardware.  On zx1 the Rage 128 already reaches memory
-     * through the SBA in PCI-GART mode (the pixel-perfect default), so agp
-     * defaults OFF there and only opts the Rage 128 into the hp-agp AGP path
-     * (a PCI AGP capability -> sba_iommu reserves the GART -> hp-agp binds)
-     * when explicitly set.
+     * AGP is on by default on both chipsets, as on real hardware.  On 460gx it
+     * enables the GXB AGP GART; on zx1 it gives the Rage 128 a PCI AGP
+     * capability so sba_iommu reserves the GART half and Linux hp-agp can
+     * negotiate AGP mode (reusing the SBA IOPDIR as the GART).  Either way a
+     * guest with no AGP driver still does correct DMA -- on zx1 through the SBA
+     * in PCI-GART mode, which renders the Rage 128 greeter pixel-perfect.
      */
-    s->agp_enabled = !ia64_vpc_chipset_is_zx1(s);
+    s->agp_enabled = true;
     /* Default display adapter: the Rage 128 (honouring -vga); mach64 opt-in. */
     s->vga_model = g_strdup("rage128");
 }
@@ -5128,12 +5128,13 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_get_agp,
                                    ia64_vpc_set_agp);
     object_class_property_set_description(oc, "agp",
-        "AGP support. On 460gx (default on, as on real hardware) it enables the "
-        "GXB AGP GART; off makes the Rage 128 fall back to its 32-bit PCI GART "
-        "(clean 2D, but graphics DMA cannot reach RAM above 4 GiB). On zx1 "
-        "(default off) the Rage 128 already reaches >4 GiB through the SBA in "
-        "PCI-GART mode; on gives it a PCI AGP capability so Linux hp-agp "
-        "negotiates AGP mode reusing the SBA IOPDIR as the GART");
+        "AGP support (default on for both chipsets, as on real hardware). On "
+        "460gx it enables the GXB AGP GART; off makes the Rage 128 fall back to "
+        "its 32-bit PCI GART (clean 2D, but graphics DMA cannot reach RAM above "
+        "4 GiB). On zx1 it gives the Rage 128 a PCI AGP capability so Linux "
+        "hp-agp negotiates AGP mode reusing the SBA IOPDIR as the GART; off "
+        "keeps the Rage 128 on the SBA's PCI-GART path (which already reaches "
+        ">4 GiB)");
     object_class_property_add_str(oc, "vga",
                                   ia64_vpc_get_vga,
                                   ia64_vpc_set_vga);
