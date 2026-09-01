@@ -14576,6 +14576,7 @@ static void fw_phase_post_summary(void)
                            IA64_CPUID3_FAMILY_MASK);
     UINT8 model = (UINT8)((cpuid3 >> 16) & 0xffU);
     const CHAR8 *cpu_name;
+    const CHAR8 *platform_name;
     UINTN elapsed;
     EFI_INPUT_KEY key;
 
@@ -14589,6 +14590,13 @@ static void fw_phase_post_summary(void)
         cpu_name = "Intel Itanium";
     }
 
+    /* The chipset personality the machine selected (see fw_platform_is_*). */
+    if (fw_platform_is_zx1()) {
+        platform_name = "HP zx1 (HP Workstation zx2000 / zx6000 / Integrity rx2600)";
+    } else {
+        platform_name = "Intel 460GX (Intel SDV / HP Workstation i2000)";
+    }
+
     (void)fw_console_clear();
 
     fw_console_set_attr(0x0eU);   /* yellow (emphasis) */
@@ -14599,6 +14607,10 @@ static void fw_phase_post_summary(void)
     efi_conout_ascii("  -  Firmware Revision ");
     fw_post_emit_version(mSystemTable.FirmwareRevision);
     efi_conout_ascii("\r\n\r\n");
+
+    efi_conout_ascii("Platform       ");
+    efi_conout_ascii(platform_name);
+    efi_conout_ascii("\r\n");
 
     efi_conout_ascii("Processor      ");
     fw_post_emit_udec(fw_processor_count());
