@@ -636,21 +636,36 @@ static inline uint8_t ia64_tlb_effective_perm(uint8_t ar, uint8_t pl,
         return access_level <= pl ? (IA64_TLB_R | IA64_TLB_W) : 0;
     case 3:
         return access_level <= pl ? IA64_TLB_ALL : 0;
+    /*
+     * The promotion/demotion access rights 4, 5 and 6 give privilege level 0
+     * -- and only privilege level 0 -- a different set of rights from every
+     * other permitted level; they do not vary with the page's own PL the way
+     * rights 0..3 do.  Linux names them exactly that way in
+     * arch/ia64/include/asm/pgtable.h: _PAGE_AR_R_RW is "read only, read &
+     * write (privilege level 0)", _PAGE_AR_RX_RWX is "read & exec, read,
+     * write & exec (privilege level 0)" and _PAGE_AR_RWX_RW is "read, write
+     * & exec, read & write (priv level 0)" -- the second half of each name is
+     * the PL 0 column, which is why right 6 deliberately withholds execute
+     * from the kernel.  Keying the PL 0 column off `access_level < pl` made
+     * an ar=4, pl=0 page read-only at every level, which is what AIX 5L/IA-64
+     * puts on its kernel data: its first store to a kernel global took an
+     * endless Data Access Rights fault at cpl 0.
+     */
     case 4:
         if (access_level > pl) {
             return 0;
         }
-        return access_level < pl ? (IA64_TLB_R | IA64_TLB_W) : IA64_TLB_R;
+        return access_level == 0 ? (IA64_TLB_R | IA64_TLB_W) : IA64_TLB_R;
     case 5:
         if (access_level > pl) {
             return 0;
         }
-        return access_level < pl ? IA64_TLB_ALL : (IA64_TLB_R | IA64_TLB_X);
+        return access_level == 0 ? IA64_TLB_ALL : (IA64_TLB_R | IA64_TLB_X);
     case 6:
         if (access_level > pl) {
             return 0;
         }
-        return access_level < pl ? IA64_TLB_ALL : (IA64_TLB_R | IA64_TLB_W);
+        return access_level == 0 ? (IA64_TLB_R | IA64_TLB_W) : IA64_TLB_ALL;
     case 7:
         return access_level == 0 ? (IA64_TLB_R | IA64_TLB_X) : IA64_TLB_X;
     default:
