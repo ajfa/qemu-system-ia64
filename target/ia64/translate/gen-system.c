@@ -825,7 +825,19 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
     case IA64_OP_RFI:
         gen_helper_rfi(tcg_env, tcg_constant_i64(insn->address),
                        tcg_constant_i32(insn->slot));
-        tcg_gen_lookup_and_goto_ptr();
+        /*
+         * rfi restores psr from ipsr -- usually re-enabling psr.i -- so it
+         * must RETURN TO THE MAIN LOOP, not lookup_and_goto_ptr straight
+         * into the next TB: only the loop re-examines interrupt_request.
+         * With the direct jump, a vector that was raised while psr.i was 0
+         * (rejected by ia64_cpu_exec_interrupt, left pending in the IRR)
+         * was never looked at again, and with the timer vector among the
+         * stranded ones nothing else could force a TB exit either.
+         * Measured on AIX 5L mid-install: psr.i=1, TPR=0, ISR=0, IRR
+         * holding both the ITV vector and the SCSI HBA's 0x8f, guest
+         * spinning forever in waitproc.
+         */
+        tcg_gen_exit_tb(NULL, 0);
         if (skip == NULL) {
             return IA64_GEN_NORETURN;
         }

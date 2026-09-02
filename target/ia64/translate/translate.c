@@ -2846,6 +2846,29 @@ static void ia64_tr_tb_stop(DisasContextBase *db, CPUState *cs)
 
     switch (db->is_jmp) {
     case IA64_DISAS_EXIT:
+        /*
+         * IA64_DISAS_EXIT ends the TB after an instruction that changed
+         * system state the translator or the interrupt logic depends on --
+         * ssm/rsm, mov-to-PSR, CR writes.  It must RETURN TO THE MAIN LOOP
+         * (tcg_gen_exit_tb(NULL, 0)), not chain to the next TB: only the
+         * main loop re-examines cpu->interrupt_request, and chaining here
+         * created a lost-wakeup race.  An external interrupt that arrives
+         * while psr.i is 0 is rejected by ia64_cpu_exec_interrupt() and
+         * stays pending; if the `ssm psr.i` that re-enables it then chains
+         * straight into the (already chained) idle loop, no TB entry ever
+         * returns to the loop and the vector is never taken.  Measured on
+         * AIX 5L: the LSI HBA's interrupt was delivered to the SAPIC IRR
+         * (314 deliveries, 313 EOIs) and the guest idled forever in
+         * waitproc with the last one pending.  A goto_tb chain is only
+         * correct for DISAS_TOO_MANY, where no guest-visible state changed.
+         */
+        ia64_gen_store_instruction_group_start(
+            ctx->restart.instruction_group_start);
+        ia64_gen_save_fault_slot_for_exit(ctx);
+        ia64_gen_clear_ri();
+        tcg_gen_movi_i64(cpu_ip, db->pc_next);
+        tcg_gen_exit_tb(NULL, 0);
+        break;
     case DISAS_TOO_MANY:
         ia64_gen_goto_tb(ctx, db->pc_next);
         break;
