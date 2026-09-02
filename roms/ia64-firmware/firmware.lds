@@ -5,7 +5,16 @@ ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x100000;
+    /*
+     * 3 MiB, not 1 MiB.  AIX 5L/IA-64's BOOTIA64.EFI has its relocations
+     * stripped and is linked at a fixed ImageBase of 0x1ff000, so EFI
+     * LoadImage() can only place it if [0x1ff000, 0x254000) is conventional
+     * memory.  Linked at 1 MiB this firmware spans [0x100000, 0x2fe000) and
+     * swallows that window, and the AIX loader cannot be loaded at all.
+     * Must match IA64_FW_BASE (hw/ia64/ia64_vpc.c) and
+     * IA64_FW_IDENTITY_BASE (target/ia64/cpu.h).
+     */
+    . = 0x300000;
 
     .text.boot : {
         *(.text._start)
@@ -86,9 +95,9 @@ SECTIONS
 }
 
 /* The machine hardcodes the SAL runtime stub addresses (target/ia64/cpu.h). */
-ASSERT(sal_runtime_entry == 0x102000,
-       "sal_runtime_entry must sit at IA64_FW_SAL_RUNTIME_ENTRY_PA (0x102000)")
-ASSERT(sal_runtime_return == 0x102020,
-       "sal_runtime_return must sit at IA64_FW_SAL_RUNTIME_RETURN_PA (0x102020)")
-ASSERT(sal_dispatch_block == 0x102040,
-       "sal_dispatch_block must sit at IA64_FW_SAL_DISPATCH_BLOCK_PA (0x102040)")
+ASSERT(sal_runtime_entry == 0x302000,
+       "sal_runtime_entry must sit at IA64_FW_SAL_RUNTIME_ENTRY_PA (0x302000)")
+ASSERT(sal_runtime_return == 0x302020,
+       "sal_runtime_return must sit at IA64_FW_SAL_RUNTIME_RETURN_PA (0x302020)")
+ASSERT(sal_dispatch_block == 0x302040,
+       "sal_dispatch_block must sit at IA64_FW_SAL_DISPATCH_BLOCK_PA (0x302040)")

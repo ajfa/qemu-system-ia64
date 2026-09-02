@@ -880,6 +880,291 @@ bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
  * saved context and completes the stub's br.ret back to the caller.  SAL
  * calls are not re-entrant (the OS serializes them).
  */
+/*
+ * Temporary instrumentation: dump the guest's register state when it executes
+ * a chosen instruction address.
+ *
+ * AIX's configuration methods are ordinary ELF executables linked at a fixed
+ * base (0x1000xxxx, no PIE), so a call site inside cfgsys_ia64 has the same
+ * virtual address in every boot and can be watched from here.  That is the
+ * only way to see what libacpi returns: the guest has no console in this boot
+ * phase, so nothing the methods print survives.
+ *
+ *   AIX_WATCH=0x100023fc,0x10002400,...   instruction addresses to trap on
+ *   AIX_WATCH_MAX=<n>                    hits to print per address (default 24)
+ *   AIX_WATCH_DEREF=<n>                  print *gr[n] and a window of what it points at
+ *
+ * The list is consulted once per translation, so the run-time cost is a call
+ * to ia64_aix_watch() only on the watched bundles.
+ */
+#define IA64_AIX_WATCH_MAX 16
+static uint64_t ia64_aix_watch_list[IA64_AIX_WATCH_MAX];
+static int ia64_aix_watch_count = -1;
+
+static void ia64_aix_watch_init(void)
+{
+    const char *spec = getenv("AIX_WATCH");
+    char *dup, *tok, *save = NULL;
+
+    ia64_aix_watch_count = 0;
+    if (spec == NULL || *spec == '\0') {
+        return;
+    }
+    dup = g_strdup(spec);
+    for (tok = strtok_r(dup, ",", &save); tok != NULL;
+         tok = strtok_r(NULL, ",", &save)) {
+        if (ia64_aix_watch_count >= IA64_AIX_WATCH_MAX) {
+            break;
+        }
+        ia64_aix_watch_list[ia64_aix_watch_count++] =
+            (uint64_t)g_ascii_strtoull(tok, NULL, 0);
+    }
+    g_free(dup);
+    fprintf(stderr, "AIXWATCH: %d address(es) armed\n", ia64_aix_watch_count);
+}
+
+bool ia64_aix_watch_addr(uint64_t ip)
+{
+    if (ia64_aix_watch_count < 0) {
+        ia64_aix_watch_init();
+    }
+    for (int i = 0; i < ia64_aix_watch_count; i++) {
+        /* the watch names a bundle; any slot in it is close enough */
+        if ((ia64_aix_watch_list[i] & ~0xfULL) == (ip & ~0xfULL)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ia64_aix_watch(CPUIA64State *env, uint64_t ip)
+{
+    static int hits[IA64_AIX_WATCH_MAX];
+    int slot = 0;
+
+    for (int i = 0; i < ia64_aix_watch_count; i++) {
+        if ((ia64_aix_watch_list[i] & ~0xfULL) == (ip & ~0xfULL)) {
+            slot = i;
+            break;
+        }
+    }
+    /*
+     * Every AIX executable is linked at the same base, so unrelated processes
+     * execute these addresses too.  AIX_WATCH_GP=<value> keeps only the one
+     * whose global pointer matches, which is what separates cfgsys_ia64 from
+     * the shell and the other methods.
+     */
+    if (getenv("AIX_WATCH_GP") != NULL) {
+        uint64_t want = g_ascii_strtoull(getenv("AIX_WATCH_GP"), NULL, 0);
+
+        if (env->gr[1] != want) {
+            return;
+        }
+    }
+    /*
+     * A watched loop head would otherwise flood the log.  The cap is per
+     * watched address and counts hits from *every* process, so an unrelated
+     * binary that happens to have code at the same address can eat the whole
+     * budget before the one being studied ever runs -- raise it with
+     * AIX_WATCH_MAX when a watch comes back empty.
+     */
+    if (hits[slot]++ > (getenv("AIX_WATCH_MAX")
+                        ? atoi(getenv("AIX_WATCH_MAX")) : 24)) {
+        return;
+    }
+    fprintf(stderr,
+            "AIXWATCH ip=%08" PRIx64 " gp=%08" PRIx64 " r8=%016" PRIx64
+            " r33=%08" PRIx64 " r35=%016" PRIx64 " r41=%016" PRIx64
+            " r42=%016" PRIx64 " r45=%016" PRIx64 " r46=%016" PRIx64
+            " b0=%08" PRIx64,
+            ip, env->gr[1], env->gr[8], env->gr[33], env->gr[35],
+            env->gr[41], env->gr[42], env->gr[45], env->gr[46], env->br[0]);
+
+    /*
+     * AIX_WATCH_ALL adds the whole visible stacked frame.  The register a
+     * decision hangs on is rarely one of the seven above, and guessing which
+     * one it is from the disassembly costs a boot per guess.
+     */
+    if (getenv("AIX_WATCH_ALL") != NULL) {
+        /*
+         * From r2 on purpose: a loop that walks a kernel list keeps the entry
+         * pointer and the bounds in the static registers, and printing only
+         * the stacked frame hides exactly the numbers being compared.
+         */
+        for (int i = 2; i < 96; i++) {
+            if (env->gr[i] != 0) {
+                fprintf(stderr, " r%d=%" PRIx64, i, env->gr[i]);
+            }
+        }
+    }
+
+    /*
+     * With AIX_WATCH_STR the registers that carry pointers are also shown as
+     * text, which is what turns "acpi_dvc_get_hid returned 44" into "and the
+     * device it was asked about is <this one>".
+     */
+    if (getenv("AIX_WATCH_STR") != NULL) {
+        static const int regs[] = { 8, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+                                    41, 42, 43, 44, 45, 46 };
+        CPUState *cs = env_cpu(env);
+
+        for (int i = 0; i < (int)ARRAY_SIZE(regs); i++) {
+            uint8_t buf[33];
+            uint64_t p = env->gr[regs[i]];
+
+            if (p == 0 || cpu_memory_rw_debug(cs, p, buf, sizeof(buf) - 1,
+                                              false) != 0) {
+                continue;
+            }
+            buf[sizeof(buf) - 1] = 0;
+            for (int k = 0; k < (int)sizeof(buf) - 1; k++) {
+                if (buf[k] == 0) {
+                    break;
+                }
+                if (buf[k] < 32 || buf[k] >= 127) {
+                    buf[0] = 0;
+                    break;
+                }
+            }
+            if (buf[0]) {
+                fprintf(stderr, "  r%d->\"%s\"", regs[i], (char *)buf);
+            }
+        }
+        /*
+         * ACPI namespace handles are kernel pointers, and an ACPICA
+         * namespace node carries its four-character name a few bytes in, so
+         * a short hex+ASCII window over r45 identifies the device being
+         * asked about.
+         */
+        if (env->gr[45] > 0xe000000000000000ULL) {
+            uint8_t node[32];
+
+            if (cpu_memory_rw_debug(cs, env->gr[45], node, sizeof(node),
+                                    false) == 0) {
+                fprintf(stderr, "  r45[]=");
+                for (int k = 0; k < (int)sizeof(node); k++) {
+                    fprintf(stderr, "%02x", node[k]);
+                }
+                fprintf(stderr, " \"");
+                for (int k = 0; k < (int)sizeof(node); k++) {
+                    fputc((node[k] >= 32 && node[k] < 127) ? node[k] : '.',
+                          stderr);
+                }
+                fputc('"', stderr);
+            }
+        }
+    }
+    /*
+     * AIX_WATCH_AT="<reg>[:<off>][:<len>]"  hex-dumps len bytes at gr[reg]+off.
+     * AIX_WATCH_PTR="<reg>:<off>[:<len>]"   reads the 32-bit little-endian
+     * pointer stored at gr[reg]+off and dumps len bytes from there.
+     *
+     * AIX's config methods hand the kernel a struct by address and then a
+     * device-dependent structure by pointer inside it (see struct cfg_dd), so
+     * both a direct and a one-level-indirect window are needed to see what a
+     * driver is actually being told.  Guest pointers are 32-bit: these are
+     * ILP32 executables.
+     */
+    {
+        static const struct {
+            const char *env; int indirect;   /* 0 = direct, 4/8 = pointer size */
+        } views[] = {
+            { "AIX_WATCH_AT", 0 }, { "AIX_WATCH_PTR", 4 },
+            /* kernel pointers are 64-bit; the ILP32 methods use 32-bit ones */
+            { "AIX_WATCH_PTR8", 8 },
+        };
+        CPUState *cs = env_cpu(env);
+
+        for (int v = 0; v < (int)ARRAY_SIZE(views); v++) {
+            const char *spec = getenv(views[v].env);
+            int reg = 0, off = 0, len = 64;
+            uint64_t base;
+            uint8_t win[256];
+
+            if (spec == NULL) {
+                continue;
+            }
+            if (sscanf(spec, "%d:%d:%d", &reg, &off, &len) < 1) {
+                continue;
+            }
+            if (len > (int)sizeof(win)) {
+                len = sizeof(win);
+            }
+            if (reg <= 0 || reg >= 128 || env->gr[reg] == 0) {
+                continue;
+            }
+            base = env->gr[reg] + off;
+            if (views[v].indirect) {
+                int w = views[v].indirect;
+                uint8_t q[8];
+                uint64_t v64 = 0;
+
+                if (cpu_memory_rw_debug(cs, base, q, w, false) != 0) {
+                    continue;
+                }
+                for (int k = w - 1; k >= 0; k--) {
+                    v64 = (v64 << 8) | q[k];
+                }
+                base = v64;
+                if (base == 0) {
+                    continue;
+                }
+            }
+            if (cpu_memory_rw_debug(cs, base, win, len, false) != 0) {
+                continue;
+            }
+            fprintf(stderr, "\n  %s r%d+%d @%08" PRIx64 ":", views[v].env,
+                    reg, off, base);
+            for (int k = 0; k < len; k++) {
+                fprintf(stderr, "%s%02x", (k % 4) ? "" : " ", win[k]);
+            }
+            fprintf(stderr, "  \"");
+            for (int k = 0; k < len; k++) {
+                fputc((win[k] >= 32 && win[k] < 127) ? win[k] : '.', stderr);
+            }
+            fputc('"', stderr);
+        }
+    }
+
+    /*
+     * AIX_WATCH_DEREF=<n> follows gr[n] one level: it prints the 8-byte value
+     * stored there and then a window of the object it points at.  The handles
+     * these config methods pass around live on the user stack as
+     * pointers-to-pointer, and the question "is this really the ACPI node I
+     * think it is" cannot be answered from the register file alone.
+     */
+    if (getenv("AIX_WATCH_DEREF") != NULL) {
+        CPUState *cs = env_cpu(env);
+        int n = atoi(getenv("AIX_WATCH_DEREF"));
+        uint8_t buf[8];
+
+        if (n > 0 && n < 128 && env->gr[n] != 0 &&
+            cpu_memory_rw_debug(cs, env->gr[n], buf, sizeof(buf), false) == 0) {
+            uint64_t p = 0;
+            uint8_t obj[64];
+
+            for (int k = 7; k >= 0; k--) {
+                p = (p << 8) | buf[k];          /* little-endian */
+            }
+            fprintf(stderr, "  *r%d=%016" PRIx64, n, p);
+            if (p != 0 &&
+                cpu_memory_rw_debug(cs, p, obj, sizeof(obj), false) == 0) {
+                fprintf(stderr, "  [");
+                for (int k = 0; k < (int)sizeof(obj); k++) {
+                    fprintf(stderr, "%02x", obj[k]);
+                }
+                fprintf(stderr, "] \"");
+                for (int k = 0; k < (int)sizeof(obj); k++) {
+                    fputc((obj[k] >= 32 && obj[k] < 127) ? obj[k] : '.',
+                          stderr);
+                }
+                fputc('"', stderr);
+            }
+        }
+    }
+    fputc('\n', stderr);
+}
+
 uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
 {
     IA64SalBridgeState *bridge = &env->sal_bridge;
@@ -915,6 +1200,17 @@ uint32_t ia64_sal_runtime_enter(CPUIA64State *env)
 
         stack += (uint64_t)index * IA64_FW_SAL_RUNTIME_SLOT_SIZE;
         bstore += (uint64_t)index * IA64_FW_SAL_RUNTIME_SLOT_SIZE;
+    }
+
+    if (getenv("AIX_TRACE_SAL") != NULL) {
+        fprintf(stderr,
+                "SAL  caller=%016llx  r32=%016llx r33=%016llx r34=%016llx "
+                "r35=%016llx r36=%016llx r37=%016llx\n",
+                (unsigned long long)env->br[IA64_BR_RETURN_LINK],
+                (unsigned long long)env->gr[32], (unsigned long long)env->gr[33],
+                (unsigned long long)env->gr[34], (unsigned long long)env->gr[35],
+                (unsigned long long)env->gr[36],
+                (unsigned long long)env->gr[37]);
     }
 
     bridge->psr = env->psr;

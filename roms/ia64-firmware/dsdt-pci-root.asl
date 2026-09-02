@@ -45,12 +45,45 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
     {
         Device (PCI0)
         {
-            Name (_HID, "PNP0A03")
+            // _HID must be the EisaId *integer*, not the string "PNP0A03".
+            // Both are legal ACPI and modern guests take either, but AIX 5L
+            // for IA-64 does not: its libacpi wrapper acpi_dvc_get_hid()
+            // returns error 44 for a string-encoded _HID, and cfgsys_ia64's
+            // define_acpi_children() then abandons the device.  Since PCI0 is
+            // the only child of \_SB_, the walk ends with no PNP0A03 found, no
+            // bus/ia64/pci is created, cfgpci never runs and cfgmgr configures
+            // nothing below sysplanar0.
+            //
+            // Measured by trapping on the call sites inside cfgsys_ia64
+            // (AIX_WATCH, target/ia64/arch/firmware.c).  With the string:
+            //   acpi_get_device_by_name("\_SB_") -> 0    (found)
+            //   acpi_dvc_get_child_set()         -> 0    (one child, PCI0)
+            //   acpi_dvc_get_hid()               -> 44   (skip, end of walk)
+            // With EisaId the same walk runs to completion: the _CID path is
+            // taken, acpi_get_sta() answers 38 ("no _STA method", assumed
+            // present), get_or_create_cudv() returns 0, and the child name is
+            // handed to cfgmgr.  The guest's CuDv then really does contain
+            // pci0 (bus/ia64/pci, parent sysplanar0, driver pci/pci_busdd) and
+            // configuration continues into vga0 and the other PCI children.
+            //
+            // ★The obvious check -- "did /usr/lib/methods/cfgpci get exec'd"
+            // -- is NOT reliable: a short-lived process's argv/envp is reused
+            // within seconds, so the first attempt at this change looked like
+            // it did nothing and was wrongly reverted.  Trap the call sites,
+            // or look for the device in CuDv.
+            Name (_HID, EisaId ("PNP0A03"))
+            // Left as a string on purpose: _CID is only consulted as a
+            // fallback and this spelling is what some guest installers match.
             Name (_CID, "PNP0A03")
             Name (_SEG, Zero)
             Name (_BBN, Zero)
             Name (_UID, Zero)
             Name (_CCA, One)
+            // Tried and reverted: an explicit Method (_STA) { Return (0x0F) }
+            // here.  The theory was that the 2000-vintage ACPI CA in AIX
+            // 5L/IA-64 treats a missing _STA as "not present" where the spec
+            // says "assume present".  Measured: identical boot, identical
+            // port-I/O profile, cfgmgr still on LED 0538.  Not the gate.
             Name (_CRS, ResourceTemplate ()
             {
                 WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
@@ -72,9 +105,29 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 // Windows' acpi.sys builds its bridge translator windows and
                 // the HAL port-range handles ((RangeId << 16) | port) from
                 // exactly these fields; Linux fills io_space[] from them.
-                QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                    EntireRange, 0, 0, 0x0000FFFF, 0x800010000000,
-                    0x00010000, , , , TypeTranslation, SparseTranslation)
+                //
+                // ★★★★★But it must be a DWord descriptor here, not a QWord
+                // one: AIX 5L for IA-64 IGNORES every 64-bit ACPI address
+                // space descriptor.  libcfg_ia64.so's parse_acpi_res_info()
+                // dispatches on the ACPI CA resource id through a 15-entry
+                // jump table, and the entry for ACPI_RSTYPE_ADDRESS64 (13)
+                // points at the "no handler, keep walking" label -- the same
+                // one DMA, START_DPF, END_DPF, VENDOR and END_TAG use.  Only
+                // ADDRESS16 (11) and ADDRESS32 (12) reach
+                // process_acpi_address_ranges_info().  A QWordIO window is
+                // therefore invisible to AIX and the host bridge ends up with
+                // no I/O producer at all.
+                //
+                // The cost of the DWord form is the translation offset: it no
+                // longer fits, so the sparse-window base is gone.  AIX does
+                // not need it (its port I/O goes through planar_pal_ia64's
+                // pal_command, and get_system_addresses() hardcodes the
+                // 0xFFFFC000000 legacy window), but Windows and Linux do --
+                // if this firmware is ever pointed at them again, restore the
+                // QWord form.  The XP rig (~/xpia64) has its own tree and is
+                // untouched by this.
+                DWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                    EntireRange, 0, 0, 0x0000FFFF, 0, 0x00010000)
                 // The legacy VGA aperture is decoded to the PCI bus and must
                 // be declared, or the root bridge claims no producer window
                 // covering the range its VGA child reports in _CRS/BARs.
@@ -96,7 +149,16 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 DWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, Cacheable, ReadWrite,
                     0, 0x000C0000, 0x000DFFFF, 0, 0x00020000)
-                QWordMemory (ResourceProducer, PosDecode, MinFixed,
+                // The PCI MMIO window.  DWord for the same reason as the I/O
+                // window above, and it has to stay NonCacheable: AIX keeps a
+                // memory producer only when the cache attribute byte its
+                // parser writes is 'c' (NonCacheable) or 'P' (Prefetchable).
+                // get_host_bus_possible_ranges() drops 'C' (Cacheable) and
+                // 'W' (WriteCombining) on the floor, so the two legacy holes
+                // above -- declared Cacheable for Windows' benefit -- are not
+                // producers as far as AIX is concerned.  This descriptor is
+                // the only memory window AIX will see.
+                DWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, NonCacheable, ReadWrite,
                     0, 0xEE000000, 0xFDFFFFFF, 0, 0x10000000)
             })
@@ -131,6 +193,22 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 Package () { 0x0006FFFF, 2, 0x00, 16 },
                 Package () { 0x0006FFFF, 3, 0x00, 17 }
             })
+
+            // ★TRIED AND REVERTED (2026-08-28): bare Device(SCSI)/Device(VGAD)
+            // child nodes here with _ADR = (device << 16) | function -- the
+            // exact key cfgpci's match_acpi_dvc() computes (measured at
+            // 0x10004e00).  The theory: acpi_dvc_get_child_objs() on the PCI0
+            // handle would then return these, match_acpi_dvc would bind each
+            // PCI leaf, acpi_dvc_correlate would run, and the osname<->handle
+            // map the keyboard and bootinfo need would populate.  Measured
+            // result: match_acpi_dvc still returns 0 for every leaf (watched
+            // 0x10004200, gp=cfgpci) and the keyboard prompt is still
+            // unanswerable.  The PCI0 child list stays empty even with valid
+            // _ADR Device() nodes declared, so the wall is inside AIX's
+            // 2000-vintage ACPI CA namespace walk (AcpiGetNextObject with a
+            // TYPE_DEVICE filter on the PCI0 handle), not in these
+            // declarations.  Left out of the tree.
+
         }
     }
 }

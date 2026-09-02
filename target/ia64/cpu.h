@@ -152,7 +152,8 @@
 #define IA64_IP_BUNDLE_MASK (~(IA64_BUNDLE_SIZE - 1))
 #define IA64_REGION7_PHYS_MASK ((1ULL << IA64_REGION_SHIFT) - 1)
 #define IA64_PHYS_UC_BIT (1ULL << 63)
-#define IA64_FW_IDENTITY_BASE 0x00100000ULL
+/* Keep in step with firmware.lds and IA64_FW_BASE (hw/ia64/ia64_vpc.c). */
+#define IA64_FW_IDENTITY_BASE 0x00300000ULL
 #define IA64_FW_IDENTITY_SIZE 0x00100000ULL
 /*
  * Fixed physical addresses of the SAL runtime stub trio (entry.S,

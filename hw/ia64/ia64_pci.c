@@ -14,6 +14,8 @@
 #include "system/address-spaces.h"
 #include "hw/core/irq.h"
 #include "qom/object.h"
+#include "hw/core/cpu.h"
+#include "target/ia64/cpu.h"
 
 OBJECT_DECLARE_SIMPLE_TYPE(IA64PCIState, IA64_PCI_HOST_BRIDGE)
 
@@ -24,10 +26,78 @@ struct IA64PCIState {
     MemoryRegion pci_mmio_window;
     MemoryRegion pci_io;
     MemoryRegion pci_io_sparse;
+    MemoryRegion pci_io_alt;
+    MemoryRegion pci_io_sparse_alt;
     MemoryRegion pci_config;
     AddressSpace pci_io_as;
     qemu_irq irq[IA64_PCI_INTX_LINES];
 };
+
+/*
+ * Temporary instrumentation: AIX IA-64 is believed to enumerate through the
+ * ACPI namespace rather than by walking PCI config space.  Set AIX_TRACE_PCI=1
+ * to see every config-space and legacy-CF8 access the guest makes.
+ */
+static uint64_t ia64_pci_trace_pc(void)
+{
+    CPUState *cs = current_cpu;
+
+    if (cs != NULL && CPU_GET_CLASS(cs)->get_pc != NULL) {
+        return CPU_GET_CLASS(cs)->get_pc(cs);
+    }
+    return 0;
+}
+
+/*
+ * b0 holds the return address of the current call, b6/b7 the usual indirect
+ * call scratch; r32..r35 are the incoming arguments of the leaf accessor.
+ * Enough to name the caller without a full unwind.
+ */
+static const char *ia64_pci_trace_callers(void)
+{
+    static char buf[192];
+    CPUState *cs = current_cpu;
+    CPUIA64State *env;
+
+    if (cs == NULL || !object_dynamic_cast(OBJECT(cs), TYPE_IA64_CPU)) {
+        return "";
+    }
+    env = &IA64_CPU(cs)->env;
+    snprintf(buf, sizeof(buf),
+             "  b0=%016llx b6=%016llx r32=%016llx r33=%016llx",
+             (unsigned long long)env->br[0], (unsigned long long)env->br[6],
+             (unsigned long long)env->gr[32], (unsigned long long)env->gr[33]);
+    return buf;
+}
+
+static int ia64_pci_trace_level(void)
+{
+    static int level = -1;
+
+    if (level < 0) {
+        const char *e = getenv("AIX_TRACE_PCI");
+        level = (e == NULL || *e == '\0') ? 0 : atoi(e);
+    }
+    return level;
+}
+
+static bool ia64_pci_trace(void)
+{
+    return ia64_pci_trace_level() > 0;
+}
+
+/*
+ * Level 2 also logs plain port traffic, which is how the guest's ACPI
+ * interpreter shows itself: AcpiOsReadPort/WritePort on the PM1 block, and
+ * any OperationRegion an AML method touches.
+ */
+static bool ia64_pci_trace_port(hwaddr port)
+{
+    if (ia64_pci_trace_level() >= 2) {
+        return true;
+    }
+    return ia64_pci_trace() && port >= 0xcf8 && port <= 0xcff;
+}
 
 static hwaddr ia64_pci_sparse_io_port(hwaddr encoded)
 {
@@ -64,19 +134,39 @@ static uint64_t ia64_pci_sparse_io_read(void *opaque, hwaddr addr,
         return ~0ULL;
     }
 
+    uint64_t value;
+
     switch (size) {
     case 1:
-        return address_space_ldub(&s->pci_io_as, dense,
-                                  MEMTXATTRS_UNSPECIFIED, NULL);
+        value = address_space_ldub(&s->pci_io_as, dense,
+                                   MEMTXATTRS_UNSPECIFIED, NULL);
+        break;
     case 2:
-        return address_space_lduw_le(&s->pci_io_as, dense,
-                                     MEMTXATTRS_UNSPECIFIED, NULL);
+        value = address_space_lduw_le(&s->pci_io_as, dense,
+                                      MEMTXATTRS_UNSPECIFIED, NULL);
+        break;
     case 4:
-        return address_space_ldl_le(&s->pci_io_as, dense,
-                                    MEMTXATTRS_UNSPECIFIED, NULL);
+        value = address_space_ldl_le(&s->pci_io_as, dense,
+                                     MEMTXATTRS_UNSPECIFIED, NULL);
+        break;
     default:
         return ~0ULL;
     }
+
+    /*
+     * The value read is the whole point of the trace for handshake
+     * protocols (i8042 status and ACK bytes, IDE status): "the guest
+     * polled 0x60" says nothing, "the guest read 0xfe from 0x60" says
+     * the device asked for a resend.
+     */
+    if (ia64_pci_trace_port(port)) {
+        fprintf(stderr, "PCIIO  rd port %03x/%u = %08x  pc=%016llx%s\n",
+                (unsigned)port, size, (unsigned)value,
+                (unsigned long long)ia64_pci_trace_pc(),
+                ia64_pci_trace_callers());
+    }
+
+    return value;
 }
 
 static void ia64_pci_sparse_io_write(void *opaque, hwaddr addr, uint64_t data,
@@ -88,6 +178,13 @@ static void ia64_pci_sparse_io_write(void *opaque, hwaddr addr, uint64_t data,
 
     if (port >= IA64_PCI_IO_SIZE || port + size > IA64_PCI_IO_SIZE) {
         return;
+    }
+
+    if (ia64_pci_trace_port(port)) {
+        fprintf(stderr, "PCIIO  wr port %03x/%u = %08x  pc=%016llx%s\n",
+                (unsigned)port, size, (unsigned)data,
+                (unsigned long long)ia64_pci_trace_pc(),
+                ia64_pci_trace_callers());
     }
 
     switch (size) {
@@ -148,7 +245,26 @@ static uint64_t ia64_pci_config_read(void *opaque, hwaddr addr, unsigned size)
 
     pci_dev = ia64_pci_config_device(s, addr, &reg);
     if (pci_dev == NULL) {
+        if (ia64_pci_trace()) {
+            fprintf(stderr,
+                    "PCICFG rd %02x:%02x.%x +%03x/%u = ffffffff (none)  pc=%016llx\n",
+                    (unsigned)extract64(addr, 20, 8),
+                    (unsigned)extract64(addr, 15, 5),
+                    (unsigned)extract64(addr, 12, 3), reg, size,
+                    (unsigned long long)ia64_pci_trace_pc());
+        }
         return ~0ULL;
+    }
+
+    if (ia64_pci_trace()) {
+        uint64_t v = pci_host_config_read_common(pci_dev, reg,
+                                                 pci_config_size(pci_dev), size);
+        fprintf(stderr, "PCICFG rd %02x:%02x.%x +%03x/%u = %08x  pc=%016llx\n",
+                (unsigned)extract64(addr, 20, 8),
+                (unsigned)extract64(addr, 15, 5),
+                (unsigned)extract64(addr, 12, 3), reg, size, (unsigned)v,
+                (unsigned long long)ia64_pci_trace_pc());
+        return v;
     }
 
     return pci_host_config_read_common(pci_dev, reg,
@@ -168,6 +284,14 @@ static void ia64_pci_config_write(void *opaque, hwaddr addr, uint64_t val,
     }
 
     pci_dev = ia64_pci_config_device(s, addr, &reg);
+    if (ia64_pci_trace()) {
+        fprintf(stderr, "PCICFG wr %02x:%02x.%x +%03x/%u = %08x%s  pc=%016llx\n",
+                (unsigned)extract64(addr, 20, 8),
+                (unsigned)extract64(addr, 15, 5),
+                (unsigned)extract64(addr, 12, 3), reg, size, (unsigned)val,
+                pci_dev == NULL ? " (none)" : "",
+                (unsigned long long)ia64_pci_trace_pc());
+    }
     if (pci_dev == NULL) {
         return;
     }
@@ -209,6 +333,29 @@ static int ia64_pci_map_irq(PCIDevice *d, int irq_num)
 static void ia64_pci_set_irq(void *opaque, int irq_num, int level)
 {
     IA64PCIState *s = opaque;
+
+    /*
+     * Debug only (AIX_TRACE_INTX): count and print INTx assertions.  When a
+     * guest blocks forever on a disk read there are two very different
+     * causes -- the device never raises its line, or it raises it and the
+     * interrupt is never delivered -- and they need different fixes.  This
+     * separates them without a debugger.
+     */
+    if (getenv("AIX_TRACE_INTX") != NULL) {
+        static unsigned long counts[IA64_PCI_INTX_LINES];
+        static unsigned long shown;
+
+        if (irq_num < IA64_PCI_INTX_LINES && level) {
+            counts[irq_num]++;
+            if (counts[irq_num] <= 20 || (counts[irq_num] % 1000) == 0) {
+                fprintf(stderr, "INTX: line %d asserted, gsi %d, count %lu\n",
+                        irq_num, IA64_PCI_INTX_GSI_BASE + irq_num,
+                        counts[irq_num]);
+                shown++;
+            }
+        }
+        (void)shown;
+    }
 
     if (irq_num < IA64_PCI_INTX_LINES) {
         qemu_set_irq(s->irq[irq_num], level);
@@ -266,6 +413,27 @@ static void ia64_pci_realize(DeviceState *dev, Error **errp)
                                         &s->pci_io_sparse, 1);
     memory_region_add_subregion(get_system_memory(), IA64_PCI_CONFIG_BASE,
                                 &s->pci_config);
+
+    /*
+     * Second view of the same legacy I/O window at the classic Merced-era
+     * base.  AIX 5L/IA-64 does not read the I/O port translation out of the
+     * EFI memory map or the SAL system table: its port accessors materialize
+     * IA64_PCI_IO_ALT_BASE as a movl immediate and add the sparse encoding to
+     * it, so its very first console write -- polling the COM1 line status
+     * register at port 0x3fd -- lands here and nowhere else.
+     */
+    memory_region_init_alias(&s->pci_io_alt, OBJECT(dev), "pci-io-alt",
+                             &s->pci_io, 0, IA64_PCI_IO_SIZE);
+    memory_region_add_subregion(get_system_memory(), IA64_PCI_IO_ALT_BASE,
+                                &s->pci_io_alt);
+    memory_region_init_alias(&s->pci_io_sparse_alt, OBJECT(dev),
+                             "pci-io-sparse-alt", &s->pci_io_sparse, 0,
+                             IA64_PCI_IO_SPARSE_SIZE -
+                             IA64_PCI_IO_SPARSE_SKIP);
+    memory_region_add_subregion_overlap(get_system_memory(),
+                                        IA64_PCI_IO_ALT_BASE +
+                                        IA64_PCI_IO_SPARSE_SKIP,
+                                        &s->pci_io_sparse_alt, 1);
 }
 
 static void ia64_pci_class_init(ObjectClass *klass, const void *data)

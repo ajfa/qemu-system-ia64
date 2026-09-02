@@ -20,6 +20,11 @@ uint32_t helper_firmware_debug_restore(CPUIA64State *env)
     return ia64_firmware_debug_restore(env);
 }
 
+void helper_aix_watch(CPUIA64State *env, uint64_t ip)
+{
+    ia64_aix_watch(env, ip);
+}
+
 uint32_t helper_sal_runtime_enter(CPUIA64State *env)
 {
     return ia64_sal_runtime_enter(env);

@@ -2708,6 +2708,11 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         return;
     }
 
+    /* Debug only (AIX_WATCH): dump registers at chosen instruction addresses. */
+    if (unlikely(ia64_aix_watch_addr(bundle_ip))) {
+        gen_helper_aix_watch(tcg_env, tcg_constant_i64(bundle_ip));
+    }
+
     low = translator_ldq_end(ctx->env, db, bundle_ip, MO_LE);
     high = translator_ldq_end(ctx->env, db, bundle_ip + 8, MO_LE);
     template_code = ia64_bundle_template_code(low);

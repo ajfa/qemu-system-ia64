@@ -40,6 +40,26 @@ struct IA64IOSapicState {
     uint32_t reg_select;
 };
 
+/*
+ * Debug only (AIX_TRACE_IOSAPIC): log RTE writes, deliveries and EOIs for
+ * every pin but pin 0, which carries the 8259 cascade and is noise.  That
+ * deliberately covers the ISA pins as well as the PCI GSIs: the keyboard
+ * sits on pin 1, and a trace that starts at pin 16 answers "no interrupt"
+ * for it whatever the hardware did.  When a device raises its line and the
+ * guest never acknowledges, the question is always which of three things
+ * happened: the route was masked, the vector was changed mid-flight, or the
+ * delivery never fired.  This answers it without a debugger.
+ */
+static bool iosapic_trace_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        cached = getenv("AIX_TRACE_IOSAPIC") != NULL;
+    }
+    return cached;
+}
+
 static void iosapic_update(IA64IOSapicState *s, int pin)
 {
     uint64_t rte = s->rte[pin];
@@ -91,6 +111,10 @@ static void iosapic_update(IA64IOSapicState *s, int pin)
         s->rte[pin] |= RTE_REMOTE_IRR;
     }
 
+    if (iosapic_trace_enabled() && pin >= 1) {
+        fprintf(stderr, "IOSAPIC: deliver pin %d vector 0x%02x\n",
+                pin, vector);
+    }
     ia64_sapic_set_irq(cs, vector);
 }
 
@@ -114,6 +138,15 @@ static void iosapic_rte_write(IA64IOSapicState *s, int pin, uint32_t val,
 
     s->rte[pin] = (s->rte[pin] & ~RTE_RO_BITS) | ro_bits;
     iosapic_fix_edge_remote_irr(s, pin);
+    if (iosapic_trace_enabled() && pin >= 1 && !high) {
+        fprintf(stderr,
+                "IOSAPIC: rte[%d] <- vector 0x%02x %s %s%s line=%d\n",
+                pin, (unsigned)(s->rte[pin] & RTE_VECTOR_MASK),
+                (s->rte[pin] & RTE_MASKED) ? "MASKED" : "unmasked",
+                (s->rte[pin] & RTE_TRIGGER_LEVEL) ? "level" : "edge",
+                (s->rte[pin] & RTE_REMOTE_IRR) ? " irr" : "",
+                s->irq_level[pin]);
+    }
     /*
      * A redirection-table write is not an interrupt request.  A level
      * route must be re-evaluated -- unmasking or rerouting an entry whose
@@ -155,6 +188,10 @@ static void iosapic_eoi(IA64IOSapicState *s, uint8_t vector)
             continue;
         }
         s->rte[pin] &= ~RTE_REMOTE_IRR;
+        if (iosapic_trace_enabled() && pin >= 1) {
+            fprintf(stderr, "IOSAPIC: eoi vector 0x%02x pin %d line=%d\n",
+                    vector, pin, s->irq_level[pin]);
+        }
         iosapic_update(s, pin);
     }
 }

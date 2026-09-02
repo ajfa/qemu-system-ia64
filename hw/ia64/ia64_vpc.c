@@ -19,6 +19,7 @@
 #include "qemu/datadir.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
+#include "exec/translation-block.h"
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
 #include "hw/core/qdev-properties.h"
@@ -53,7 +54,8 @@
 #include "target/ia64/cpu-qom.h"
 #include "target/ia64/cpu.h"
 
-#define IA64_FW_BASE    0x0000000000100000ULL
+/* Keep in step with firmware.lds and IA64_FW_IDENTITY_BASE (target/ia64/cpu.h). */
+#define IA64_FW_BASE    0x0000000000300000ULL
 /*
  * Firmware image loaded when no -bios is given.  It is installed beside the
  * binary (share/), so an unpacked package runs without naming it every time.
@@ -387,14 +389,18 @@ static const uint8_t ia64_int10_rom_init[] = {
 #define TYPE_IA64_VPC_MACHINE MACHINE_TYPE_NAME("ia64-vpc")
 OBJECT_DECLARE_SIMPLE_TYPE(IA64VpcMachineState, IA64_VPC_MACHINE)
 
+#define TYPE_IA64_VPC_ISA_STUB "ia64-vpc-isa-stub"
+
 struct IA64VpcMachineState {
     MachineState parent_obj;
 
     bool i8042_enabled;
+    bool isa_bridge_enabled;
     bool ahci_enabled;
     bool ide_enabled;
     bool firmware_ide_dma;
     bool agp_enabled;
+    bool scsi_895;
     uint64_t firmware_console;
     char *nvram_path;
     bool alat_full;
@@ -1744,6 +1750,42 @@ static void ia64_vpc_set_agp(Object *obj, bool value, Error **errp)
     (void)errp;
 
     s->agp_enabled = value;
+}
+
+static bool ia64_vpc_get_isa_bridge(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->isa_bridge_enabled;
+}
+
+static void ia64_vpc_set_isa_bridge(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    s->isa_bridge_enabled = value;
+}
+
+static bool ia64_vpc_get_scsi_895(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->scsi_895;
+}
+
+static void ia64_vpc_set_scsi_895(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    s->scsi_895 = value;
 }
 
 static bool ia64_vpc_get_firmware_ide_dma(Object *obj, Error **errp)
@@ -3118,9 +3160,34 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (!pci_realize_and_unref(s->lsi_dev, pci_bus, errp)) {
         return false;
     }
+    /*
+     * Optionally report the HBA as a 53C895 rather than the 53C895A the model
+     * implements.  The A revision only adds the 40-bit DAC addressing the
+     * model already carries; the register file and SCRIPTS engine the driver
+     * talks to are the same, so the older ID is a faithful description of the
+     * subset a 53C895 driver will use.  Guests whose driver database is older
+     * than the A part -- AIX 5L for IA-64 ships exactly one PCI id for this
+     * family, 1000:000c -- otherwise find no driver at all for the device.
+     *
+     * pci_do_device_reset() does not touch the id, so writing it once here
+     * holds for the life of the machine.
+     */
+    if (s->scsi_895) {
+        pci_config_set_device_id(s->lsi_dev->config,
+                                 PCI_DEVICE_ID_LSI_53C895);
+    }
     ia64_vpc_configure_lsi(s->lsi_dev);
     lsi53c8xx_handle_legacy_cmdline(DEVICE(s->lsi_dev));
 #endif
+
+    /* Optional class-0601 stub so PCI-scanning guests find their ISA bus. */
+    if (s->isa_bridge_enabled) {
+        PCIDevice *stub = pci_new(PCI_DEVFN(6, 0), TYPE_IA64_VPC_ISA_STUB);
+
+        if (!pci_realize_and_unref(stub, pci_bus, errp)) {
+            return false;
+        }
+    }
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     s->vga_dev = pci_vga_init(pci_bus);
@@ -3187,6 +3254,428 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     return true;
 }
 
+/*
+ * Temporary instrumentation: find a byte string anywhere in guest RAM and
+ * print the region around it.
+ *
+ * AIX's boot RAM filesystem never reaches a disk, so the trace rc.boot writes
+ * to /tmp/boot_log -- which is the only place cfgmgr's -v output and the
+ * config methods' stderr end up during CD phase 1, because that phase has no
+ * console at all -- exists only in guest memory.  Reading it back through QMP
+ * pmemsave is not an option: it runs at roughly 200 KB/s and returns nothing
+ * at all above 1 GiB.  Scanning the RAM block directly takes a moment.
+ *
+ *   AIX_MEMFIND="rc.boot: executing"   what to look for
+ *   AIX_MEMFIND_AFTER=<seconds>        when to start looking (default 90)
+ *   AIX_MEMFIND_BYTES=<n>              how much to print per hit (default 4096)
+ *   AIX_MEMFIND_BEFORE=<n>             also print n bytes ahead of the hit
+ *   AIX_MEMFIND_HEX=1                  hex+ASCII instead of text (ODM records
+ *                                      carry binary status fields)
+ *   AIX_MEMFIND_MAX=<n>                hits to print per needle (default 3)
+ */
+typedef struct IA64MemFind {
+    MachineState *machine;
+    QEMUTimer *timer;
+    char *needle;
+    int bytes;
+    int before;
+    int hex;
+    int max;
+} IA64MemFind;
+
+static void ia64_vpc_memfind_dump(const uint8_t *p, uint64_t size,
+                                  uint64_t start, int bytes, int hex)
+{
+    if (!hex) {
+        for (int i = 0; i < bytes && start + i < size; i++) {
+            int c = p[start + i];
+            fputc((c == '\n' || c == '\t' || (c >= 32 && c < 127))
+                  ? c : '.', stderr);
+        }
+        fputc('\n', stderr);
+        return;
+    }
+    for (int i = 0; i < bytes && start + i < size; i += 16) {
+        int n = 16;
+
+        if (start + i + n > size) {
+            n = size - start - i;
+        }
+        if (i + n > bytes) {
+            n = bytes - i;
+        }
+        fprintf(stderr, "%08" PRIx64 " ", start + i);
+        for (int j = 0; j < 16; j++) {
+            if (j < n) {
+                fprintf(stderr, "%02x ", p[start + i + j]);
+            } else {
+                fprintf(stderr, "   ");
+            }
+        }
+        fputc(' ', stderr);
+        for (int j = 0; j < n; j++) {
+            int c = p[start + i + j];
+            fputc((c >= 32 && c < 127) ? c : '.', stderr);
+        }
+        fputc('\n', stderr);
+    }
+}
+
+static void ia64_vpc_memfind_one(const uint8_t *p, uint64_t size,
+                                 const char *needle, const IA64MemFind *f)
+{
+    size_t n = strlen(needle);
+    uint64_t off = 0;
+    int hits = 0;
+
+    fprintf(stderr, "MEMFIND: looking for \"%s\"\n", needle);
+    while (n && off + n <= size) {
+        const uint8_t *hit = memchr(p + off, needle[0], size - off - n + 1);
+        if (hit == NULL) {
+            break;
+        }
+        off = hit - p;
+        if (memcmp(hit, needle, n) == 0) {
+            uint64_t start = off > (uint64_t)f->before ? off - f->before : 0;
+
+            fprintf(stderr, "MEMFIND: hit at guest 0x%" PRIx64 "\n", off);
+            ia64_vpc_memfind_dump(p, size, start, f->before + f->bytes,
+                                  f->hex);
+            fprintf(stderr, "MEMFIND: ---- end of hit ----\n");
+            if (++hits >= f->max) {
+                break;
+            }
+            off += n;
+        } else {
+            off++;
+        }
+    }
+    fprintf(stderr, "MEMFIND: %d hit(s) for \"%s\"\n", hits, needle);
+}
+
+/*
+ * AIX_POKE="old=>new" -- rewrite a string in the guest's RAM, repeatedly.
+ *
+ * Debug only, and deliberately conservative: a hit is rewritten only when the
+ * bytes the replacement would extend into are already zero, so a string can
+ * grow into the padding of a fixed-width ODM field but can never run over a
+ * neighbour.  Several rewrites can be given at once, separated by ";;".
+ *
+ * The point is to be able to answer "would this work if the guest did X",
+ * where X is something no switch of ours can reach -- an ODM record, an
+ * environment string, a rule path -- without having to rebuild the boot
+ * ramfs, which is a compressed container nobody has decoded.
+ *
+ *   AIX_POKE_AFTER=<s>   when to start looking (default 20)
+ *   AIX_POKE_EVERY=<ms>  how often to re-scan (default 500)
+ *   AIX_POKE_UNTIL=<s>   when to stop (default 150)
+ */
+typedef struct IA64Poke {
+    MachineState *machine;
+    QEMUTimer *timer;
+    char *spec;
+    char *hexspec;
+    int every;
+    int64_t deadline;
+} IA64Poke;
+
+static void ia64_vpc_poke_one(uint8_t *p, uint64_t size, const char *rule)
+{
+    const char *arrow = strstr(rule, "=>");
+    size_t nlen, rlen;
+    char *needle;
+    const char *repl;
+    uint64_t off = 0;
+
+    if (arrow == NULL) {
+        return;
+    }
+    needle = g_strndup(rule, arrow - rule);
+    repl = arrow + 2;
+    nlen = strlen(needle);
+    rlen = strlen(repl);
+    if (nlen == 0) {
+        g_free(needle);
+        return;
+    }
+    while (off + nlen <= size) {
+        uint8_t *hit = memchr(p + off, needle[0], size - off - nlen + 1);
+        bool room = true;
+
+        if (hit == NULL) {
+            break;
+        }
+        off = hit - p;
+        if (memcmp(hit, needle, nlen) != 0) {
+            off++;
+            continue;
+        }
+        /* only grow into padding that is already zero */
+        for (size_t i = nlen; i <= rlen; i++) {
+            if (off + i >= size || hit[i] != 0) {
+                room = false;
+                break;
+            }
+        }
+        if (room) {
+            memcpy(hit, repl, rlen + 1);
+            fprintf(stderr, "POKE: 0x%" PRIx64 " \"%s\" -> \"%s\"\n",
+                    off, needle, repl);
+        }
+        off += nlen;
+    }
+    g_free(needle);
+}
+
+/* "0a 10 01" or "0a1001" -> bytes; NULL if it is not clean hex */
+static uint8_t *ia64_vpc_parse_hex(const char *s, size_t len, size_t *out_len)
+{
+    uint8_t *buf = g_malloc0(len / 2 + 1);
+    size_t n = 0;
+    int hi = -1;
+
+    for (size_t i = 0; i < len; i++) {
+        int c = s[i];
+
+        if (c == ' ' || c == '\t' || c == '_') {
+            continue;
+        }
+        if (!g_ascii_isxdigit(c)) {
+            g_free(buf);
+            return NULL;
+        }
+        if (hi < 0) {
+            hi = g_ascii_xdigit_value(c);
+        } else {
+            buf[n++] = (hi << 4) | g_ascii_xdigit_value(c);
+            hi = -1;
+        }
+    }
+    if (hi >= 0) {                      /* an odd digit left over */
+        g_free(buf);
+        return NULL;
+    }
+    *out_len = n;
+    return buf;
+}
+
+/*
+ * AIX_HEXPOKE="oldhex=>newhex" -- the same idea as AIX_POKE, but over raw
+ * bytes instead of C strings, because an instruction bundle is not a string:
+ * it contains NULs and has no terminator.  Lengths must match exactly, so a
+ * hit can never disturb its neighbours -- which is what makes it safe to
+ * apply by pattern over the whole of guest RAM instead of at an address, and
+ * that matters because a user-space shared library has no fixed load address.
+ */
+static int ia64_vpc_hexpoke_one(uint8_t *p, uint64_t size, const char *rule)
+{
+    const char *arrow = strstr(rule, "=>");
+    g_autofree uint8_t *needle = NULL;
+    g_autofree uint8_t *repl = NULL;
+    size_t nlen = 0, rlen = 0;
+    uint64_t off = 0;
+    int hits = 0;
+    /*
+     * Optional "@<hex>" tail: the offset the pattern sits at inside its
+     * 4 KiB page.  Code in a mapped file page always lands at the same page
+     * offset, so one 16-byte window per page suffices instead of comparing
+     * all 2 GiB -- about four thousand times cheaper.  That is what makes it
+     * possible to scan often enough to catch a shared library that is
+     * mapped, used and dropped between two lazy scans.
+     */
+    const char *at = strrchr(rule, '@');
+    int64_t pageoff = -1;
+
+    if (at != NULL && arrow != NULL && at > arrow) {
+        pageoff = (int64_t)g_ascii_strtoull(at + 1, NULL, 16);
+    }
+
+    if (arrow == NULL) {
+        return 0;
+    }
+    needle = ia64_vpc_parse_hex(rule, arrow - rule, &nlen);
+    repl = ia64_vpc_parse_hex(arrow + 2,
+                              (at != NULL && at > arrow)
+                              ? (size_t)(at - (arrow + 2))
+                              : strlen(arrow + 2), &rlen);
+    if (needle == NULL || repl == NULL) {
+        fprintf(stderr, "HEXPOKE: rule is not hex: \"%s\"\n", rule);
+        return 0;
+    }
+    if (nlen == 0 || nlen != rlen) {
+        fprintf(stderr, "HEXPOKE: lengths differ (%zu vs %zu)\n",
+                nlen, rlen);
+        return 0;
+    }
+    fprintf(stderr, "HEXPOKE: scanning for a %zu-byte pattern (%02x %02x ...)\n",
+            nlen, needle[0], nlen > 1 ? needle[1] : 0);
+    if (pageoff >= 0) {
+        for (off = (uint64_t)pageoff; off + nlen <= size; off += 4096) {
+            if (memcmp(p + off, needle, nlen) != 0) {
+                continue;
+            }
+            memcpy(p + off, repl, nlen);
+            tb_invalidate_phys_range(NULL, off, off + nlen - 1);
+            hits++;
+            fprintf(stderr, "HEXPOKE: patched %zu bytes at 0x%" PRIx64
+                    " (page-offset scan)\n", nlen, off);
+        }
+        return hits;
+    }
+    while (off + nlen <= size) {
+        uint8_t *hit = memchr(p + off, needle[0], size - off - nlen + 1);
+
+        if (hit == NULL) {
+            break;
+        }
+        off = hit - p;
+        if (memcmp(hit, needle, nlen) == 0) {
+            memcpy(hit, repl, nlen);
+            /*
+             * This patches CODE, not data.  Writing straight through
+             * the host pointer leaves any translation block for the
+             * page intact, so the guest would carry on executing the
+             * very instructions we just replaced.  Drop them.
+             */
+            tb_invalidate_phys_range(NULL, off, off + nlen - 1);
+            hits++;
+            fprintf(stderr, "HEXPOKE: patched %zu bytes at 0x%" PRIx64 "\n",
+                    nlen, off);
+        }
+        off++;
+    }
+    return hits;
+}
+
+static void ia64_vpc_poke_run(void *opaque)
+{
+    IA64Poke *f = opaque;
+    MemoryRegion *ram = f->machine->ram;
+    uint64_t size = memory_region_size(ram);
+    uint8_t *p = memory_region_get_ram_ptr(ram);
+    char **rules;
+
+    if (p == NULL) {
+        return;
+    }
+    if (f->spec != NULL) {
+        rules = g_strsplit(f->spec, ";;", 0);
+        for (int i = 0; rules[i] != NULL; i++) {
+            if (*rules[i]) {
+                ia64_vpc_poke_one(p, size, rules[i]);
+            }
+        }
+        g_strfreev(rules);
+    }
+    if (f->hexspec != NULL) {
+        bool all_hit = true;
+
+        rules = g_strsplit(f->hexspec, ";;", 0);
+        for (int i = 0; rules[i] != NULL; i++) {
+            if (*rules[i] && ia64_vpc_hexpoke_one(p, size, rules[i]) == 0) {
+                all_hit = false;
+            }
+        }
+        g_strfreev(rules);
+        if (all_hit && f->every < 10000) {
+            f->every = 10000;
+            fprintf(stderr, "HEXPOKE: every rule has matched; backing off to "
+                    "one scan every 10s\n");
+        }
+    }
+    if (qemu_clock_get_ms(QEMU_CLOCK_REALTIME) < f->deadline) {
+        timer_mod(f->timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + f->every);
+    }
+}
+
+static void ia64_vpc_poke_init(MachineState *machine)
+{
+    const char *spec = getenv("AIX_POKE");
+    const char *hexspec = getenv("AIX_HEXPOKE");
+    IA64Poke *f;
+    int after;
+
+    if (spec != NULL && *spec == '\0') {
+        spec = NULL;
+    }
+    if (hexspec != NULL && *hexspec == '\0') {
+        hexspec = NULL;
+    }
+    if (spec == NULL && hexspec == NULL) {
+        return;
+    }
+    f = g_new0(IA64Poke, 1);
+    f->machine = machine;
+    f->spec = spec ? g_strdup(spec) : NULL;
+    f->hexspec = hexspec ? g_strdup(hexspec) : NULL;
+    f->every = getenv("AIX_POKE_EVERY") ? atoi(getenv("AIX_POKE_EVERY")) : 500;
+    if (f->every < 50) {
+        f->every = 50;
+    }
+    after = getenv("AIX_POKE_AFTER") ? atoi(getenv("AIX_POKE_AFTER")) : 20;
+    f->deadline = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                  1000LL * (getenv("AIX_POKE_UNTIL")
+                            ? atoi(getenv("AIX_POKE_UNTIL")) : 150);
+    f->timer = timer_new_ms(QEMU_CLOCK_REALTIME, ia64_vpc_poke_run, f);
+    timer_mod(f->timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 1000LL * after);
+    fprintf(stderr, "POKE: armed \"%s\" hex \"%s\"\n",
+            spec ? spec : "", hexspec ? hexspec : "");
+}
+
+static void ia64_vpc_memfind_run(void *opaque)
+{
+    IA64MemFind *f = opaque;
+    MemoryRegion *ram = f->machine->ram;
+    uint64_t size = memory_region_size(ram);
+    const uint8_t *p = memory_region_get_ram_ptr(ram);
+    char **needles;
+
+    if (p == NULL) {
+        fprintf(stderr, "MEMFIND: no host pointer for guest RAM\n");
+        return;
+    }
+    fprintf(stderr, "MEMFIND: scanning %" PRIu64 " bytes of guest RAM\n", size);
+    /* several needles per run: one boot answers several questions */
+    needles = g_strsplit(f->needle, ";;", 0);
+    for (int i = 0; needles[i] != NULL; i++) {
+        if (*needles[i]) {
+            ia64_vpc_memfind_one(p, size, needles[i], f);
+        }
+    }
+    g_strfreev(needles);
+}
+
+static void ia64_vpc_memfind_setup(MachineState *machine)
+{
+    const char *needle = getenv("AIX_MEMFIND");
+    const char *after = getenv("AIX_MEMFIND_AFTER");
+    const char *bytes = getenv("AIX_MEMFIND_BYTES");
+    IA64MemFind *f;
+
+    /* AIX_POKE stands on its own: it must arm without the scanner */
+    ia64_vpc_poke_init(machine);
+
+    if (needle == NULL || *needle == '\0') {
+        return;
+    }
+    f = g_new0(IA64MemFind, 1);
+    f->machine = machine;
+    f->needle = g_strdup(needle);
+    f->bytes = bytes ? atoi(bytes) : 4096;
+    f->before = getenv("AIX_MEMFIND_BEFORE")
+                ? atoi(getenv("AIX_MEMFIND_BEFORE")) : 0;
+    f->hex = getenv("AIX_MEMFIND_HEX") != NULL;
+    f->max = getenv("AIX_MEMFIND_MAX") ? atoi(getenv("AIX_MEMFIND_MAX")) : 3;
+    if (f->max < 1) {
+        f->max = 1;
+    }
+    f->timer = timer_new_ms(QEMU_CLOCK_REALTIME, ia64_vpc_memfind_run, f);
+    timer_mod(f->timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                        1000LL * (after ? atoi(after) : 90));
+}
+
 static void ia64_vpc_init(MachineState *machine)
 {
     Error *err = NULL;
@@ -3194,6 +3683,7 @@ static void ia64_vpc_init(MachineState *machine)
     if (!ia64_vpc_build(machine, &err)) {
         error_propagate(&error_fatal, err);
     }
+    ia64_vpc_memfind_setup(machine);
 }
 
 static void ia64_vpc_machine_instance_init(Object *obj)
@@ -3300,6 +3790,25 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Set on/off to enable/disable the 460GX AGP GART (default on, as on "
         "real hardware); off makes the Rage 128 fall back to its 32-bit PCI "
         "GART -- clean 2D, but graphics DMA cannot reach RAM above 4 GiB");
+    object_class_property_add_bool(oc, "scsi-895",
+                                   ia64_vpc_get_scsi_895,
+                                   ia64_vpc_set_scsi_895);
+    object_class_property_set_description(oc, "scsi-895",
+        "Set on to present the SCSI HBA as an LSI 53C895 (1000:000c) instead "
+        "of the 53C895A (1000:0012) the model implements (default off); the "
+        "two are register-compatible for driver purposes, and guests whose "
+        "driver database only lists the 53C895 need the older ID to bind");
+    object_class_property_add_bool(oc, "isa-bridge",
+                                   ia64_vpc_get_isa_bridge,
+                                   ia64_vpc_set_isa_bridge);
+    object_class_property_set_description(oc, "isa-bridge",
+        "Set on to add a config-space-only PCI-ISA bridge function at "
+        "device 6 (default off).  The machine's ISA devices hang off the "
+        "chipset without a PCI bridge function, which is invisible to "
+        "guests that discover their ISA bus by scanning PCI for class "
+        "0601 -- AIX 5L's bus/pci/isa predefined device matches exactly "
+        "devid 0x060100, and without the match it never configures isa0, "
+        "the keyboard, or the serial ports");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,
                                    ia64_vpc_set_firmware_ide_dma);
@@ -3331,9 +3840,55 @@ static const TypeInfo ia64_vpc_machine_typeinfo = {
     .class_init = ia64_vpc_machine_class_init,
 };
 
+/*
+ * Config-space-only PCI-ISA bridge (isa-bridge=on).  The machine's ISA
+ * devices (i8042, UARTs) hang directly off the chipset, so no PCI function
+ * advertises class 0601 and a guest that finds its ISA bus by scanning PCI
+ * class codes concludes there is none.  AIX 5L's predefined device is
+ *
+ *     PdDv: uniquetype = "bus/pci/isa"  devid = "0x060100"
+ *           DvDr = "isa/isa_busdd"  Configure = /usr/lib/methods/cfgisa
+ *
+ * -- a CLASS CODE match, not a vendor:device one -- and without it isa0,
+ * the keyboard and the serial ports are never configured, which leaves the
+ * BOS installer's "Please define the System Console" prompt unanswerable.
+ * The stub carries the identity of the 82378ZB SIO bridge of the era and
+ * nothing else: no BARs, no I/O behaviour; the real ISA devices keep being
+ * reached at their fixed addresses declared in the SSDT (PNP0303/PNP0501).
+ */
+static void ia64_vpc_isa_stub_realize(PCIDevice *dev, Error **errp)
+{
+}
+
+static void ia64_vpc_isa_stub_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+
+    k->realize = ia64_vpc_isa_stub_realize;
+    k->vendor_id = PCI_VENDOR_ID_INTEL;
+    k->device_id = 0x0484;              /* 82378ZB SIO */
+    k->class_id = PCI_CLASS_BRIDGE_ISA;
+    dc->desc = "PCI-ISA bridge stub (config space only)";
+    /* Created by the machine via isa-bridge=on, not by -device. */
+    dc->user_creatable = false;
+}
+
+static const TypeInfo ia64_vpc_isa_stub_typeinfo = {
+    .name = TYPE_IA64_VPC_ISA_STUB,
+    .parent = TYPE_PCI_DEVICE,
+    .instance_size = sizeof(PCIDevice),
+    .class_init = ia64_vpc_isa_stub_class_init,
+    .interfaces = (const InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
+};
+
 static void ia64_vpc_machine_register_types(void)
 {
     type_register_static(&ia64_vpc_machine_typeinfo);
+    type_register_static(&ia64_vpc_isa_stub_typeinfo);
 }
 
 type_init(ia64_vpc_machine_register_types)
