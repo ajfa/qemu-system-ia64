@@ -46,8 +46,19 @@
 #define KBD_CMD_RESET_DISABLE   0xF5    /* reset and disable scanning */
 #define KBD_CMD_RESET_ENABLE    0xF6    /* reset and enable scanning */
 #define KBD_CMD_RESET           0xFF    /* Reset */
-#define KBD_CMD_SET_MAKE_BREAK  0xFC    /* Set Make and Break mode */
-#define KBD_CMD_SET_TYPEMATIC   0xFA    /* Set Typematic Make and Break mode */
+/*
+ * Scan code set 3 key-type commands.  0xf7-0xfa act on every key and take
+ * no parameter; 0xfb-0xfd are followed by a list of scan codes, each one
+ * acknowledged, and the list runs until the keyboard receives a command
+ * byte -- there is no count and no terminator byte.
+ */
+#define KBD_CMD_SET_ALL_TYPEMATIC 0xF7  /* Set All Keys Typematic */
+#define KBD_CMD_SET_ALL_MK_BRK  0xF8    /* Set All Keys Make/Break */
+#define KBD_CMD_SET_ALL_MAKE    0xF9    /* Set All Keys Make */
+#define KBD_CMD_SET_TYPEMATIC   0xFA    /* Set All Keys Typematic Make/Break */
+#define KBD_CMD_SET_KEY_TYPEM   0xFB    /* Set Key Type Typematic */
+#define KBD_CMD_SET_MAKE_BREAK  0xFC    /* Set Key Type Make/Break */
+#define KBD_CMD_SET_KEY_MAKE    0xFD    /* Set Key Type Make */
 
 /* Keyboard Replies */
 #define KBD_REPLY_POR       0xAA    /* Power on reset */
@@ -599,6 +610,26 @@ void ps2_write_keyboard(PS2KbdState *s, int val)
 
     trace_ps2_write_keyboard(s, val);
     ps2_cqueue_reset(ps2);
+
+    /*
+     * A Set Key Type list is terminated by the next command, not by a
+     * count or a sentinel: "the keyboard will continue to accept scan
+     * codes until it receives a command" -- so a byte in the command
+     * range while a list is open is that command, not a scan code.  Set
+     * code 3 scan codes never reach 0xed, so the ranges cannot collide.
+     *
+     * Consuming exactly one byte instead answered Resend to the second
+     * scan code of the list.  AIX 5L's i8042 driver sends
+     * "fc <modifier> <modifier>" when it switches the keyboard to set 3,
+     * read the Resend, retried the whole sequence nine times and then
+     * disabled the keyboard controller for good.
+     */
+    if (ps2->write_cmd >= KBD_CMD_SET_KEY_TYPEM &&
+        ps2->write_cmd <= KBD_CMD_SET_KEY_MAKE &&
+        val >= KBD_CMD_SET_LEDS) {
+        ps2->write_cmd = -1;
+    }
+
     switch (ps2->write_cmd) {
     default:
     case -1:
@@ -624,7 +655,9 @@ void ps2_write_keyboard(PS2KbdState *s, int val)
         case KBD_CMD_SCANCODE:
         case KBD_CMD_SET_LEDS:
         case KBD_CMD_SET_RATE:
+        case KBD_CMD_SET_KEY_TYPEM:
         case KBD_CMD_SET_MAKE_BREAK:
+        case KBD_CMD_SET_KEY_MAKE:
             ps2->write_cmd = val;
             ps2_cqueue_1(ps2, KBD_REPLY_ACK);
             break;
@@ -644,7 +677,15 @@ void ps2_write_keyboard(PS2KbdState *s, int val)
                          KBD_REPLY_ACK,
                          KBD_REPLY_POR);
             break;
+        case KBD_CMD_SET_ALL_TYPEMATIC:
+        case KBD_CMD_SET_ALL_MK_BRK:
+        case KBD_CMD_SET_ALL_MAKE:
         case KBD_CMD_SET_TYPEMATIC:
+            /*
+             * Key types are not modelled -- every key is reported make
+             * and break in every set -- so these only have to be
+             * acknowledged rather than answered Resend.
+             */
             ps2_cqueue_1(ps2, KBD_REPLY_ACK);
             break;
         default:
@@ -652,9 +693,11 @@ void ps2_write_keyboard(PS2KbdState *s, int val)
             break;
         }
         break;
+    case KBD_CMD_SET_KEY_TYPEM:
     case KBD_CMD_SET_MAKE_BREAK:
+    case KBD_CMD_SET_KEY_MAKE:
+        /* A scan code in the list: acknowledge it and stay in the list. */
         ps2_cqueue_1(ps2, KBD_REPLY_ACK);
-        ps2->write_cmd = -1;
         break;
     case KBD_CMD_SCANCODE:
         if (val == 0) {
