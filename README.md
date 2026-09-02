@@ -33,6 +33,12 @@ Beyond the standard QEMU machine properties, `-machine ia64-vpc,<option>=<value>
 - `firmware-console=serial|vga` selects the HCDP primary console the firmware advertises.
 - `firmware-ide-dma=on|off` enables or disables firmware IDE bus-master DMA.
 - `alat=zero|full` selects the ALAT model.
+- `scsi-895=on|off` presents the LSI SCSI HBA as a 53C895 (device ID `000c`)
+  instead of a 53C895A (`0012`). Needed by AIX 5L, whose shipped driver claims
+  a fixed list of device IDs that does not include `0012`.
+- `isa-bridge=on|off` adds an ISA bridge stub, which AIX 5L requires in order
+  to find the PS/2 controller. It lands at PCI devfn 6, the same slot as the
+  default network adapter, so a guest using it must also pass `-nic none`.
 
 ## Guest support
 
@@ -44,8 +50,37 @@ These guest operating systems have been tested and are confirmed working:
 | Windows XP 64-bit Edition, Version 2003 | `merced` or `madison` | Installs and runs, single- and multi-processor |
 | Windows Server 2003, RTM (build 3790) | `merced` or `madison` | Installs and runs, single- and multi-processor |
 | Windows Whistler Server beta 2 (build 2462) | `merced` | Installs and runs, single- and multi-processor |
+| AIX 5L V5.1.0.0 for IA-64 (Project Monterey) | `merced` | Installs to disk and runs, with keyboard and mouse. See [docs/aix-monterey](docs/aix-monterey/NOTES.md) |
 
 Multiprocessor guests need `-smp N` together with `-accel tcg,thread=multi`.
+
+### AIX 5L for Itanium
+
+AIX 5L V5.1.0.0 for IA-64, the shipped product of Project Monterey, installs
+unattended to `hdisk0` and boots from disk to a usable console with a working
+keyboard and mouse.
+
+![AIX 5L on qemu-system-ia64](docs/aix-monterey/img/02-keyboard-and-mouse.png)
+
+```sh
+./build/qemu-system-ia64 \
+  -machine ia64-vpc,ahci=off,scsi-895=on,isa-bridge=on,nvram=aix.nvram \
+  -cpu merced \
+  -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
+  -m 2G \
+  -drive file=aix.qcow2,format=qcow2 \
+  -nic none \
+  -display gtk
+```
+
+Add `-drive file=AIX-VOLUME1.iso,media=cdrom,format=raw,readonly=on` to install.
+`-nic none` is required, not optional: the ISA bridge stub and the default
+network adapter both want PCI devfn 6.
+
+[docs/aix-monterey/NOTES.md](docs/aix-monterey/NOTES.md) covers what had to be
+fixed to get there, how each failure was measured, and how to prepare the
+installation medium for an unattended install. The medium itself is IBM's and is
+not distributed here.
 
 More operating systems (including Linux and more) will be tested and supported in the future.
 

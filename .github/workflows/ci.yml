@@ -14,7 +14,7 @@ name: CI
 
 on:
   push:
-    branches: [develop, main]
+    branches: [develop, main, aix-monterey]
     paths-ignore:
       - '**.md'
   pull_request:
