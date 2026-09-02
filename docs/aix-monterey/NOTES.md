@@ -393,10 +393,18 @@ The installation media is IBM's and is not distributed here.
 ## What is still open
 
 - No network. The bridge stub and the default adapter collide at devfn 6, so the
-  guest currently runs with `-nic none`. Moving one of them is the fix.
+  guest currently runs with `-nic none`. Moving one of them is the fix. Until
+  then, [PORTS.md](PORTS.md) is how to get software onto the guest anyway: a CD
+  image built on the host from the precompiled packages that
+  [johnsonjh](https://github.com/johnsonjh) maintains in
+  [johnsonjh/AIX5-IA64](https://github.com/johnsonjh/AIX5-IA64).
 - The serial console has not been exercised; the guest runs on the graphical
   console.
-- X11 has not been attempted.
+- No X server. The device support is installed (`bos.rte.X11`, `devices.nfb.rte`,
+  `devices.pci.030000.rte`) and `vga0` is Available as a Generic VGA device
+  driving the text console, but `X11.base` is absent and there is no
+  `/usr/bin/X11/X`: the install was Minimal. Installing the X11 filesets from
+  the medium is the next thing to try, not more emulator work.
 - Only the `merced` CPU model has been tested.
 
 ---

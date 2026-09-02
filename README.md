@@ -82,6 +82,11 @@ fixed to get there, how each failure was measured, and how to prepare the
 installation medium for an unattended install. The medium itself is IBM's and is
 not distributed here.
 
+[docs/aix-monterey/PORTS.md](docs/aix-monterey/PORTS.md) covers how to get a
+modern userland onto the guest while it has no network, using the precompiled
+packages that [johnsonjh](https://github.com/johnsonjh) maintains in
+[johnsonjh/AIX5-IA64](https://github.com/johnsonjh/AIX5-IA64).
+
 More operating systems (including Linux and more) will be tested and supported in the future.
 
 
