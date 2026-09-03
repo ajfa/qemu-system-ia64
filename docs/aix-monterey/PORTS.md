@@ -191,6 +191,64 @@ from 640x400 to 1024x768 as well.
 
 ![AIX 5L running X11](img/04-x11-desktop.png)
 
+### Open: the X session renders no text
+
+Look closely at that screenshot before taking it as a working desktop. The
+window frames are drawn, the clock draws its hands, and the pointer tracks,
+but **there is no text anywhere**: the terminal window is empty, the title
+bars are blank, and the window manager's menus open with invisible labels.
+The clock looks right only because hands are lines rather than glyphs.
+
+This is unresolved. What is ruled out is the obvious answer, a missing font
+package: the fonts are installed and indexed on disk.
+
+```
+/usr/lib/X11/fonts/100dpi  fonts.dir=338      /usr/lib/X11/fonts/misc   fonts.dir=64
+/usr/lib/X11/fonts/75dpi   fonts.dir=338      /usr/lib/X11/fonts/Type1  fonts.dir=134
+```
+
+`misc` is where `fixed` lives, the font every X server falls back to, and the
+server does start, which it would refuse to do if it could not open a default
+font at all. So the fonts exist, are indexed, and at least one is loadable.
+
+Two hypotheses remain, and they are distinguishable:
+
+1. The server's **font path** does not include those directories, so it has
+   almost nothing to draw with.
+2. The text is drawn in the **same colour as the background**, which would
+   point at the colormap or visual on the path where the native ATI driver
+   took over from the generic VGA.
+
+### How to investigate it, since nothing can be read inside X
+
+That is the awkward part: the session cannot report on itself. The way round
+is a property of `xinit` that is easy to trip over by accident: **`xinit` runs
+its first argument as the client**, with `DISPLAY` already set. So put the
+probe in a script, have it write to a file and exit, which also ends the
+session, and read the file from the text console afterwards:
+
+```sh
+xinit /path/to/probe.sh          # probe.sh writes /tmp/out and exits
+cat /tmp/out                     # back on the text console
+```
+
+Worth collecting: `xdpyinfo` for depth and visual class, `xlsfonts | wc -l`
+for what the server can actually see, `xlsfonts -fn fixed`, and the font path
+from `xset q`.
+
+### Other things worth knowing about the session
+
+- **The session hangs off `mwm`, not the terminal.** Closing the terminal
+  window leaves the desktop running with nothing to type into. Leaving X means
+  quitting the window manager from its root menu.
+- **Motif root menus are press, drag and release**, not click and click. A
+  click posts the menu and unposts it without selecting, which looks exactly
+  like a menu that does nothing.
+- **Leaving X leaves the text console in a bad state**, printing escape
+  sequences such as `^[[073q` literally. The shell is alive and still reads
+  input; `stty sane` typed blind restores it, and logging out and back in
+  always does.
+
 ### Two profiles
 
 Both work, and which one to build is a choice about the disk rather than

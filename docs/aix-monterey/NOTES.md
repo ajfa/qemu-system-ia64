@@ -400,11 +400,37 @@ The installation media is IBM's and is not distributed here.
   [johnsonjh/AIX5-IA64](https://github.com/johnsonjh/AIX5-IA64).
 - The serial console has not been exercised; the guest runs on the graphical
   console.
-- No X server. The device support is installed (`bos.rte.X11`, `devices.nfb.rte`,
-  `devices.pci.030000.rte`) and `vga0` is Available as a Generic VGA device
-  driving the text console, but `X11.base` is absent and there is no
-  `/usr/bin/X11/X`: the install was Minimal. Installing the X11 filesets from
-  the medium is the next thing to try, not more emulator work.
+- **X starts but renders no text.** The X11 filesets install, the native ATI
+  driver binds with `ati-rage128=on`, and `xinit` brings up a Motif desktop:
+  frames are drawn, the clock draws its hands, the pointer tracks. But no
+  glyph appears anywhere, so the desktop cannot be used. A missing font
+  package is ruled out: `100dpi` and `75dpi` carry 338 fonts each and `misc`
+  64, all indexed, and `misc` is where `fixed` lives. It is either the
+  server's font path or text being drawn in the background colour on the path
+  where the native driver replaced the generic VGA.
+  [PORTS.md](PORTS.md) has the evidence and how to probe a session that
+  cannot report on itself.
+
+- **The branch does not pass this project's own test gate.** Five suites fail:
+  `firmware-layout`, `source-includes`, `tcg-mmu`, `tcg-rse` and `tcg-pal`.
+  Upstream `develop` passes, so these are this branch's doing, and two of them
+  are real invariants rather than stale expectations:
+
+  - The firmware must start exactly at `FW_LOAD_BASE` (`0x00100000`), and the
+    relink that makes room for the AIX loader moves the base to `0x00300000`.
+    The window itself runs to `0x00800000`, so there is room to grow upward,
+    just not to move the base. The conflict is genuine: `BOOTIA64.EFI` has a
+    fixed `ImageBase` of `0x1ff000` with its relocations stripped, and a
+    firmware starting at 1 MiB covers it. Freeing that region rather than
+    moving the base is the fix, and it is a redesign.
+  - `target/ia64/arch/` may not call TCG implementation APIs nor use raw
+    architectural register indexes. The `AIX_WATCH` instrumentation in
+    `arch/firmware.c` does both, in twelve places. That one is mechanical:
+    move the instrumentation out of `arch/`, or use the named constants.
+
+  Whoever picks this up should run the gate first for a baseline:
+  `meson test` in the build directory, with an IA-64 cross toolchain on the
+  path (Fedora packages `gcc-ia64-linux-gnu`; Ubuntu has none).
 - Only the `merced` CPU model has been tested.
 
 ---
