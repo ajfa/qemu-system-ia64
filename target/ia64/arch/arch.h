@@ -50,8 +50,6 @@ uint32_t ia64_firmware_debug_save(CPUIA64State *env);
 uint32_t ia64_firmware_debug_restore(CPUIA64State *env);
 uint32_t ia64_sal_runtime_enter(CPUIA64State *env);
 uint32_t ia64_sal_runtime_exit(CPUIA64State *env);
-bool ia64_aix_watch_addr(uint64_t ip);
-void ia64_aix_watch(CPUIA64State *env, uint64_t ip);
 uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra);
 
 void ia64_itm_timer_cb(void *opaque);

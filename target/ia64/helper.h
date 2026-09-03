@@ -182,8 +182,6 @@ DEF_HELPER_FLAGS_3(simd_pack, TCG_CALL_NO_RWG_SE, i64, i32, i64, i64)
 DEF_HELPER_FLAGS_2(simd_czx, TCG_CALL_NO_RWG_SE, i64, i32, i64)
 DEF_HELPER_FLAGS_2(simd_sum, TCG_CALL_NO_RWG_SE, i64, i64, i64)
 
-/* Debug only: register dump at a watched instruction address (AIX_WATCH). */
-DEF_HELPER_2(aix_watch, void, env, i64)
 
 /* QEMU x86 TCG helpers used by Madison's IA-32 execution engine. */
 #define raise_exception ia32_raise_exception
