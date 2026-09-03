@@ -8,6 +8,9 @@ linker_script="$3"
 image_base="${4:-0x4000000}"
 common_source="${5:-}"
 output_dir=$(dirname "$output")
+# The shared QEMU/firmware ABI header carries the platform windows.  The
+# firmware build does the same thing: -nostdinc plus an explicit -I.
+include_dir=$(dirname "$0")/../../../../include
 name=$(basename "$output" .efi)
 
 # Do not inherit the host project's generic CC/LD/OBJCOPY variables: QEMU's
@@ -23,11 +26,11 @@ libgcc=$($cc -print-libgcc-file-name)
 
 $cc -O2 -ffreestanding -fno-builtin -nostdlib -nostdinc -mno-sdata \
     -fno-stack-protector -fno-common -fno-optimize-sibling-calls -fno-pic \
-    -Wall -Wextra -Werror -c -o "$object" "$source"
+    -Wall -Wextra -Werror -I"$include_dir" -c -o "$object" "$source"
 if test -n "$common_source"; then
     $cc -O2 -ffreestanding -fno-builtin -nostdlib -nostdinc -mno-sdata \
         -fno-stack-protector -fno-common -fno-optimize-sibling-calls \
-        -fno-pic -Wall -Wextra -Werror \
+        -fno-pic -Wall -Wextra -Werror -I"$include_dir" \
         -c -o "$common_object" "$common_source"
     $ld -nostdlib -static -T "$linker_script" -o "$elf" \
         "$object" "$common_object" "$libgcc"

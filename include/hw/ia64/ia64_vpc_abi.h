@@ -84,6 +84,34 @@
 #define IA64_PCI_MMIO_BASE            0x00000000ee000000ULL
 #define IA64_PCI_MMIO_SIZE            0x0000000010000000ULL
 
+/*
+ * PCI ECAM configuration aperture.  Sixteen buses, not the usual 256:
+ * AIX 5L's init_sys_ranges() requires every platform I/O range together
+ * to fit inside one 256 MiB segment, and a 256 MiB aperture fills that
+ * on its own.  This machine has a single PCI bus.
+ */
+#define IA64_PCI_CONFIG_BASE          0x0000007ff0000000ULL
+#define IA64_PCI_CONFIG_SIZE          0x0000000001000000ULL
+
+/* Sparse-encoded legacy I/O port window. */
+#define IA64_PCI_IO_BASE              0x000000800010000000ULL
+#define IA64_PCI_IO_SPARSE_SIZE       0x0000000004000000ULL
+
+/*
+ * Legacy COM1.  The platform's memory-mapped 16550 at IA64_UART_BASE is
+ * deliberately absent from the ACPI namespace, so this is the UART the
+ * namespace declares, as \\_SB.PCI0.ISAB.UAR1.
+ */
+#define IA64_LEGACY_COM1_IO_BASE      0x000003f8U
+#define IA64_LEGACY_COM1_IO_SIZE      0x00000008U
+#define IA64_LEGACY_COM1_GSI          3U
+
+/* Platform RTC and NVRAM. */
+#define IA64_RTC_BASE                 0x00000000ffef0000ULL
+#define IA64_RTC_SIZE                 0x0000000000002000ULL
+#define IA64_NVRAM_BASE               0x00000000fff00000ULL
+#define IA64_NVRAM_SIZE               0x0000000000010000ULL
+
 typedef struct __attribute__((packed)) IA64VpcHandoff {
     unsigned long long Magic;
     unsigned long long Version;

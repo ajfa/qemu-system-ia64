@@ -2,6 +2,14 @@
 
 #include "services.h"
 
+/*
+ * The platform windows come from the ABI header QEMU, the firmware and
+ * the qtest all share.  They used to be written out again here, which is
+ * how this file went on describing a 256 MiB ECAM aperture for weeks
+ * after the machine shrank it to 16 MiB.
+ */
+#include "hw/ia64/ia64_vpc_abi.h"
+
 #define SIG32(A, B, C, D) \
     ((UINT32)(A) | ((UINT32)(B) << 8) | ((UINT32)(C) << 16) | \
      ((UINT32)(D) << 24))
@@ -196,18 +204,21 @@ typedef struct {
     UINT16 Length;
 } __attribute__((packed)) TEST_DEVICE_PATH_NODE;
 
-#define TEST_UART_BASE               0x00000047f0000000ULL
-#define TEST_UART_SIZE               0x0000000000002000ULL
-#define TEST_RTC_BASE                0x00000000ffef0000ULL
-#define TEST_RTC_SIZE                0x0000000000002000ULL
-#define TEST_NVRAM_BASE              0x00000000fff00000ULL
-#define TEST_NVRAM_SIZE              0x0000000000010000ULL
-#define TEST_ECAM_BASE               0x0000007ff0000000ULL
-#define TEST_ECAM_SIZE               0x0000000010000000ULL
-#define TEST_PCI_MMIO_BASE           0x00000000ee000000ULL
-#define TEST_PCI_MMIO_SIZE           0x0000000010000000ULL
-#define TEST_SPARSE_IO_BASE          0x000000800010000000ULL
-#define TEST_SPARSE_IO_SIZE          0x0000000004000000ULL
+#define TEST_UART_BASE               IA64_UART_BASE
+#define TEST_UART_SIZE               IA64_UART_MMIO_SIZE
+#define TEST_RTC_BASE                IA64_RTC_BASE
+#define TEST_RTC_SIZE                IA64_RTC_SIZE
+#define TEST_NVRAM_BASE              IA64_NVRAM_BASE
+#define TEST_NVRAM_SIZE              IA64_NVRAM_SIZE
+#define TEST_ECAM_BASE               IA64_PCI_CONFIG_BASE
+#define TEST_ECAM_SIZE               IA64_PCI_CONFIG_SIZE
+#define TEST_PCI_MMIO_BASE           IA64_PCI_MMIO_BASE
+#define TEST_PCI_MMIO_SIZE           IA64_PCI_MMIO_SIZE
+#define TEST_SPARSE_IO_BASE          IA64_PCI_IO_BASE
+#define TEST_SPARSE_IO_SIZE          IA64_PCI_IO_SPARSE_SIZE
+/* One ECAM bus is 1 MiB of configuration space. */
+#define TEST_ECAM_LAST_BUS \
+    ((UINT8)((TEST_ECAM_SIZE >> 20) - 1U))
 #define TEST_PM_IO_BASE              0x2000U
 #define TEST_HCDP_LENGTH             129U
 #define TEST_HCDP_UART_HID           0x0105d041U
@@ -2005,20 +2016,22 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                 get_u16(descriptor + 12U) == 0 &&
                 get_u16(descriptor + 14U) == 256U) {
                 bus = 1;
-            } else if (descriptor[0] == 0x8aU && length == 43U &&
-                       descriptor[3] == 1U && descriptor[5] == 0x33U &&
-                       get_u64(descriptor + 6U) == 0 &&
-                       get_u64(descriptor + 14U) == 0 &&
-                       get_u64(descriptor + 22U) == 0xffffU &&
-                       get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
-                       get_u64(descriptor + 38U) == 0x10000U) {
+            } else if (descriptor[0] == 0x87U && length == 23U &&
+                       descriptor[3] == 1U && descriptor[5] == 0x03U &&
+                       get_u32(descriptor + 6U) == 0 &&
+                       get_u32(descriptor + 10U) == 0 &&
+                       get_u32(descriptor + 14U) == 0xffffU &&
+                       get_u32(descriptor + 18U) == 0 &&
+                       get_u32(descriptor + 22U) == 0x10000U) {
                 /*
-                 * Architectural 64 KB I/O window with a sparse translation
-                 * (_TTP|_TRS, type flags 0x33; _TRA = the memory-mapped port
-                 * window base).  The producer window shrank from 16 MB and
-                 * gained the sparse translation in 48321d4 so Windows' PnP I/O
-                 * arbiter can no longer rebalance the display adapter's I/O BAR
-                 * past the decodable range.
+                 * Architectural 64 KB I/O window, as a 32-bit descriptor.
+                 * AIX 5L/IA-64 ignores every 64-bit ACPI address space
+                 * descriptor, so a QWordIO window leaves the host bridge with
+                 * no I/O producer at all.  The cost is the translation offset,
+                 * which no longer fits: the sparse window base that Windows
+                 * and Linux read from _TRA is gone, and the firmware comment
+                 * records that it has to come back if this platform is ever
+                 * pointed at them again.
                  */
                 io = 1;
             } else if (descriptor[0] == 0x87U && length == 23U &&
@@ -2029,14 +2042,14 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                        get_u32(descriptor + 18U) == 0 &&
                        get_u32(descriptor + 22U) == 0x00020000U) {
                 legacy_memory = 1;
-            } else if (descriptor[0] == 0x8aU && length == 43U &&
+            } else if (descriptor[0] == 0x87U && length == 23U &&
                        descriptor[3] == 0U &&
-                       get_u64(descriptor + 6U) == 0 &&
-                       get_u64(descriptor + 14U) == TEST_PCI_MMIO_BASE &&
-                       get_u64(descriptor + 22U) ==
+                       get_u32(descriptor + 6U) == 0 &&
+                       get_u32(descriptor + 10U) == TEST_PCI_MMIO_BASE &&
+                       get_u32(descriptor + 14U) ==
                            TEST_PCI_MMIO_BASE + TEST_PCI_MMIO_SIZE - 1U &&
-                       get_u64(descriptor + 30U) == 0 &&
-                       get_u64(descriptor + 38U) == TEST_PCI_MMIO_SIZE) {
+                       get_u32(descriptor + 18U) == 0 &&
+                       get_u32(descriptor + 22U) == TEST_PCI_MMIO_SIZE) {
                 memory = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 0U && descriptor[4] == 0x0cU &&
@@ -2072,7 +2085,7 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
 {
     static const UINT8 sb_name[4] = { '_', 'S', 'B', '_' };
     static const UINT8 pci0_name[4] = { 'P', 'C', 'I', '0' };
-    static const UINT8 uart_name[4] = { 'U', 'A', 'R', '0' };
+    static const UINT8 uart_name[4] = { 'U', 'A', 'R', '1' };
     static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
     const UINT8 *aml;
     UINTN aml_length;
@@ -2133,17 +2146,9 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
             if (length > resource_length - offset - 3U) {
                 return 0;
             }
-            if (descriptor[0] == 0x8aU && length == 43U &&
-                descriptor[3] == 0U &&
-                get_u64(descriptor + 14U) == TEST_UART_BASE &&
-                get_u64(descriptor + 22U) == TEST_UART_BASE + 7U &&
-                get_u64(descriptor + 30U) == 0 &&
-                get_u64(descriptor + 38U) == 8U) {
-                address = 1;
-            }
             if (descriptor[0] == 0x89U && length == 6U &&
                 descriptor[3] == 0x0dU && descriptor[4] == 1U &&
-                get_u32(descriptor + 5U) == 4U) {
+                get_u32(descriptor + 5U) == IA64_LEGACY_COM1_GSI) {
                 irq = 1;
             }
             offset += 3U + length;
@@ -2151,6 +2156,15 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
             length = descriptor[0] & 7U;
             if (length > resource_length - offset - 1U) {
                 return 0;
+            }
+            /* IO (Decode16, 0x3f8, 0x3f8, 1, 8) */
+            if (descriptor[0] == 0x47U && length == 7U &&
+                descriptor[1] == 0x01U &&
+                get_u16(descriptor + 2U) == IA64_LEGACY_COM1_IO_BASE &&
+                get_u16(descriptor + 4U) == IA64_LEGACY_COM1_IO_BASE &&
+                descriptor[6] == 1U &&
+                descriptor[7] == IA64_LEGACY_COM1_IO_SIZE) {
+                address = 1;
             }
             offset += 1U + length;
         }
@@ -2480,7 +2494,8 @@ static BOOLEAN test_acpi_mcfg(const TEST_TABLE_CONTEXT *Context)
     return get_u64(mcfg + 36U) == 0 &&
            get_u64(mcfg + 44U) == TEST_ECAM_BASE &&
            get_u16(mcfg + 52U) == 0 && mcfg[54U] == 0 &&
-           mcfg[55U] == 255U && get_u32(mcfg + 56U) == 0;
+           mcfg[55U] == TEST_ECAM_LAST_BUS &&
+           get_u32(mcfg + 56U) == 0;
 }
 
 static BOOLEAN test_platform_memory_descriptors(
