@@ -39,6 +39,11 @@ Beyond the standard QEMU machine properties, `-machine ia64-vpc,<option>=<value>
 - `isa-bridge=on|off` adds an ISA bridge stub, which AIX 5L requires in order
   to find the PS/2 controller. It lands at PCI devfn 6, the same slot as the
   default network adapter, so a guest using it must also pass `-nic none`.
+- `ati-rage128=on|off` presents the graphics device as a Rage 128
+  (`1002:5245`) instead of the Rage 128 Pro (`1002:5046`) the model
+  implements. Needed by guests that ship a display driver only for the
+  earlier ID; AIX 5L binds its X server's ddx module by PCI ID and has none
+  for the Pro, so without this its X server will not start.
 
 ## Guest support
 

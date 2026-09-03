@@ -401,6 +401,7 @@ struct IA64VpcMachineState {
     bool firmware_ide_dma;
     bool agp_enabled;
     bool scsi_895;
+    bool ati_rage128;
     uint64_t firmware_console;
     char *nvram_path;
     bool alat_full;
@@ -1786,6 +1787,24 @@ static void ia64_vpc_set_scsi_895(Object *obj, bool value, Error **errp)
     (void)errp;
 
     s->scsi_895 = value;
+}
+
+static bool ia64_vpc_get_ati_rage128(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->ati_rage128;
+}
+
+static void ia64_vpc_set_ati_rage128(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    s->ati_rage128 = value;
 }
 
 static bool ia64_vpc_get_firmware_ide_dma(Object *obj, Error **errp)
@@ -3203,6 +3222,27 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         return false;
     }
 #endif
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+    /*
+     * Present the graphics device as a plain Rage 128 rather than a Rage 128
+     * Pro.  AIX 5L for IA-64 binds its X server's ddx module to the adapter
+     * by PCI id through the ODM, and the ddx modules it ships cover only
+     * 1002:5245 and 1002:524b, the RE and RK parts.  Against the emulated
+     * 1002:5046 the server stops with "unable to locate display PCI ID" and
+     * "Cannot set ddx module name from ODM", and falls back to nothing: the
+     * console keeps working but X will not start.
+     *
+     * Only the id in config space changes.  The model keeps its own dev_id,
+     * so every register path still behaves as the Rage 128 Pro it emulates,
+     * which the earlier part's driver can drive.  Same shape of fix as
+     * scsi-895 above, and for the same reason: the guest ships one id per
+     * family and will not look past it.
+     */
+    if (s->ati_rage128 && s->vga_dev != NULL) {
+        pci_config_set_device_id(s->vga_dev->config, 0x5245);
+    }
+#endif
+
     if (!ia64_vpc_enable_vga_legacy_switch(s->vga_dev, errp)) {
         return false;
     }
@@ -3798,6 +3838,15 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "of the 53C895A (1000:0012) the model implements (default off); the "
         "two are register-compatible for driver purposes, and guests whose "
         "driver database only lists the 53C895 need the older ID to bind");
+    object_class_property_add_bool(oc, "ati-rage128",
+                                   ia64_vpc_get_ati_rage128,
+                                   ia64_vpc_set_ati_rage128);
+    object_class_property_set_description(oc, "ati-rage128",
+        "Set on to present the graphics device as a Rage 128 (1002:5245) "
+        "instead of the Rage 128 Pro (1002:5046) the model implements "
+        "(default off); the parts are register-compatible for driver "
+        "purposes, and guests that ship a display driver only for the "
+        "earlier ID need it to bind, AIX 5L for IA-64 among them");
     object_class_property_add_bool(oc, "isa-bridge",
                                    ia64_vpc_get_isa_bridge,
                                    ia64_vpc_set_isa_bridge);
