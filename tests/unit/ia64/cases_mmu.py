@@ -31,6 +31,7 @@ from .encoding import (
     IA64_EXCP_UNIMPL_DATA_ADDR,
     IA64_FIRMWARE_IVT_BASE,
     IA64_FW_IDENTITY_BASE,
+    IA64_FW_IDENTITY_SIZE,
     IA64_GENERAL_VECTOR,
     IA64_GENEX_UNIMPL_DATA_ADDR,
     IA64_IMPL_PA_BITS,
@@ -1433,7 +1434,7 @@ def test_long_vhpt_large_page_high_ram_subword_remap(qemu):
     count_a_pa = 0x000000010368f84c
     count_b_pa = 0x000000011368f84c
     low_count_pa = count_a_pa & 0xffffffff
-    pta = 0x10013d
+    pta = IA64_FW_IDENTITY_BASE + 0x13d
     pta_size = (pta >> 2) & 0x3f
     hpn_bits = IA64_IMPL_VA_MSB + 1 - page_shift
     payload = count_va & ((1 << (IA64_IMPL_VA_MSB + 1)) - 1)
@@ -1928,7 +1929,10 @@ test_br_ret_cpl_change_does_not_reuse_kernel_tlb = require_registers(
 
 def test_itc_d_replaces_full_tc(qemu):
     tc_fill_count = IA64_TLB_MAX
-    fill_base = 0x100000
+    # Clear of the firmware identity window: this case checks that the
+    # load goes through the TLB entry it just inserted, and an address
+    # inside the window would be answered without translation.
+    fill_base = IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE
     final_va = fill_base + (tc_fill_count + 1) * 0x4000 + 0x1000
     cursor = 0x40
     bundles = [
@@ -1974,7 +1978,10 @@ def test_itc_d_replaces_full_tc(qemu):
 
 def test_itc_d_full_tc_replacement_rotates(qemu):
     tc_fill_count = IA64_TLB_MAX
-    fill_base = 0x100000
+    # Clear of the firmware identity window: this case checks that the
+    # load goes through the TLB entry it just inserted, and an address
+    # inside the window would be answered without translation.
+    fill_base = IA64_FW_IDENTITY_BASE + IA64_FW_IDENTITY_SIZE
     first_va = fill_base + (tc_fill_count + 1) * 0x4000 + 0x1000
     second_va = first_va + 0x4000
     cursor = 0x40
@@ -4935,12 +4942,12 @@ test_short_vhpt_thash_high_region_self_map = require_registers(
 
 test_long_vhpt_walk_uses_standard_entry_layout = require_registers(
     "long_vhpt_walk_uses_standard_entry_layout", [
-        (0x10, *movl_mlx(16, 0x10013d)),
+        (0x10, *movl_mlx(16, IA64_FW_IDENTITY_BASE + 0x13d)),
         (0x20, *movl_mlx(17, 0x231)),
         (0x30, *movl_mlx(18, 0x0010000004000661)),
         (0x40, *movl_mlx(19, 0x230)),
         (0x50, *movl_mlx(20, LONG_VHPT_RID2_TAG)),
-        (0x60, *movl_mlx(21, 0x100040)),
+        (0x60, *movl_mlx(21, IA64_FW_IDENTITY_BASE + 0x40)),
         (0x70, 0x00, st8(21, 18), adds(22, 8, 21),
          nop_i()),
         (0x80, 0x00, st8(22, 19), adds(23, 16, 21),
@@ -4969,12 +4976,12 @@ test_long_vhpt_walk_uses_standard_entry_layout = require_registers(
 
 test_long_vhpt_walk_uses_dcr_byte_order = require_registers(
     "long_vhpt_walk_uses_dcr_byte_order", [
-        (0x10, *movl_mlx(16, 0x10013d)),
+        (0x10, *movl_mlx(16, IA64_FW_IDENTITY_BASE + 0x13d)),
         (0x20, *movl_mlx(17, 0x231)),
         (0x30, *movl_mlx(18, 0x6106000400001000)),
         (0x40, *movl_mlx(19, 0x3002000000000000)),
         (0x50, *movl_mlx(20, LONG_VHPT_RID2_TAG_BYTE_SWAPPED)),
-        (0x60, *movl_mlx(21, 0x100040)),
+        (0x60, *movl_mlx(21, IA64_FW_IDENTITY_BASE + 0x40)),
         (0x70, *movl_mlx(22, IA64_DCR_BE)),
         (0x80, 0x00, st8(21, 18), adds(23, 8, 21),
          nop_i()),
@@ -5011,7 +5018,7 @@ LONG_VHPT_RID2_DATA_LOW, _ = bundle_words(*LONG_VHPT_RID2_DATA_BUNDLE[1:])
 
 test_long_vhpt_same_va_different_rids_refills = require_registers(
     "long_vhpt_same_va_different_rids_refills", [
-        (0x10, *movl_mlx(16, 0x10013d)),
+        (0x10, *movl_mlx(16, IA64_FW_IDENTITY_BASE + 0x13d)),
         (0x20, *movl_mlx(17, 0x131)),
         (0x30, *movl_mlx(18, 0x231)),
         (0x40, *movl_mlx(19, 0x0010000004000661)),
@@ -5019,8 +5026,8 @@ test_long_vhpt_same_va_different_rids_refills = require_registers(
         (0x60, *movl_mlx(21, 0x230)),
         (0x70, *movl_mlx(22, LONG_VHPT_RID1_TAG)),
         (0x80, *movl_mlx(23, LONG_VHPT_RID2_TAG)),
-        (0x90, *movl_mlx(24, 0x100020)),
-        (0xa0, *movl_mlx(25, 0x100040)),
+        (0x90, *movl_mlx(24, IA64_FW_IDENTITY_BASE + 0x20)),
+        (0xa0, *movl_mlx(25, IA64_FW_IDENTITY_BASE + 0x40)),
         (0xb0, 0x00, st8(24, 19), adds(26, 8, 24),
          nop_i()),
         (0xc0, 0x00, st8(26, 21), adds(27, 16, 24),
@@ -5068,12 +5075,12 @@ test_long_vhpt_same_va_different_rids_refills = require_registers(
 
 test_long_vhpt_not_present_ignores_software_fields = require_registers(
     "long_vhpt_not_present_ignores_software_fields", [
-        (0x10, *movl_mlx(16, 0x10013d)),
+        (0x10, *movl_mlx(16, IA64_FW_IDENTITY_BASE + 0x13d)),
         (0x20, *movl_mlx(17, 0x231)),
         (0x30, *movl_mlx(18, 0xfffffffffffffffe)),
         (0x40, *movl_mlx(19, 0xdeadbeef00000030)),
         (0x50, *movl_mlx(20, LONG_VHPT_RID2_TAG)),
-        (0x60, *movl_mlx(21, 0x100040)),
+        (0x60, *movl_mlx(21, IA64_FW_IDENTITY_BASE + 0x40)),
         (0x70, 0x00, st8(21, 18), adds(22, 8, 21),
          nop_i()),
         (0x80, 0x00, st8(22, 19), adds(23, 16, 21),
@@ -5107,12 +5114,12 @@ test_long_vhpt_not_present_ignores_software_fields = require_registers(
 
 test_long_vhpt_unsupported_page_size_aborts_to_dtlb_miss = require_registers(
     "long_vhpt_unsupported_page_size_aborts_to_dtlb_miss", [
-        (0x10, *movl_mlx(16, 0x10013d)),
+        (0x10, *movl_mlx(16, IA64_FW_IDENTITY_BASE + 0x13d)),
         (0x20, *movl_mlx(17, 0x231)),
         (0x30, *movl_mlx(18, 0x0010000004000661)),
         (0x40, *movl_mlx(19, 0x23c)),
         (0x50, *movl_mlx(20, LONG_VHPT_RID2_TAG)),
-        (0x60, *movl_mlx(21, 0x100040)),
+        (0x60, *movl_mlx(21, IA64_FW_IDENTITY_BASE + 0x40)),
         (0x70, 0x00, st8(21, 18), adds(22, 8, 21),
          nop_i()),
         (0x80, 0x00, st8(22, 19), adds(23, 16, 21),
@@ -5141,17 +5148,17 @@ test_long_vhpt_unsupported_page_size_aborts_to_dtlb_miss = require_registers(
         "ip": IA64_DTLB_VECTOR + 0x20,
         "exception": IA64_EXCP_NONE,
         "r30": 0x430,
-        "r31": 0x100040,
+        "r31": IA64_FW_IDENTITY_BASE + 0x40,
     }, entry=0x10)
 
 test_long_vhpt_walker_does_not_search_collision_chain = require_registers(
     "long_vhpt_walker_does_not_search_collision_chain", [
-        (0x10, *movl_mlx(16, 0x10013d)),
+        (0x10, *movl_mlx(16, IA64_FW_IDENTITY_BASE + 0x13d)),
         (0x20, *movl_mlx(17, 0x231)),
         (0x30, *movl_mlx(18, 0x0010000004000661)),
         (0x40, *movl_mlx(19, 0x230)),
         (0x50, *movl_mlx(20, LONG_VHPT_RID2_TAG)),
-        (0x60, *movl_mlx(21, 0x100060)),
+        (0x60, *movl_mlx(21, IA64_FW_IDENTITY_BASE + 0x60)),
         (0x70, 0x00, st8(21, 18), adds(22, 8, 21),
          nop_i()),
         (0x80, 0x00, st8(22, 19), adds(23, 16, 21),
@@ -5180,7 +5187,7 @@ test_long_vhpt_walker_does_not_search_collision_chain = require_registers(
         "ip": IA64_DTLB_VECTOR + 0x20,
         "exception": IA64_EXCP_NONE,
         "r30": 0x430,
-        "r31": 0x100040,
+        "r31": IA64_FW_IDENTITY_BASE + 0x40,
     }, entry=0x10)
 
 # The long-format table lives at an unmapped region 6 address, so the
@@ -5199,7 +5206,7 @@ test_long_vhpt_table_tlb_miss_raises_vhpt_translation = require_registers(
         (0x220, *movl_mlx(18, 0x0010000004000661)),
         (0x230, *movl_mlx(19, 0x230)),
         (0x240, *movl_mlx(20, LONG_VHPT_RID2_TAG)),
-        (0x250, *movl_mlx(21, 0x100040)),
+        (0x250, *movl_mlx(21, IA64_FW_IDENTITY_BASE + 0x40)),
         (0x260, 0x00, st8(21, 18), adds(22, 8, 21),
          nop_i()),
         (0x270, 0x00, st8(22, 19), adds(23, 16, 21),
@@ -5236,7 +5243,7 @@ test_long_vhpt_uncacheable_table_aborts_to_dtlb_miss = require_registers(
         (0x30, *movl_mlx(18, 0x0010000004000661)),
         (0x40, *movl_mlx(19, 0x230)),
         (0x50, *movl_mlx(20, LONG_VHPT_RID2_TAG)),
-        (0x60, *movl_mlx(21, 0x100040)),
+        (0x60, *movl_mlx(21, IA64_FW_IDENTITY_BASE + 0x40)),
         (0x70, 0x00, st8(21, 18), adds(22, 8, 21),
          nop_i()),
         (0x80, 0x00, st8(22, 19), adds(23, 16, 21),
@@ -5244,7 +5251,7 @@ test_long_vhpt_uncacheable_table_aborts_to_dtlb_miss = require_registers(
         (0x90, 0x00, st8(23, 20), nop_i(),
          nop_i()),
         (0xa0, *movl_mlx(24, 0xc000000000100000)),
-        (0xb0, *movl_mlx(25, 0x100671)),
+        (0xb0, *movl_mlx(25, IA64_FW_IDENTITY_BASE | 0x671)),
         (0xc0, 0x00, adds(7, 0x38, 0), nop_i(),
          nop_i()),
         (0xd0, 0x00, mov_m_gr_cr(24, 20), nop_i(),
@@ -5923,29 +5930,29 @@ test_region6_processor_interrupt_block_xtp_store = require_registers(
 
 test_firmware_identity_under_translation = require_registers(
     "firmware_identity_under_translation", [
-        (0x10, *movl_mlx(2, 0x130000)),
+        (0x10, *movl_mlx(2, IA64_FW_IDENTITY_BASE + 0x30000)),
         (0x20, *movl_mlx(3, IA64_FIRMWARE_IVT_BASE)),
         (0x30, 0x00, mov_m_gr_cr(3, 2), nop_i(),
          nop_i()),
         (0x40, *movl_mlx(19, (1 << 17) | (1 << 36))),
         (0x50, 0x10, mov_gr_psr_full(19), nop_i(),
-         br_cond(0x50, 0x100000)),
-        (0x100000, 0x00, ld8(31, 2), nop_i(),
+         br_cond(0x50, IA64_FW_IDENTITY_BASE)),
+        (IA64_FW_IDENTITY_BASE, 0x00, ld8(31, 2), nop_i(),
          nop_i()),
-        (0x100010, 0x10, nop_m(), nop_i(),
-         br_cond(0x100010, 0x100010)),
-        (0x130000, 0x00, 0x1122334455667788, 0,
+        (IA64_FW_IDENTITY_BASE + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FW_IDENTITY_BASE + 0x10, IA64_FW_IDENTITY_BASE + 0x10)),
+        (IA64_FW_IDENTITY_BASE + 0x30000, 0x00, 0x1122334455667788, 0,
          0),
     ], {
-        "ip": 0x100010,
+        "ip": IA64_FW_IDENTITY_BASE + 0x10,
         "exception": IA64_EXCP_NONE,
         "r31": FW_IDENTITY_DATA,
     }, entry=0x10)
 
 test_firmware_identity_ends_after_iva_handoff = require_registers(
     "firmware_identity_ends_after_iva_handoff", [
-        *dtr_setup_bundles(0x10, 0x130000, 0x4130000),
-        (0x70, *movl_mlx(3, 0x130000)),
+        *dtr_setup_bundles(0x10, IA64_FW_IDENTITY_BASE + 0x30000, 0x4000000 + IA64_FW_IDENTITY_BASE + 0x30000),
+        (0x70, *movl_mlx(3, IA64_FW_IDENTITY_BASE + 0x30000)),
         (0x80, 0x00, ssm(1 << 17), nop_i(),
          nop_i()),
         (0x90, 0x08, ld8(30, 3), nop_i(),
@@ -5957,9 +5964,9 @@ test_firmware_identity_ends_after_iva_handoff = require_registers(
          nop_i()),
         (0xd0, 0x10, nop_m(), nop_i(),
          br_cond(0xd0, 0xd0)),
-        (0x130000, 0x00, 0x1122334455667788, 0,
+        (IA64_FW_IDENTITY_BASE + 0x30000, 0x00, 0x1122334455667788, 0,
          0),
-        (0x4130000, 0x00, 0x8877665544332211, 0,
+        (0x4000000 + IA64_FW_IDENTITY_BASE + 0x30000, 0x00, 0x8877665544332211, 0,
          0),
     ], {
         "ip": 0xd0,
@@ -5970,21 +5977,21 @@ test_firmware_identity_ends_after_iva_handoff = require_registers(
 
 test_firmware_runtime_identity_after_iva_handoff = require_registers(
     "firmware_runtime_identity_after_iva_handoff", [
-        (0x10, *movl_mlx(2, 0x130000)),
+        (0x10, *movl_mlx(2, IA64_FW_IDENTITY_BASE + 0x30000)),
         (0x20, *movl_mlx(3, 0x4000000)),
         (0x30, 0x00, mov_m_gr_cr(3, 2), nop_i(),
          nop_i()),
         (0x40, *movl_mlx(19, (1 << 17) | (1 << 36))),
         (0x50, 0x10, mov_gr_psr_full(19), nop_i(),
-         br_cond(0x50, 0x100000)),
-        (0x100000, 0x00, ld8(31, 2), nop_i(),
+         br_cond(0x50, IA64_FW_IDENTITY_BASE)),
+        (IA64_FW_IDENTITY_BASE, 0x00, ld8(31, 2), nop_i(),
          nop_i()),
-        (0x100010, 0x10, nop_m(), nop_i(),
-         br_cond(0x100010, 0x100010)),
-        (0x130000, 0x00, 0x1122334455667788, 0,
+        (IA64_FW_IDENTITY_BASE + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FW_IDENTITY_BASE + 0x10, IA64_FW_IDENTITY_BASE + 0x10)),
+        (IA64_FW_IDENTITY_BASE + 0x30000, 0x00, 0x1122334455667788, 0,
          0),
     ], {
-        "ip": 0x100010,
+        "ip": IA64_FW_IDENTITY_BASE + 0x10,
         "exception": IA64_EXCP_NONE,
         "r31": FW_IDENTITY_DATA,
     }, entry=0x10)
@@ -6032,12 +6039,12 @@ test_rfi_restores_translation_bits = require_registers(
         (0x10, *movl_mlx(19, (1 << 17) | (1 << 27) | (1 << 36))),
         (0x20, *movl_mlx(20, 0x70)),
         (0x30, 0x10, mov_gr_psr_full(19), nop_i(),
-         br_cond(0x30, 0x100000)),
-        (0x100000, 0x00, mov_m_gr_cr(0, 16), nop_i(),
+         br_cond(0x30, IA64_FW_IDENTITY_BASE)),
+        (IA64_FW_IDENTITY_BASE, 0x00, mov_m_gr_cr(0, 16), nop_i(),
          nop_i()),
-        (0x100010, 0x00, mov_m_gr_cr(20, 19), nop_i(),
+        (IA64_FW_IDENTITY_BASE + 0x10, 0x00, mov_m_gr_cr(20, 19), nop_i(),
          nop_i()),
-        (0x100020, 0x10, mov_m_gr_cr(0, 23), nop_i(),
+        (IA64_FW_IDENTITY_BASE + 0x20, 0x10, mov_m_gr_cr(0, 23), nop_i(),
          rfi_b()),
         (0x70, 0x00, mov_m_psr_gr(31), nop_i(),
          nop_i()),
